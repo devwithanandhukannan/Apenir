@@ -1,0 +1,16 @@
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.log
+*.db
+*.dll
+*.exe
+.env
+
+# Rider
+.idea/
+
+# Visual Studio Code
+.vscode/

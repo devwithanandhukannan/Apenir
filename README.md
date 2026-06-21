@@ -1,2 +1,4 @@
 # Apenir
-MediLab is a SaaS (Software as a Service) medical lab booking platform that allows patients to book lab tests online or via WhatsApp, and enables diagnostic labs to manage bookings, workers, and test results digitally.
+Apenir is the backend skeleton for a medical lab booking platform — a .NET 10 solution scaffold (API, Core, Application, Infrastructure, Shared, tests).
+
+This repository contains the initial project structure and developer guides (branching, commit style, and workflow) to get started.
