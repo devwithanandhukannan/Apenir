@@ -7,5 +7,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Apenir.Application\Apenir.Application.csproj" />
+    <ProjectReference Include="..\Apenir.Infrastructure\Apenir.Infrastructure.csproj" />
   </ItemGroup>
 </Project>
