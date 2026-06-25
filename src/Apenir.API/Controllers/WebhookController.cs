@@ -3,7 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 namespace Apenir.API.Controllers
 {
     [ApiController]
-    [Route("webhook")] // Matches the '/webhook' route from your Express app
+     [Route("api/[controller]")]
     public class WebhookController : ControllerBase
     {
         // Replace this with your actual environment variable or configuration string
