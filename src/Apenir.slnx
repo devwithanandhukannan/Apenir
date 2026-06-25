@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="Apenir.API/Apenir.API.csproj" />
+  <Project Path="Apenir.Application/Apenir.Application.csproj" />
+  <Project Path="Apenir.Core/Apenir.Core.csproj" />
+  <Project Path="Apenir.Infrastructure/Apenir.Infrastructure.csproj" />
+</Solution>
