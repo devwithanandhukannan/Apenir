@@ -19,7 +19,7 @@ pipeline {
                 echo 'Building production image for Intel/AMD64 target instance...'
                 
                 withCredentials([usernamePassword(credentialsId: 'docker-hub-credentials', usernameVariable: 'USER', passwordVariable: 'PASS')]) {
-                    sh "echo \${PASS} | docker login -u \${USER} --password-stdin"
+                    sh "echo \Official PASS | docker login -u \${USER} --password-stdin"
                     
                     // Crucial flag: --platform linux/amd64 compiles it cleanly for your EC2 instance from your M1 Mac
                     sh "docker build --platform linux/amd64 -t \${DOCKER_HUB_USER}/\${IMAGE_NAME}:latest ."
@@ -35,15 +35,15 @@ pipeline {
                 withCredentials([sshUserPrivateKey(credentialsId: 'ec2-ssh-key', keyFileVariable: 'KEY_FILE')]) {
                     sh """
                     ssh -o StrictHostKeyChecking=no -i \${KEY_FILE} ec2-user@\${EC2_PUBLIC_IP} '
-                        # Pull down your fresh image
-                        docker pull \${DOCKER_HUB_USER}/\${IMAGE_NAME}:latest
+                        # Pull down your fresh image from registry
+                        docker pull kneazllle/apenir-backend:latest
                         
                         # Tear down the old app container gracefully if it exists
                         docker stop dotnet-app || true
                         docker rm dotnet-app || true
                         
                         # Spin up your fresh container on port 80 mapping to Kestrel port 8080
-                        docker run -d --name dotnet-app -p 80:8080 \${DOCKER_HUB_USER}/\${IMAGE_NAME}:latest
+                        docker run -d --name dotnet-app -p 80:8080 kneazllle/apenir-backend:latest
                     '
                     """
                 }
