@@ -19,7 +19,7 @@ pipeline {
                 echo 'Building production image for Intel/AMD64 target instance...'
                 
                 withCredentials([usernamePassword(credentialsId: 'docker-hub-credentials', usernameVariable: 'USER', passwordVariable: 'PASS')]) {
-                    sh "echo \Official PASS | docker login -u \${USER} --password-stdin"
+                    sh "echo \${PASS} | docker login -u \${USER} --password-stdin"
                     
                     // Crucial flag: --platform linux/amd64 compiles it cleanly for your EC2 instance from your M1 Mac
                     sh "docker build --platform linux/amd64 -t \${DOCKER_HUB_USER}/\${IMAGE_NAME}:latest ."
