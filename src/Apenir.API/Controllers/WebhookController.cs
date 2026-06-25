@@ -1,18 +1,23 @@
 using Microsoft.AspNetCore.Mvc;
+using System.Text;
 using System.Text.Json;
+using System.Net.Http.Headers;
 
 namespace YourProjectNamespace.Controllers
 {
     [ApiController]
-    [Route("api/[controller]")] // This makes the URL: /api/webhook
+    [Route("api/[controller]")] 
     public class WebhookController : ControllerBase
     {
-        // Define a secret token. This MUST match exactly what you type into the Meta Dashboard.
         private const string VerifyToken = "MySuperSecretToken123";
+        
+        // TODO: Replace with your actual Phone Number ID and System User Access Token from Meta
+        private const string MetaPhoneId = "1198940716632437";
+        private const string MetaAccessToken = "EAASkQDqaY3wBR6N03AbkTtsN6XTCPA93DfOtZCECnQVRgT245wWNC5KyEKjH4FprQuUwAEoDl3lSmxd5XUrImzHkBDQZBcspZC9PnrUL3UmoXafqkiQyk3YEg0U6VAFwSvtnmuwaHAFx2R6nqvNpLNny9LIVGM1YqvGWe5yMDUT1cqd3GlOHnYPZCDPOnS3b716yIA5d3DuG3JrZBffLG1zXdEnrxttyTux0n0kkATerMGKKXVP1L8Nh0HAhj8Qje2Ik8ffPFK9esvWaEpmZBQQQo2";
 
         /// <summary>
         /// 1. THE HANDSHAKE (GET)
-        /// Meta hits this once to verify your server exists.
+        /// Verified successfully over api.anandhu-kannan.in via Cloudflare.
         /// </summary>
         [HttpGet]
         public IActionResult VerifyWebhook(
@@ -23,20 +28,19 @@ namespace YourProjectNamespace.Controllers
             if (mode == "subscribe" && token == VerifyToken)
             {
                 Console.WriteLine("✅ Webhook verified successfully by Meta!");
-                return Ok(challenge); // You must return plain text containing just the challenge string
+                return Ok(challenge);
             }
 
-            return Forbid(); // Return 403 if token mismatch
+            return Forbid();
         }
 
         /// <summary>
         /// 2. LIVE MESSAGES (POST)
-        /// WhatsApp hits this every time a customer sends a text or clicks a button.
+        /// Processes messages and button responses in real-time.
         /// </summary>
         [HttpPost]
         public async Task<IActionResult> ReceiveMessage()
         {
-            // Read the raw JSON from the incoming body
             using var reader = new StreamReader(Request.Body);
             string jsonString = await reader.ReadToEndAsync();
 
@@ -45,7 +49,6 @@ namespace YourProjectNamespace.Controllers
                 using JsonDocument doc = JsonDocument.Parse(jsonString);
                 JsonElement root = doc.RootElement;
 
-                // Safely drill down to check if this is a WhatsApp message array
                 if (root.TryGetProperty("object", out var objElement) && objElement.GetString() == "whatsapp_business_account")
                 {
                     var entry = root.GetProperty("entry")[0];
@@ -58,25 +61,42 @@ namespace YourProjectNamespace.Controllers
                         string fromNumber = firstMessage.GetProperty("from").GetString();
                         string messageType = firstMessage.GetProperty("type").GetString();
 
-                        Console.WriteLine($"📩 Inbound Message Received from: {fromNumber}");
+                        Console.WriteLine($"📩 Inbound Message Received from: {fromNumber} | Type: {messageType}");
 
-                        // CASE 1: Standard Text Message
+                        // CASE 1: Incoming Text (User says "Hi")
                         if (messageType == "text")
                         {
                             string textBody = firstMessage.GetProperty("text").GetProperty("body").GetString();
                             Console.WriteLine($"Text: {textBody}");
 
-                            // 💡 TODO: Pass textBody to your Booking Engine logic here!
+                            if (textBody.Equals("Hi", StringComparison.OrdinalIgnoreCase) || textBody.Equals("Hello", StringComparison.OrdinalIgnoreCase))
+                            {
+                                // Trigger the automated reply menu buttons
+                                await SendWelcomeButtonsAsync(fromNumber);
+                            }
                         }
 
-                        // CASE 2: User Clicked a Template/Interactive Button
+                        // CASE 2: Incoming Button Click Response
                         else if (messageType == "interactive")
                         {
                             var interactive = firstMessage.GetProperty("interactive");
-                            string buttonId = interactive.GetProperty("button_reply").GetProperty("id").GetString();
-                            Console.WriteLine($"Button ID Clicked: {buttonId}");
+                            
+                            if (interactive.TryGetProperty("button_reply", out var buttonReply))
+                            {
+                                string buttonId = buttonReply.GetProperty("id").GetString();
+                                Console.WriteLine($"Button ID Clicked: {buttonId}");
 
-                            // 💡 TODO: Process their booking choice (e.g., slot time selected)
+                                if (buttonId == "btn_booking")
+                                {
+                                    // User tapped "Book a Slot" -> Send them the interactive availability slots list!
+                                    await SendAvailableSlotsListAsync(fromNumber);
+                                }
+                                else if (buttonId == "btn_enquiry")
+                                {
+                                    // User tapped "General Enquiry" -> Ask for their question
+                                    await SendTextMessageAsync(fromNumber, "Please type out your question, and our team will get back to you shortly!");
+                                }
+                            }
                         }
                     }
                 }
@@ -86,8 +106,40 @@ namespace YourProjectNamespace.Controllers
                 Console.WriteLine($"❌ Error parsing json: {ex.Message}");
             }
 
-            // Always return 200 OK fast so WhatsApp doesn't continuously retry sending the same message
             return Ok();
         }
-    }
-}
+
+        #region Outbound Meta API Integrations
+
+        private async Task SendWelcomeButtonsAsync(string toPhoneNumber)
+        {
+            using var client = new HttpClient();
+            string url = $"https://graph.facebook.com/v25.0/{MetaPhoneId}/messages";
+            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MetaAccessToken);
+
+            var payload = new
+            {
+                messaging_product = "whatsapp",
+                recipient_type = "individual",
+                to = toPhoneNumber,
+                type = "interactive",
+                interactive = new
+                {
+                    type = "button",
+                    body = new { text = "Welcome! How can we assist you today? Please choose an option below to proceed." },
+                    action = new
+                    {
+                        buttons = new[]
+                        {
+                            new { type = "reply", reply = new { id = "btn_booking", title = "Book a Slot 📅" } },
+                            new { type = "reply", reply = new { id = "btn_enquiry", title = "General Enquiry 💬" } }
+                        }
+                    }
+                }
+            };
+
+            string jsonPayload = JsonSerializer.Serialize(payload);
+            var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
+
+            var response = await client.PostAsync(url, content);
+            if (!response.IsSuccess
