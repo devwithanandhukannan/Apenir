@@ -1,17 +1,17 @@
 using Microsoft.AspNetCore.Mvc;
+using System.IO;
+using System.Threading.Tasks;
 
 namespace Apenir.API.Controllers
 {
     [ApiController]
-     [Route("api/[controller]")]
+    [Route("api/webhook")]   // IMPORTANT: matches Meta URL
     public class WebhookController : ControllerBase
     {
-        // Replace this with your actual environment variable or configuration string
         private const string WebhookVerifyToken = "MySuperSecretToken123";
 
         /// <summary>
-        /// GET /webhook
-        /// Handles the validation handshake from Meta.
+        /// Meta webhook verification (GET)
         /// </summary>
         [HttpGet]
         public IActionResult VerifyWebhook(
@@ -19,34 +19,32 @@ namespace Apenir.API.Controllers
             [FromQuery(Name = "hub.verify_token")] string token,
             [FromQuery(Name = "hub.challenge")] string challenge)
         {
-            // Translates: if (mode && token === WEBHOOK_VERIFY_TOKEN)
+            Console.WriteLine("🔐 Webhook verification request received");
+
             if (!string.IsNullOrEmpty(mode) && token == WebhookVerifyToken)
             {
-                // Translates: res.status(200).send(challenge)
-                return Ok(challenge);
+                Console.WriteLine("✅ Webhook verified successfully");
+                return Content(challenge, "text/plain"); // IMPORTANT
             }
 
-            // Translates: res.sendStatus(403)
+            Console.WriteLine("❌ Webhook verification failed");
             return Forbid();
         }
 
         /// <summary>
-        /// POST /webhook
-        /// Catches and logs all incoming webhook payload event data.
+        /// Meta webhook event receiver (POST)
         /// </summary>
         [HttpPost]
         public async Task<IActionResult> ReceiveMessage()
         {
-            Console.WriteLine("disco disco");
-            // Translates reading the body stream directly to capture arbitrary JSON
+            Console.WriteLine("📥 Incoming WhatsApp webhook hit");
+
             using var reader = new StreamReader(Request.Body);
             string jsonBody = await reader.ReadToEndAsync();
 
-            // Translates: console.log(JSON.stringify(req.body, null, 2))
-            Console.WriteLine("📥 Received Webhook Payload:");
+            Console.WriteLine("📦 Payload:");
             Console.WriteLine(jsonBody);
 
-            // Translates: res.status(200).send('Webhook processed')
             return Ok("Webhook processed");
         }
     }
