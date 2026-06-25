@@ -42,7 +42,7 @@ pipeline {
                         docker stop dotnet-app || true
                         docker rm dotnet-app || true
                         
-                        # Spin up your fresh container on port 80 (mapping to Kestrel's default 8080)
+                        # Spin up your fresh container on port 80 mapping to Kestrel port 8080
                         docker run -d --name dotnet-app -p 80:8080 \${DOCKER_HUB_USER}/\${IMAGE_NAME}:latest
                     '
                     """
