@@ -11,13 +11,13 @@ namespace Apenir.API.Controllers
     {
         private const string VerifyToken = "MySuperSecretToken123";
         
-        // 🛠️ Updated to the active Meta Test Environment credentials
+        // Meta Test Environment Credentials
         private const string MetaPhoneId = "1198940716632437"; 
         private const string MetaAccessToken = "EAASkQDqaY3wBR6N03AbkTtsN6XTCPA93DfOtZCECnQVRgT245wWNC5KyEKjH4FprQuUwAEoDl3lSmxd5XUrImzHkBDQZBcspZC9PnrUL3UmoXafqkiQyk3YEg0U6VAFwSvtnmuwaHAFx2R6nqvNpLNny9LIVGM1YqvGWe5yMDUT1cqd3GlOHnYPZCDPOnS3b716yIA5d3DuG3JrZBffLG1zXdEnrxttyTux0n0kkATerMGKKXVP1L8Nh0HAhj8Qje2Ik8ffPFK9esvWaEpmZBQQQo2";
 
         /// <summary>
         /// 1. THE HANDSHAKE (GET)
-        /// Verified successfully over api.anandhu-kannan.in via Cloudflare.
+        /// Validates your server endpoint connection inside the Meta Dashboard.
         /// </summary>
         [HttpGet]
         public IActionResult VerifyWebhook(
@@ -36,7 +36,7 @@ namespace Apenir.API.Controllers
 
         /// <summary>
         /// 2. LIVE MESSAGES (POST)
-        /// Processes incoming texts from verified test numbers.
+        /// Catches incoming messages from Meta and triggers the auto-reply.
         /// </summary>
         [HttpPost]
         public async Task<IActionResult> ReceiveMessage()
@@ -65,31 +65,15 @@ namespace Apenir.API.Controllers
 
                         if (messageType == "text")
                         {
-                            string textBody = firstMessage.GetProperty("text").GetProperty("body").GetString();
-                            Console.WriteLine($"Text: {textBody}");
+                            string textBody = firstMessage.GetProperty("text").GetProperty("body").GetString()?.Trim();
+                            Console.WriteLine($"Text Body: {textBody}");
 
-                            if (textBody.Equals("Hi", StringComparison.OrdinalIgnoreCase) || textBody.Equals("Hello", StringComparison.OrdinalIgnoreCase))
+                            // Match "Hi" or "Hello" case-insensitively
+                            if (textBody.Equals("Hi", StringComparison.OrdinalIgnoreCase) || 
+                                textBody.Equals("Hello", StringComparison.OrdinalIgnoreCase))
                             {
-                                await SendWelcomeButtonsAsync(fromNumber);
-                            }
-                        }
-                        else if (messageType == "interactive")
-                        {
-                            var interactive = firstMessage.GetProperty("interactive");
-                            
-                            if (interactive.TryGetProperty("button_reply", out var buttonReply))
-                            {
-                                string buttonId = buttonReply.GetProperty("id").GetString();
-                                Console.WriteLine($"Button ID Clicked: {buttonId}");
-
-                                if (buttonId == "btn_booking")
-                                {
-                                    await SendAvailableSlotsListAsync(fromNumber);
-                                }
-                                else if (buttonId == "btn_enquiry")
-                                {
-                                    await SendTextMessageAsync(fromNumber, "Please type out your question, and our team will get back to you shortly!");
-                                }
+                                // Send direct response back to the user
+                                await SendTextMessageAsync(fromNumber, "Hi, Welcome!");
                             }
                         }
                     }
@@ -100,114 +84,42 @@ namespace Apenir.API.Controllers
                 Console.WriteLine($"❌ Error parsing json: {ex.Message}");
             }
 
-            return Ok();
+            return Ok(); // Always return 200 OK to Meta
         }
 
         #region Outbound Meta API Integrations
 
-        private async Task SendWelcomeButtonsAsync(string toPhoneNumber)
+        /// <summary>
+        /// Sends a direct plain-text message back to the sender via Meta Graph API.
+        /// </summary>
+        private async Task SendTextMessageAsync(string toPhoneNumber, string messageText)
         {
             using var client = new HttpClient();
-            string url = $"https://graph.facebook.com/v25.0/{MetaPhoneId}/messages";
+            string url = $"https://facebook.com{MetaPhoneId}/messages";
             client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MetaAccessToken);
 
             var payload = new
             {
                 messaging_product = "whatsapp",
                 recipient_type = "individual",
-                to = toPhoneNumber,
-                type = "interactive",
-                interactive = new
-                {
-                    type = "button",
-                    body = new { text = "Welcome! How can we assist you today? Please choose an option below to proceed." },
-                    action = new
-                    {
-                        buttons = new[]
-                        {
-                            new { type = "reply", reply = new { id = "btn_booking", title = "Book a Slot 📅" } },
-                            new { type = "reply", reply = new { id = "btn_enquiry", title = "General Enquiry 💬" } }
-                        }
-                    }
-                }
-            };
-
-            string jsonPayload = JsonSerializer.Serialize(payload);
-            var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
-
-            var response = await client.PostAsync(url, content);
-            if (!response.IsSuccessStatusCode)
-            {
-                string error = await response.Content.ReadAsStringAsync();
-                Console.WriteLine($"❌ Error sending Welcome Buttons: {error}");
-            }
-        }
-
-        private async Task SendAvailableSlotsListAsync(string toPhoneNumber)
-        {
-            using var client = new HttpClient();
-            string url = $"https://graph.facebook.com/v25.0/{MetaPhoneId}/messages";
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MetaAccessToken);
-
-            var payload = new
-            {
-                messaging_product = "whatsapp",
-                recipient_type = "individual",
-                to = toPhoneNumber,
-                type = "interactive",
-                interactive = new
-                {
-                    type = "list",
-                    header = new { type = "text", text = "Available Booking Slots" },
-                    body = new { text = "Please select a preferred execution slot below to proceed to checkout." },
-                    footer = new { text = "All time frames are in IST." },
-                    action = new
-                    {
-                        button = "Choose Time",
-                        sections = new[]
-                        {
-                            new
-                            {
-                                title = "Slots for Today",
-                                rows = new[]
-                                {
-                                    new { id = "slot_10am", title = "10:00 AM", description = "Morning Premium Slot" },
-                                    new { id = "slot_03pm", title = "03:00 PM", description = "Afternoon Standard Slot" }
-                                }
-                            }
-                        }
-                    }
-                }
-            };
-
-            string jsonPayload = JsonSerializer.Serialize(payload);
-            var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
-
-            var response = await client.PostAsync(url, content);
-            if (!response.IsSuccessStatusCode)
-            {
-                string error = await response.Content.ReadAsStringAsync();
-                Console.WriteLine($"❌ Error sending Slots List: {error}");
-            }
-        }
-
-        private async Task SendTextMessageAsync(string toPhoneNumber, string textMessage)
-        {
-            using var client = new HttpClient();
-            string url = $"https://graph.facebook.com/v25.0/{MetaPhoneId}/messages";
-            client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", MetaAccessToken);
-
-            var payload = new
-            {
-                messaging_product = "whatsapp",
                 to = toPhoneNumber,
                 type = "text",
-                text = new { body = textMessage }
+                text = new { body = messageText }
             };
 
             string jsonPayload = JsonSerializer.Serialize(payload);
             var content = new StringContent(jsonPayload, Encoding.UTF8, "application/json");
-            await client.PostAsync(url, content);
+
+            var response = await client.PostAsync(url, content);
+            if (!response.IsSuccessStatusCode)
+            {
+                string error = await response.Content.ReadAsStringAsync();
+                Console.WriteLine($"❌ Error sending Text Message: {error}");
+            }
+            else
+            {
+                Console.WriteLine($"✅ Successfully replied to {toPhoneNumber}");
+            }
         }
 
         #endregion
