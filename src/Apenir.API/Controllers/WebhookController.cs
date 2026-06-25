@@ -37,6 +37,7 @@ namespace Apenir.API.Controllers
         [HttpPost]
         public async Task<IActionResult> ReceiveMessage()
         {
+            Console.WriteLine("disco disco");
             // Translates reading the body stream directly to capture arbitrary JSON
             using var reader = new StreamReader(Request.Body);
             string jsonBody = await reader.ReadToEndAsync();
