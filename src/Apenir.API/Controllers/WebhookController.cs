@@ -86,7 +86,7 @@ namespace Apenir.API.Controllers
         private const string VERIFY_TOKEN = "MySuperSecretToken123";
         private const string WA_API_VERSION = "v25.0";
         private const string PHONE_NUMBER_ID = "1198940716632437";
-        private const string ACCESS_TOKEN = "EAAOLfrg5aQcBRxBOf5iIvplpEeWST5E7ZAGXXfydZAZBZAcMM4G8hFsBa1xdiTNLZB7JfkZB7ICzqZBTepiZCyJZBFk38hZBaWuuTH39GLJzyyC7AWgk2jiR4SZCJZAXK0DTHuZAuA3kY0HCZA6tAVyL0LkZBie9TFQ52XA75nvz9e9R8kTEHOILpa5juCbeCS31U1b8JomQP9d9bByyZAqDnqmGxdSRYCvjoRzEdoqyk2V9hVf7OiHefcHXZA7ZAtv2KHYavflyxjjZB8v8JdZAzi1KNXZCaSPfuNfjg9svbOzucjAqPZCAZDZD";
+        private const string ACCESS_TOKEN = "EAAOLfrg5aQcBR6rZAn4kZCqpXJM5BvvJ7KtSSyuqMVxWNwHCM4pRGkN9ZCk36yiYz2JmOPyaagbKXebQ5rYmg0aRON9BQFg8BI9oC30dQkFIIoMQIIkai4JqNtTZCZA6M7mNQbE4MQhXed9QJmBw5t0zC70MdK0GeaNv94L2sc2IATTTHzSdAAmB2S85eno85i8ykizpoCbZCqbZCZAaVXmpFe3rymd2eu9CLhmCfuf6IzXJDq0RZA1tDGY4fm9znXqs1YKAx0SH5UOlyZAWY021ZBdavWuPXZCB3mt6sf4ZBpQZDZD";
 
         // In-memory session store (use Redis/DB in production)
         private static readonly ConcurrentDictionary<string, BookingSession> Sessions = new();

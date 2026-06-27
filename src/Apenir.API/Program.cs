@@ -19,7 +19,7 @@ app.Use(async (context, next) =>
 
 app.MapGet("/", () => Results.Ok(new
 {
-    Status = "WhatsApp Webhook API Running"
+    Status = "WhatsApp Webhook API Running v2"
 }));
 
 app.MapControllers();
