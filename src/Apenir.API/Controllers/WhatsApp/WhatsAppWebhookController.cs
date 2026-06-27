@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using System;
 using System.IO;
 using System.Net.Http;
@@ -14,6 +15,9 @@ using Apenir.Core.Enums;
 
 namespace Apenir.API.Controllers
 {
+    // ===================================================
+    // Hardcoded demo data
+    // ===================================================
     public static class DemoData
     {
         public static readonly Dictionary<string, List<Lab>> LabsByCity = new()
@@ -69,18 +73,20 @@ namespace Apenir.API.Controllers
     [Route("api/whatsapp/webhook")]
     public class WebhookController : ControllerBase
     {
-        private const string VERIFY_TOKEN = "MySuperSecretToken123";
-        private const string WA_API_VERSION = "v25.0";
-        private const string PHONE_NUMBER_ID = "1198940716632437";
-        private const string ACCESS_TOKEN = "EAAOLfrg5aQcBR6rZAn4kZCqpXJM5BvvJ7KtSSyuqMVxWNwHCM4pRGkN9ZCk36yiYz2JmOPyaagbKXebQ5rYmg0aRON9BQFg8BI9oC30dQkFIIoMQIIkai4JqNtTZCZA6M7mNQbE4MQhXed9QJmBw5t0zC70MdK0GeaNv94L2sc2IATTTHzSdAAmB2S85eno85i8ykizpoCbZCqbZCZAaVXmpFe3rymd2eu9CLhmCfuf6IzXJDq0RZA1tDGY4fm9znXqs1YKAx0SH5UOlyZAWY021ZBdavWuPXZCB3mt6sf4ZBpQZDZD";
+        private const string DEFAULT_VERIFY_TOKEN = "MySuperSecretToken123";
+        private const string DEFAULT_WA_API_VERSION = "v25.0";
+        private const string DEFAULT_PHONE_NUMBER_ID = "1198940716632437";
+        private const string DEFAULT_ACCESS_TOKEN = "EAAOLfrg5aQcBRxBOf5iIvplpEeWST5E7ZAGXXfydZAZBZAcMM4G8hFsBa1xdiTNLZB7JfkZB7ICzqZBTepiZCyJZBFk38hZBaWuuTH39GLJzyyC7AWgk2jiR4SZCJZAXK0DTHuZAuA3kY0HCZA6tAVyL0LkZBie9TFQ52XA75nvz9e9R8kTEHOILpa5juCbeCS31U1b8JomQP9d9bByyZAqDnqmGxdSRYCvjoRzEdoqyk2V9hVf7OiHefcHXZA7ZAtv2KHYavflyxjjZB8v8JdZAzi1KNXZCaSPfuNfjg9svbOzucjAqPZCAZDZD";
 
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IApplicationDbContext _context;
+        private readonly IConfiguration _configuration;
 
-        public WebhookController(IHttpClientFactory httpClientFactory, IApplicationDbContext context)
+        public WebhookController(IHttpClientFactory httpClientFactory, IApplicationDbContext context, IConfiguration configuration)
         {
             _httpClientFactory = httpClientFactory;
             _context = context;
+            _configuration = configuration;
         }
 
         // ===================================================
@@ -99,13 +105,15 @@ namespace Apenir.API.Controllers
             Console.WriteLine($"Token     : {token}");
             Console.WriteLine($"Challenge : {challenge}");
 
-            if (mode == "subscribe" && token == VERIFY_TOKEN)
+            var verifyToken = _configuration["WhatsApp:VerifyToken"] ?? DEFAULT_VERIFY_TOKEN;
+
+            if (mode == "subscribe" && token == verifyToken)
             {
-                Console.WriteLine("Verification Successful");
+                Console.WriteLine("✅ Verification Successful");
                 return Content(challenge, "text/plain");
             }
 
-            Console.WriteLine("Verification Failed");
+            Console.WriteLine("❌ Verification Failed");
             return StatusCode(403);
         }
 
@@ -675,12 +683,16 @@ namespace Apenir.API.Controllers
         {
             try
             {
+                var accessToken = _configuration["WhatsApp:AccessToken"] ?? DEFAULT_ACCESS_TOKEN;
+                var phoneNumberId = _configuration["WhatsApp:PhoneNumberId"] ?? DEFAULT_PHONE_NUMBER_ID;
+                var apiVersion = _configuration["WhatsApp:ApiVersion"] ?? DEFAULT_WA_API_VERSION;
+
                 var client = _httpClientFactory.CreateClient();
-                var url = $"https://graph.facebook.com/{WA_API_VERSION}/{PHONE_NUMBER_ID}/messages";
+                var url = $"https://graph.facebook.com/{apiVersion}/{phoneNumberId}/messages";
                 var json = JsonSerializer.Serialize(payload);
                 var content = new StringContent(json, Encoding.UTF8, "application/json");
                 client.DefaultRequestHeaders.Authorization =
-                    new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", ACCESS_TOKEN);
+                    new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
 
                 Console.WriteLine($"📤 Sending to {url}");
                 Console.WriteLine(json);
