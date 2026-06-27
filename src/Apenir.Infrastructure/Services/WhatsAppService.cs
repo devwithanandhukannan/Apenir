@@ -58,7 +58,7 @@ public class WhatsAppService : IWhatsAppService
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[META WHATSAPP SERVICE] ❌ Exception: {ex.Message}");
+            Console.WriteLine($"[META WHATSAPP SERVICE] Exception: {ex.Message}");
         }
     }
 

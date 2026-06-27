@@ -1,6 +1,6 @@
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Configuration; // env 
+using Microsoft.Extensions.DependencyInjection; // This gives access to methods like services.AddScoped(...)
 using Apenir.Core.Interfaces;
 using Apenir.Infrastructure.Data;
 using Apenir.Infrastructure.Services;

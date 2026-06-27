@@ -49,7 +49,7 @@ public class AuthController : ControllerBase
 
         _context.OtpCodes.Add(otpEntry);
         await _context.SaveChangesAsync();
-
+        //send whatsapp sms
         await _whatsappService.SendTextMessageAsync(request.Phone, $"Your LabBook OTP is: {otp}. Valid for 5 minutes.");
 
         return Ok(new { message = "OTP_SENT" });
