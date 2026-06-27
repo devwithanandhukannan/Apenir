@@ -1,33 +1,19 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using System;
 using System.IO;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
 using System.Collections.Generic;
-using System.Collections.Concurrent;
+using System.Linq;
+using Apenir.Core.Interfaces;
+using Apenir.Core.Entities;
+using Apenir.Core.Enums;
 
 namespace Apenir.API.Controllers
 {
-    // ===================================================
-    // In-memory session state per WhatsApp user
-    // ===================================================
-    public class BookingSession
-    {
-        public string Step { get; set; } = "greeting";
-        public string? Service { get; set; }
-        public string? City { get; set; }
-        public string? LabId { get; set; }
-        public string? LabName { get; set; }
-        public string? Slot { get; set; }
-        public int Persons { get; set; } = 1;
-        public bool LocationShared { get; set; } = false;
-        public DateTime LastActivity { get; set; } = DateTime.UtcNow;
-    }
-
-    // ===================================================
-    // Hardcoded demo data
-    // ===================================================
     public static class DemoData
     {
         public static readonly Dictionary<string, List<Lab>> LabsByCity = new()
@@ -80,7 +66,7 @@ namespace Apenir.API.Controllers
     // Controller
     // ===================================================
     [ApiController]
-    [Route("api/webhook")]
+    [Route("api/whatsapp/webhook")]
     public class WebhookController : ControllerBase
     {
         private const string VERIFY_TOKEN = "MySuperSecretToken123";
@@ -88,14 +74,13 @@ namespace Apenir.API.Controllers
         private const string PHONE_NUMBER_ID = "1198940716632437";
         private const string ACCESS_TOKEN = "EAAOLfrg5aQcBR6rZAn4kZCqpXJM5BvvJ7KtSSyuqMVxWNwHCM4pRGkN9ZCk36yiYz2JmOPyaagbKXebQ5rYmg0aRON9BQFg8BI9oC30dQkFIIoMQIIkai4JqNtTZCZA6M7mNQbE4MQhXed9QJmBw5t0zC70MdK0GeaNv94L2sc2IATTTHzSdAAmB2S85eno85i8ykizpoCbZCqbZCZAaVXmpFe3rymd2eu9CLhmCfuf6IzXJDq0RZA1tDGY4fm9znXqs1YKAx0SH5UOlyZAWY021ZBdavWuPXZCB3mt6sf4ZBpQZDZD";
 
-        // In-memory session store (use Redis/DB in production)
-        private static readonly ConcurrentDictionary<string, BookingSession> Sessions = new();
-
         private readonly IHttpClientFactory _httpClientFactory;
+        private readonly IApplicationDbContext _context;
 
-        public WebhookController(IHttpClientFactory httpClientFactory)
+        public WebhookController(IHttpClientFactory httpClientFactory, IApplicationDbContext context)
         {
             _httpClientFactory = httpClientFactory;
+            _context = context;
         }
 
         // ===================================================
@@ -116,11 +101,11 @@ namespace Apenir.API.Controllers
 
             if (mode == "subscribe" && token == VERIFY_TOKEN)
             {
-                Console.WriteLine("✅ Verification Successful");
+                Console.WriteLine("Verification Successful");
                 return Content(challenge, "text/plain");
             }
 
-            Console.WriteLine("❌ Verification Failed");
+            Console.WriteLine("Verification Failed");
             return StatusCode(403);
         }
 
@@ -158,6 +143,28 @@ namespace Apenir.API.Controllers
                             var msgType = message.GetProperty("type").GetString();
 
                             Console.WriteLine($"📩 Message from: {from} | Type: {msgType}");
+
+                            // Auto-register patient/customer if they don't exist yet
+                            var user = await _context.Users.FirstOrDefaultAsync(u => u.Phone == from);
+                            if (user == null)
+                            {
+                                Console.WriteLine($"👤 Creating new Customer user for phone {from} via WhatsApp auto-registration");
+                                user = new User
+                                {
+                                    Phone = from,
+                                    Role = UserRole.Customer
+                                };
+                                _context.Users.Add(user);
+
+                                var customer = new Customer
+                                {
+                                    UserId = user.Id,
+                                    Phone = from,
+                                    Name = "WhatsApp Customer"
+                                };
+                                _context.Customers.Add(customer);
+                                await _context.SaveChangesAsync();
+                            }
 
                             if (msgType == "text")
                             {
@@ -214,29 +221,31 @@ namespace Apenir.API.Controllers
         // ===================================================
         private async Task ProcessTextMessage(string to, string text)
         {
-            var session = GetOrCreateSession(to);
+            var session = await GetOrCreateSessionAsync(to);
             var lower = text.ToLower().Trim();
 
             // Greeting triggers — restart flow
             if (IsGreeting(lower))
             {
-                session.Step = "greeting";
+                session.CurrentState = WhatsAppState.Start;
+                await SaveSessionAsync(session);
                 await SendGreeting(to);
                 return;
             }
 
             // Step-based text input handling
-            switch (session.Step)
+            switch (session.CurrentState)
             {
-                case "greeting":
+                case WhatsAppState.Start:
                     await SendGreeting(to);
                     break;
 
-                case "awaiting_persons":
+                case WhatsAppState.MemberCount:
                     if (int.TryParse(text.Trim(), out int count) && count >= 1 && count <= 6)
                     {
-                        session.Persons = count;
-                        session.Step = "awaiting_location";
+                        session.MemberCount = count;
+                        session.CurrentState = WhatsAppState.Location;
+                        await SaveSessionAsync(session);
                         await SendLocationRequest(to);
                     }
                     else
@@ -254,12 +263,13 @@ namespace Apenir.API.Controllers
 
         private async Task ProcessLocationMessage(string to, double lat, double lng)
         {
-            var session = GetOrCreateSession(to);
+            var session = await GetOrCreateSessionAsync(to);
 
-            if (session.Step == "awaiting_location")
+            if (session.CurrentState == WhatsAppState.Location)
             {
                 session.LocationShared = true;
-                session.Step = "awaiting_payment";
+                session.CurrentState = WhatsAppState.Confirm;
+                await SaveSessionAsync(session);
 
                 var summary = BuildBookingSummary(session);
                 await SendTextMessage(to,
@@ -271,16 +281,17 @@ namespace Apenir.API.Controllers
 
         private async Task ProcessInteractiveReply(string to, string replyId, string replyTitle)
         {
-            var session = GetOrCreateSession(to);
-            Console.WriteLine($"🔀 Step: {session.Step} | Reply: {replyId}");
+            var session = await GetOrCreateSessionAsync(to);
+            Console.WriteLine($"🔀 Step: {session.CurrentState} | Reply: {replyId}");
 
-            switch (session.Step)
+            switch (session.CurrentState)
             {
                 // ── Main Menu ──────────────────────────────────────────
-                case "greeting":
+                case WhatsAppState.Start:
                     if (replyId == "menu_book")
                     {
-                        session.Step = "awaiting_service";
+                        session.CurrentState = WhatsAppState.ChoosingTest;
+                        await SaveSessionAsync(session);
                         await SendServiceList(to);
                     }
                     else if (replyId == "menu_bookings")
@@ -294,28 +305,31 @@ namespace Apenir.API.Controllers
                     break;
 
                 // ── Service Selection ──────────────────────────────────
-                case "awaiting_service":
-                    session.Service = replyId; // e.g. "service_blood"
+                case WhatsAppState.ChoosingTest:
+                    session.SelectedTestId = replyId; // e.g. "service_blood"
                     if (replyId == "service_blood")
                     {
-                        session.Step = "awaiting_city";
+                        session.CurrentState = WhatsAppState.ChoosingCity;
+                        await SaveSessionAsync(session);
                         await SendCityList(to);
                     }
                     else
                     {
                         await SendTextMessage(to, "This service is coming soon! Let's book a Blood Test for now.");
-                        session.Step = "awaiting_city";
+                        session.CurrentState = WhatsAppState.ChoosingCity;
+                        await SaveSessionAsync(session);
                         await SendCityList(to);
                     }
                     break;
 
                 // ── City Selection ─────────────────────────────────────
-                case "awaiting_city":
+                case WhatsAppState.ChoosingCity:
                     var city = replyId.Replace("city_", "");
                     if (DemoData.LabsByCity.ContainsKey(city))
                     {
-                        session.City = city;
-                        session.Step = "awaiting_lab";
+                        session.SelectedCity = city;
+                        session.CurrentState = WhatsAppState.ChoosingLab;
+                        await SaveSessionAsync(session);
                         await SendLabList(to, city);
                     }
                     else
@@ -326,29 +340,31 @@ namespace Apenir.API.Controllers
                     break;
 
                 // ── Lab Selection ──────────────────────────────────────
-                case "awaiting_lab":
+                case WhatsAppState.ChoosingLab:
                     var labId = replyId.Replace("lab_", "");
-                    var labs = DemoData.LabsByCity.GetValueOrDefault(session.City ?? "", new List<Lab>());
+                    var labs = DemoData.LabsByCity.GetValueOrDefault(session.SelectedCity ?? "", new List<Lab>());
                     var selectedLab = labs.Find(l => l.Id == labId);
                     if (selectedLab != null)
                     {
-                        session.LabId = selectedLab.Id;
-                        session.LabName = selectedLab.Name;
-                        session.Step = "awaiting_slot";
+                        session.SelectedLabId = selectedLab.Id;
+                        session.SelectedLabName = selectedLab.Name;
+                        session.CurrentState = WhatsAppState.ChoosingSlot;
+                        await SaveSessionAsync(session);
                         await SendSlotList(to, selectedLab.Name);
                     }
                     break;
 
                 // ── Slot Selection ─────────────────────────────────────
-                case "awaiting_slot":
+                case WhatsAppState.ChoosingSlot:
                     var slotTime = replyId.Replace("slot_", "").Replace("_", " ");
-                    session.Slot = slotTime;
-                    session.Step = "awaiting_persons";
+                    session.SelectedSlot = slotTime;
+                    session.CurrentState = WhatsAppState.MemberCount;
+                    await SaveSessionAsync(session);
                     await SendPersonCountPrompt(to);
                     break;
 
                 // ── Payment Trigger (via button) ───────────────────────
-                case "awaiting_payment":
+                case WhatsAppState.Confirm:
                     if (replyId == "pay_now")
                     {
                         await SimulatePayment(to, session);
@@ -356,10 +372,23 @@ namespace Apenir.API.Controllers
                     break;
 
                 // ── Post-booking ───────────────────────────────────────
-                case "confirmed":
-                    if (replyId == "menu_book") { session.Step = "awaiting_service"; await SendServiceList(to); }
-                    else if (replyId == "menu_bookings") { await SendViewBookings(to); }
-                    else { session.Step = "greeting"; await SendGreeting(to); }
+                case WhatsAppState.Done:
+                    if (replyId == "menu_book") 
+                    { 
+                        session.CurrentState = WhatsAppState.ChoosingTest; 
+                        await SaveSessionAsync(session);
+                        await SendServiceList(to); 
+                    }
+                    else if (replyId == "menu_bookings") 
+                    { 
+                        await SendViewBookings(to); 
+                    }
+                    else 
+                    { 
+                        session.CurrentState = WhatsAppState.Start; 
+                        await SaveSessionAsync(session);
+                        await SendGreeting(to); 
+                    }
                     break;
             }
         }
@@ -369,8 +398,6 @@ namespace Apenir.API.Controllers
         // ===================================================
         private async Task SendGreeting(string to)
         {
-            GetOrCreateSession(to).Step = "greeting";
-
             var payload = new
             {
                 messaging_product = "whatsapp",
@@ -552,22 +579,24 @@ namespace Apenir.API.Controllers
                 "This helps us confirm the nearest branch and arrange home sample collection if needed.");
         }
 
-        private async Task SimulatePayment(string to, BookingSession session)
+        private async Task SimulatePayment(string to, WhatsAppSession session)
         {
-            session.Step = "confirmed";
+            session.CurrentState = WhatsAppState.Done;
+            await SaveSessionAsync(session);
+
             var bookingId = $"BK-{DateTime.UtcNow:yyyyMMdd}-{new Random().Next(1000, 9999)}";
-            var labs = DemoData.LabsByCity.GetValueOrDefault(session.City ?? "", new List<Lab>());
-            var lab = labs.Find(l => l.Id == session.LabId);
+            var labs = DemoData.LabsByCity.GetValueOrDefault(session.SelectedCity ?? "", new List<Lab>());
+            var lab = labs.Find(l => l.Id == session.SelectedLabId);
             int rate = lab?.Rate ?? 450;
-            int total = rate + (session.Persons > 1 ? (int)Math.Round((session.Persons - 1) * rate * 0.8) : 0);
+            int total = rate + (session.MemberCount > 1 ? (int)Math.Round((session.MemberCount - 1) * rate * 0.8) : 0);
 
             var confirmMsg =
                 $"✅ *Booking Confirmed!*\n\n" +
                 $"🆔 Booking ID: *{bookingId}*\n" +
                 $"🩸 Service: Blood Test\n" +
-                $"🏥 Lab: {session.LabName}\n" +
-                $"📅 Date & Time: Jun 28, 2026 · {session.Slot}\n" +
-                $"👥 Persons: {session.Persons}\n" +
+                $"🏥 Lab: {session.SelectedLabName}\n" +
+                $"📅 Date & Time: Jun 28, 2026 · {session.SelectedSlot}\n" +
+                $"👥 Persons: {session.MemberCount}\n" +
                 $"💰 Amount Paid: ₹{total}\n\n" +
                 $"🧪 *Instructions:*\n" +
                 $"• Please fast for 8–10 hours before your test\n" +
@@ -670,9 +699,28 @@ namespace Apenir.API.Controllers
         // ===================================================
         // Helpers
         // ===================================================
-        private BookingSession GetOrCreateSession(string phone)
+        private async Task<WhatsAppSession> GetOrCreateSessionAsync(string phone)
         {
-            return Sessions.GetOrAdd(phone, _ => new BookingSession());
+            var session = await _context.WhatsAppSessions.FirstOrDefaultAsync(s => s.Phone == phone);
+            if (session == null)
+            {
+                session = new WhatsAppSession
+                {
+                    Phone = phone,
+                    CurrentState = WhatsAppState.Start,
+                    UpdatedAt = DateTime.UtcNow
+                };
+                _context.WhatsAppSessions.Add(session);
+                await _context.SaveChangesAsync();
+            }
+            return session;
+        }
+
+        private async Task SaveSessionAsync(WhatsAppSession session)
+        {
+            session.UpdatedAt = DateTime.UtcNow;
+            _context.WhatsAppSessions.Update(session);
+            await _context.SaveChangesAsync();
         }
 
         private static bool IsGreeting(string text) =>
@@ -680,14 +728,14 @@ namespace Apenir.API.Controllers
                     "namaste", "good morning", "good evening", "howdy" }
             .Any(g => text.Contains(g));
 
-        private static string BuildBookingSummary(BookingSession session)
+        private static string BuildBookingSummary(WhatsAppSession session)
         {
             return
                 $"📋 *Booking Summary*\n" +
                 $"🩸 Blood Test\n" +
-                $"🏥 {session.LabName}\n" +
-                $"📅 Jun 28, 2026 · {session.Slot}\n" +
-                $"👥 {session.Persons} person{(session.Persons > 1 ? "s" : "")}\n" +
+                $"🏥 {session.SelectedLabName}\n" +
+                $"📅 Jun 28, 2026 · {session.SelectedSlot}\n" +
+                $"👥 {session.MemberCount} person{(session.MemberCount > 1 ? "s" : "")}\n" +
                 $"📍 Location: Shared ✓";
         }
     }
