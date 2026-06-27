@@ -1,9 +1,9 @@
-using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http; // request, response, cookie, statuscode
 using Microsoft.Extensions.Configuration;
-using System.Security.Claims;
-using System.Threading.Tasks;
+using System.Security.Claims; // get the info of users eg (userid, userrole)
+using System.Threading.Tasks; // async, await, task
 using System;
-using System.Linq;
+using System.Linq; // first(), where(), select(), firstordefault()
 
 namespace Apenir.API.Middleware;
 

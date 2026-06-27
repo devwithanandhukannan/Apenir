@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.AspNetCore.Mvc.Filters;
+using Microsoft.AspNetCore.Mvc.Filters; //IAuthorizationFilter
 using System;
-using System.Security.Claims;
+using System.Security.Claims; // get the info of users eg (userid, userrole)
 
 namespace Apenir.API.Filters;
 
