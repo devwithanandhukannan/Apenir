@@ -17,6 +17,12 @@ namespace Apenir.Infrastructure.Persistence
         {
             // Register GuidSerializer so Guid maps properly to MongoDB UUID subtype 4
             BsonSerializer.TryRegisterSerializer(new GuidSerializer(GuidRepresentation.Standard));
+
+            BsonClassMap.RegisterClassMap<Admin>(cm =>
+            {
+                cm.AutoMap();
+                cm.SetIgnoreExtraElements(true);
+            });
         }
 
         public MongoDbContext(IOptions<MongoSettings> settings)
