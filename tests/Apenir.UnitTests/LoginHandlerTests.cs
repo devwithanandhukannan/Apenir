@@ -50,20 +50,18 @@ namespace Apenir.UnitTests
             // Arrange
             var password = "ValidPassword123!";
             var hashedPassword = "hashed_password";
-            var username = "adminuser";
             var email = "admin@apenir.com";
 
             var admin = new Admin
             {
                 Id = Guid.NewGuid(),
-                Username = username,
                 Email = email,
                 PasswordHash = hashedPassword,
                 IsActive = true,
                 IsDeleted = false
             };
 
-            _adminRepoMock.Setup(repo => repo.GetByUsernameAsync(username, It.IsAny<CancellationToken>()))
+            _adminRepoMock.Setup(repo => repo.GetByEmailAsync(email, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(admin);
 
             _hasherMock.Setup(h => h.Verify(password, hashedPassword))
@@ -89,7 +87,7 @@ namespace Apenir.UnitTests
 
             var request = new LoginRequest
             {
-                UsernameOrEmail = username,
+                Email = email,
                 Password = password
             };
 
@@ -102,7 +100,6 @@ namespace Apenir.UnitTests
             result.Data.Should().NotBeNull();
             result.Data!.AccessToken.Should().Be("access_token");
             result.Data!.RefreshToken.Should().Be("refresh_token");
-            result.Data!.Username.Should().Be(username);
             result.Data!.Email.Should().Be(email);
 
             _refreshTokenRepoMock.Verify(repo => repo.AddAsync(It.IsAny<RefreshToken>(), It.IsAny<CancellationToken>()), Times.Once);
@@ -113,7 +110,7 @@ namespace Apenir.UnitTests
         public async Task Handle_ShouldThrowInvalidCredentialsException_WhenAdminNotFound()
         {
             // Arrange
-            _adminRepoMock.Setup(repo => repo.GetByUsernameAsync("nonexistent", It.IsAny<CancellationToken>()))
+            _adminRepoMock.Setup(repo => repo.GetByEmailAsync("nonexistent@apenir.com", It.IsAny<CancellationToken>()))
                 .ReturnsAsync((Admin?)null);
 
             var handler = new AdminLoginCommandHandler(
@@ -127,7 +124,7 @@ namespace Apenir.UnitTests
 
             var request = new LoginRequest
             {
-                UsernameOrEmail = "nonexistent",
+                Email = "nonexistent@apenir.com",
                 Password = "anyPassword"
             };
 
@@ -144,19 +141,18 @@ namespace Apenir.UnitTests
             // Arrange
             var password = "ValidPassword123!";
             var hashedPassword = "hashed_password";
-            var username = "adminuser";
+            var email = "admin@apenir.com";
 
             var admin = new Admin
             {
                 Id = Guid.NewGuid(),
-                Username = username,
-                Email = "admin@apenir.com",
+                Email = email,
                 PasswordHash = hashedPassword,
                 IsActive = false,
                 IsDeleted = false
             };
 
-            _adminRepoMock.Setup(repo => repo.GetByUsernameAsync(username, It.IsAny<CancellationToken>()))
+            _adminRepoMock.Setup(repo => repo.GetByEmailAsync(email, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(admin);
 
             _hasherMock.Setup(h => h.Verify(password, hashedPassword))
@@ -173,7 +169,7 @@ namespace Apenir.UnitTests
 
             var request = new LoginRequest
             {
-                UsernameOrEmail = username,
+                Email = email,
                 Password = password
             };
 

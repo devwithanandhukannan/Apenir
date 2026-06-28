@@ -41,28 +41,27 @@ Admin endpoints manage administrator sessions, tokens, and password management. 
 *   **Request Body**:
     ```json
     {
-      "usernameOrEmail": "admin@apenir.com",
+      "email": "admin@apenir.com",
       "password": "Password123"
     }
     ```
 *   **Response (200 OK)**:
     *   **Cookie set**: `refresh_token` (HttpOnly, Secure, SameSite=Strict, Path=/api/AdminAuth/refresh)
     *   **Body** (`ApiResponse<LoginResponse>`):
-        ```json
-        {
-          "success": true,
-          "message": "",
-          "data": {
-            "accessToken": "eyJhbGciOi...",
-            "refreshToken": "", // Kept empty as token is sent via secure cookie
-            "expiresIn": 900, // Token lifetime in seconds (15 mins)
-            "adminId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-            "username": "admin",
-            "email": "admin@apenir.com"
-          },
-          "errors": []
-        }
-        ```
+         ```json
+         {
+           "success": true,
+           "message": "",
+           "data": {
+             "accessToken": "eyJhbGciOi...",
+             "refreshToken": "", // Kept empty as token is sent via secure cookie
+             "expiresIn": 900, // Token lifetime in seconds (15 mins)
+             "adminId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+             "email": "admin@apenir.com"
+           },
+           "errors": []
+         }
+         ```
 
 ### POST `/api/AdminAuth/refresh`
 *   **Description**: Rotates keys and returns a fresh JWT access token.
@@ -180,7 +179,6 @@ Admin endpoints manage administrator sessions, tokens, and password management. 
       "data": {
         "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
         "email": "admin@apenir.com",
-        "username": "admin",
         "fullName": "Super Admin",
         "roles": ["Admin"],
         "permissions": ["ManageUsers", "ViewReports"],
@@ -203,7 +201,7 @@ Admin endpoints manage administrator sessions, tokens, and password management. 
       "data": {
         "isValid": true,
         "adminId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-        "username": "admin",
+        "email": "admin@apenir.com",
         "roles": ["Admin"],
         "permissions": ["ManageUsers"]
       },

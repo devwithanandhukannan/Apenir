@@ -30,7 +30,7 @@ namespace Apenir.IntegrationTests
         public async Task Login_ShouldReturnOk_WhenCredentialsAreValid()
         {
             // Arrange
-            var username = "integrationadmin";
+            var email = "integration@apenir.com";
             var password = "AdminPassword123!";
             
             // PasswordHash of "AdminPassword123!" using BCrypt work factor 12 (mock password hasher)
@@ -40,8 +40,7 @@ namespace Apenir.IntegrationTests
             var admin = new Admin
             {
                 Id = Guid.NewGuid(),
-                Username = username,
-                Email = "integration@apenir.com",
+                Email = email,
                 PasswordHash = hashedPassword,
                 IsActive = true,
                 IsDeleted = false
@@ -51,7 +50,7 @@ namespace Apenir.IntegrationTests
             _factory.RefreshTokenRepoMock.Reset();
 
             _factory.AdminRepoMock
-                .Setup(repo => repo.GetByUsernameAsync(username, It.IsAny<CancellationToken>()))
+                .Setup(repo => repo.GetByEmailAsync(email, It.IsAny<CancellationToken>()))
                 .ReturnsAsync(admin);
 
             _factory.AdminRepoMock
@@ -64,7 +63,7 @@ namespace Apenir.IntegrationTests
 
             var loginRequest = new LoginRequest
             {
-                UsernameOrEmail = username,
+                Email = email,
                 Password = password
             };
 
@@ -79,23 +78,24 @@ namespace Apenir.IntegrationTests
             result!.Success.Should().BeTrue();
             result.Data.Should().NotBeNull();
             result.Data!.AccessToken.Should().NotBeNullOrWhiteSpace();
-            result.Data!.RefreshToken.Should().NotBeNullOrWhiteSpace();
+            result.Data!.RefreshToken.Should().BeEmpty();
+            response.Headers.Contains("Set-Cookie").Should().BeTrue();
         }
 
         [Fact]
         public async Task Login_ShouldReturnUnauthorized_WhenCredentialsAreInvalid()
         {
             // Arrange
-            var username = "invalidadmin";
+            var email = "invalidadmin@apenir.com";
             
             _factory.AdminRepoMock.Reset();
             _factory.AdminRepoMock
-                .Setup(repo => repo.GetByUsernameAsync(username, It.IsAny<CancellationToken>()))
+                .Setup(repo => repo.GetByEmailAsync(email, It.IsAny<CancellationToken>()))
                 .ReturnsAsync((Admin?)null);
 
             var loginRequest = new LoginRequest
             {
-                UsernameOrEmail = username,
+                Email = email,
                 Password = "wrongPassword"
             };
 

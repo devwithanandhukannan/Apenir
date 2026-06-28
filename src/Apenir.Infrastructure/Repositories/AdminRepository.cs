@@ -32,13 +32,6 @@ namespace Apenir.Infrastructure.Repositories
                 .FirstOrDefaultAsync(cancellationToken);
         }
 
-        public async Task<Admin?> GetByUsernameAsync(string username, CancellationToken cancellationToken = default)
-        {
-            var lowercaseUsername = username.ToLowerInvariant();
-            return await _context.Admins
-                .Find(a => a.Username.ToLower() == lowercaseUsername && !a.IsDeleted)
-                .FirstOrDefaultAsync(cancellationToken);
-        }
 
         public async Task CreateAsync(Admin admin, CancellationToken cancellationToken = default)
         {
@@ -62,13 +55,12 @@ namespace Apenir.Infrastructure.Repositories
             await _context.Admins.UpdateOneAsync(filter, update, null, cancellationToken);
         }
 
-        public async Task<bool> ExistsAsync(string email, string username, CancellationToken cancellationToken = default)
+        public async Task<bool> ExistsAsync(string email, CancellationToken cancellationToken = default)
         {
             var lowercaseEmail = email.ToLowerInvariant();
-            var lowercaseUsername = username.ToLowerInvariant();
             
             return await _context.Admins
-                .Find(a => (a.Email.ToLower() == lowercaseEmail || a.Username.ToLower() == lowercaseUsername) && !a.IsDeleted)
+                .Find(a => a.Email.ToLower() == lowercaseEmail && !a.IsDeleted)
                 .AnyAsync(cancellationToken);
         }
     }

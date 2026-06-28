@@ -29,7 +29,7 @@ namespace Apenir.Infrastructure.Security
             var claims = new List<Claim>
             {
                 new Claim(ClaimTypes.NameIdentifier, admin.Id.ToString()),
-                new Claim(ClaimTypes.Name, admin.Username),
+                new Claim(ClaimTypes.Name, admin.Email),
                 new Claim(ClaimTypes.Email, admin.Email),
                 new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
             };

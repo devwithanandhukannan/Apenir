@@ -39,7 +39,6 @@ namespace Apenir.UnitTests
             {
                 Id = Guid.NewGuid(),
                 Email = "test@apenir.com",
-                Username = "testadmin",
                 FullName = "Test Admin",
                 Roles = new List<string> { "Admin" },
                 Permissions = new List<string> { "read:users" }
@@ -54,7 +53,7 @@ namespace Apenir.UnitTests
             var principal = _jwtService.GetPrincipalFromExpiredToken(token);
             principal.Should().NotBeNull();
             principal!.FindFirst(ClaimTypes.NameIdentifier)!.Value.Should().Be(admin.Id.ToString());
-            principal.FindFirst(ClaimTypes.Name)!.Value.Should().Be(admin.Username);
+            principal.FindFirst(ClaimTypes.Name)!.Value.Should().Be(admin.Email);
             principal.FindFirst(ClaimTypes.Email)!.Value.Should().Be(admin.Email);
             principal.FindFirst(ClaimTypes.Role)!.Value.Should().Be("Admin");
             principal.FindFirst("permission")!.Value.Should().Be("read:users");
@@ -81,7 +80,6 @@ namespace Apenir.UnitTests
             {
                 Id = Guid.NewGuid(),
                 Email = "test@apenir.com",
-                Username = "testadmin",
                 Roles = new List<string> { "Admin" }
             };
             var token = _jwtService.GenerateAccessToken(admin);

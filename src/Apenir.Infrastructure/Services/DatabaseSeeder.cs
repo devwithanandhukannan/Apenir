@@ -48,7 +48,6 @@ namespace Apenir.Infrastructure.Services
                     {
                         Id = Guid.NewGuid(),
                         Email = string.IsNullOrWhiteSpace(_adminSettings.DefaultEmail) ? "admin@apenir.com" : _adminSettings.DefaultEmail,
-                        Username = string.IsNullOrWhiteSpace(_adminSettings.DefaultUsername) ? "admin" : _adminSettings.DefaultUsername,
                         FullName = string.IsNullOrWhiteSpace(_adminSettings.DefaultFullName) ? "Default Administrator" : _adminSettings.DefaultFullName,
                         PasswordHash = _passwordHasher.Hash(string.IsNullOrWhiteSpace(_adminSettings.DefaultPassword) ? "Admin@Pass123" : _adminSettings.DefaultPassword),
                         IsActive = true,
@@ -59,7 +58,7 @@ namespace Apenir.Infrastructure.Services
                     };
 
                     await _context.Admins.InsertOneAsync(defaultAdmin);
-                    _logger.LogInformation("Default administrator account successfully seeded. Username: {Username}, Email: {Email}", defaultAdmin.Username, defaultAdmin.Email);
+                    _logger.LogInformation("Default administrator account successfully seeded. Email: {Email}", defaultAdmin.Email);
                 }
             }
             catch (Exception ex)

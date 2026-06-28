@@ -41,11 +41,6 @@ namespace Apenir.Infrastructure.Persistence
             var adminEmailIndexOptions = new CreateIndexOptions { Unique = true };
             Admins.Indexes.CreateOne(new CreateIndexModel<Admin>(adminEmailKey, adminEmailIndexOptions));
 
-            // Unique Username Index for Admin
-            var adminUsernameKey = Builders<Admin>.IndexKeys.Ascending(a => a.Username);
-            var adminUsernameIndexOptions = new CreateIndexOptions { Unique = true };
-            Admins.Indexes.CreateOne(new CreateIndexModel<Admin>(adminUsernameKey, adminUsernameIndexOptions));
-
             // Index on Refresh Token
             var tokenKey = Builders<RefreshToken>.IndexKeys.Ascending(t => t.Token);
             var tokenIndexOptions = new CreateIndexOptions { Unique = true };

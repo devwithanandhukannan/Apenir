@@ -5,7 +5,7 @@ namespace Apenir.Core.Exceptions
 {
     public class InvalidCredentialsException : Exception
     {
-        public InvalidCredentialsException(string message = "Invalid email/username or password.") : base(message) { }
+        public InvalidCredentialsException(string message = "Invalid email or password.") : base(message) { }
     }
 
     public class AccountDisabledException : Exception

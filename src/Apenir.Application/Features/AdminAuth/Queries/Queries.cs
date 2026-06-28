@@ -48,7 +48,6 @@ namespace Apenir.Application.Features.AdminAuth.Queries
             {
                 Id = admin.Id,
                 Email = admin.Email,
-                Username = admin.Username,
                 FullName = admin.FullName,
                 Roles = admin.Roles,
                 Permissions = admin.Permissions,
@@ -99,7 +98,7 @@ namespace Apenir.Application.Features.AdminAuth.Queries
                 }
 
                 var adminIdStr = principal.Claims.FirstOrDefault(c => c.Type == ClaimTypes.NameIdentifier)?.Value;
-                var username = principal.Claims.FirstOrDefault(c => c.Type == ClaimTypes.Name)?.Value;
+                var email = principal.Claims.FirstOrDefault(c => c.Type == ClaimTypes.Email)?.Value;
                 var roles = principal.Claims.Where(c => c.Type == ClaimTypes.Role).Select(c => c.Value).ToList();
                 var permissions = principal.Claims.Where(c => c.Type == "permission").Select(c => c.Value).ToList();
 
@@ -107,7 +106,7 @@ namespace Apenir.Application.Features.AdminAuth.Queries
                 {
                     IsValid = true,
                     AdminId = adminIdStr != null ? Guid.Parse(adminIdStr) : null,
-                    Username = username,
+                    Email = email,
                     Roles = roles,
                     Permissions = permissions
                 };

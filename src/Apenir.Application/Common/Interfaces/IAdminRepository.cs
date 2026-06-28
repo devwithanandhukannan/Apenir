@@ -9,10 +9,9 @@ namespace Apenir.Application.Common.Interfaces
     {
         Task<Admin?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default);
         Task<Admin?> GetByEmailAsync(string email, CancellationToken cancellationToken = default);
-        Task<Admin?> GetByUsernameAsync(string username, CancellationToken cancellationToken = default);
         Task CreateAsync(Admin admin, CancellationToken cancellationToken = default);
         Task UpdateAsync(Admin admin, CancellationToken cancellationToken = default);
         Task DeleteAsync(Guid id, CancellationToken cancellationToken = default); // Soft delete
-        Task<bool> ExistsAsync(string email, string username, CancellationToken cancellationToken = default);
+        Task<bool> ExistsAsync(string email, CancellationToken cancellationToken = default);
     }
 }

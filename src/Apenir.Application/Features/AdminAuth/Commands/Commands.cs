@@ -41,9 +41,7 @@ namespace Apenir.Application.Features.AdminAuth.Commands
         public async Task<ApiResponse<LoginResponse>> Handle(AdminLoginCommand command, CancellationToken cancellationToken)
         {
             var req = command.Request;
-            var admin = req.UsernameOrEmail.Contains("@")
-                ? await _adminRepository.GetByEmailAsync(req.UsernameOrEmail, cancellationToken)
-                : await _adminRepository.GetByUsernameAsync(req.UsernameOrEmail, cancellationToken);
+            var admin = await _adminRepository.GetByEmailAsync(req.Email, cancellationToken);
 
             if (admin == null || admin.IsDeleted)
             {
@@ -87,7 +85,6 @@ namespace Apenir.Application.Features.AdminAuth.Commands
                 RefreshToken = refreshTokenString,
                 ExpiresIn = _jwtSettings.AccessTokenExpiryMinutes * 60,
                 AdminId = admin.Id,
-                Username = admin.Username,
                 Email = admin.Email
             };
 

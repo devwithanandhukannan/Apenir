@@ -6,7 +6,6 @@ namespace Apenir.Application.Common.Interfaces
     {
         Guid? UserId { get; }
         string? Email { get; }
-        string? Username { get; }
         string? IpAddress { get; }
         string? UserAgent { get; }
     }
