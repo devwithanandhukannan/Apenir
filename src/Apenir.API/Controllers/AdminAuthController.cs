@@ -8,6 +8,7 @@ using Apenir.Application.Common.Models;
 using Apenir.Application.DTOs;
 using Apenir.Application.Features.AdminAuth.Commands;
 using Apenir.Application.Features.AdminAuth.Queries;
+using Apenir.API.Helpers;
 
 namespace Apenir.API.Controllers
 {
@@ -33,14 +34,7 @@ namespace Apenir.API.Controllers
             var result = await _mediator.Send(new AdminLoginCommand(request), cancellationToken);
             if (result.Success && result.Data != null)
             {
-                Response.Cookies.Append("admin_refresh_token", result.Data.RefreshToken, new CookieOptions
-                {
-                    HttpOnly = true,
-                    Secure = true,
-                    SameSite = SameSiteMode.Strict,
-                    Path = "/api/AdminAuth/refresh",
-                    Expires = System.DateTime.UtcNow.AddDays(7)
-                });
+                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/api/AdminAuth/refresh");
                 result.Data.RefreshToken = string.Empty;
             }
             return Ok(result);
@@ -55,7 +49,8 @@ namespace Apenir.API.Controllers
         public async Task<IActionResult> Refresh([FromBody] RefreshTokenRequest request, CancellationToken cancellationToken)
         {
             string? refreshToken = request?.RefreshToken;
-            if (Request.Cookies.TryGetValue("admin_refresh_token", out var cookieToken) && !string.IsNullOrEmpty(cookieToken))
+            var cookieToken = CookieHelper.GetRefreshTokenCookie(HttpContext);
+            if (!string.IsNullOrEmpty(cookieToken))
             {
                 refreshToken = cookieToken;
             }
@@ -68,14 +63,7 @@ namespace Apenir.API.Controllers
             var result = await _mediator.Send(new RefreshTokenCommand(new RefreshTokenRequest { RefreshToken = refreshToken }), cancellationToken);
             if (result.Success && result.Data != null)
             {
-                Response.Cookies.Append("admin_refresh_token", result.Data.RefreshToken, new CookieOptions
-                {
-                    HttpOnly = true,
-                    Secure = true,
-                    SameSite = SameSiteMode.Strict,
-                    Path = "/api/AdminAuth/refresh",
-                    Expires = System.DateTime.UtcNow.AddDays(7)
-                });
+                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/api/AdminAuth/refresh");
                 result.Data.RefreshToken = string.Empty;
             }
             return Ok(result);
@@ -89,7 +77,8 @@ namespace Apenir.API.Controllers
         public async Task<IActionResult> Logout([FromBody] RefreshTokenRequest request, CancellationToken cancellationToken)
         {
             string? refreshToken = request?.RefreshToken;
-            if (Request.Cookies.TryGetValue("admin_refresh_token", out var cookieToken) && !string.IsNullOrEmpty(cookieToken))
+            var cookieToken = CookieHelper.GetRefreshTokenCookie(HttpContext);
+            if (!string.IsNullOrEmpty(cookieToken))
             {
                 refreshToken = cookieToken;
             }
@@ -102,13 +91,7 @@ namespace Apenir.API.Controllers
             var result = await _mediator.Send(new LogoutCommand(refreshToken), cancellationToken);
             if (result.Success)
             {
-                Response.Cookies.Delete("admin_refresh_token", new CookieOptions
-                {
-                    HttpOnly = true,
-                    Secure = true,
-                    SameSite = SameSiteMode.Strict,
-                    Path = "/api/AdminAuth/refresh"
-                });
+                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/api/AdminAuth/refresh");
             }
             return Ok(result);
         }
@@ -124,13 +107,7 @@ namespace Apenir.API.Controllers
             var result = await _mediator.Send(new LogoutAllDevicesCommand(), cancellationToken);
             if (result.Success)
             {
-                Response.Cookies.Delete("admin_refresh_token", new CookieOptions
-                {
-                    HttpOnly = true,
-                    Secure = true,
-                    SameSite = SameSiteMode.Strict,
-                    Path = "/api/AdminAuth/refresh"
-                });
+                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/api/AdminAuth/refresh");
             }
             return Ok(result);
         }

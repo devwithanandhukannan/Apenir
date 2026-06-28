@@ -46,7 +46,7 @@ Admin endpoints manage administrator sessions, tokens, and password management. 
     }
     ```
 *   **Response (200 OK)**:
-    *   **Cookie set**: `admin_refresh_token` (HttpOnly, Secure, SameSite=Strict, Path=/api/AdminAuth/refresh)
+    *   **Cookie set**: `refresh_token` (HttpOnly, Secure, SameSite=Strict, Path=/api/AdminAuth/refresh)
     *   **Body** (`ApiResponse<LoginResponse>`):
         ```json
         {
@@ -66,10 +66,10 @@ Admin endpoints manage administrator sessions, tokens, and password management. 
 
 ### POST `/api/AdminAuth/refresh`
 *   **Description**: Rotates keys and returns a fresh JWT access token.
-*   **Headers**: None (reads from the `admin_refresh_token` cookie)
+*   **Headers**: None (reads from the `refresh_token` cookie)
 *   **Request Body**: None (Fallback: accepts `{"refreshToken": "string"}` if cookies are not used)
 *   **Response (200 OK)**:
-    *   **Cookie set**: Sets new rotated `admin_refresh_token` cookie.
+    *   **Cookie set**: Sets new rotated `refresh_token` cookie.
     *   **Body** (`ApiResponse<RefreshTokenResponse>`):
         ```json
         {
@@ -88,7 +88,7 @@ Admin endpoints manage administrator sessions, tokens, and password management. 
 *   **Headers**: None (reads cookie)
 *   **Request Body**: None (Fallback: accepts `{"refreshToken": "string"}`)
 *   **Response (200 OK)** (`ApiResponse`):
-    *   **Cookie cleared**: Clears `admin_refresh_token` cookie.
+    *   **Cookie cleared**: Clears `refresh_token` cookie.
     *   **Body**:
         ```json
         {

@@ -9,6 +9,7 @@ using Apenir.API.DTOs;
 using Apenir.Infrastructure.Services;
 using Apenir.API.Middleware;
 using Apenir.Application.Common.Models;
+using Apenir.API.Helpers;
 using System;
 using System.Linq;
 using System.Security.Cryptography;
@@ -125,14 +126,7 @@ public class AuthController : ControllerBase
         await _context.SaveChangesAsync();
 
         // Refresh Token as HttpOnly Cookie
-        Response.Cookies.Append("refresh_token", rawRefreshToken, new CookieOptions
-        {
-            HttpOnly = true,
-            Secure = true,
-            SameSite = SameSiteMode.Strict,
-            Path = "/api/auth/refresh",
-            Expires = DateTime.UtcNow.AddDays(7)
-        });
+        CookieHelper.SetRefreshTokenCookie(HttpContext, rawRefreshToken, "/api/auth/refresh");
 
         return Ok(ApiResponse<AuthResponse>.SuccessResult(new AuthResponse(jwtToken, user.Role.ToString(), user.Phone)));
     }
@@ -140,7 +134,8 @@ public class AuthController : ControllerBase
     [HttpPost("refresh")]
     public async Task<IActionResult> RefreshToken()
     {
-        if (!Request.Cookies.TryGetValue("refresh_token", out var rawRefreshToken) || string.IsNullOrEmpty(rawRefreshToken))
+        var rawRefreshToken = CookieHelper.GetRefreshTokenCookie(HttpContext);
+        if (string.IsNullOrEmpty(rawRefreshToken))
         {
             return BadRequest(ApiResponse<AuthResponse>.FailureResult("REFRESH_TOKEN_REQUIRED"));
         }
@@ -198,14 +193,7 @@ public class AuthController : ControllerBase
 
         await _context.SaveChangesAsync();
 
-        Response.Cookies.Append("refresh_token", newRawRefreshToken, new CookieOptions
-        {
-            HttpOnly = true,
-            Secure = true,
-            SameSite = SameSiteMode.Strict,
-            Path = "/api/auth/refresh",
-            Expires = DateTime.UtcNow.AddDays(7)
-        });
+        CookieHelper.SetRefreshTokenCookie(HttpContext, newRawRefreshToken, "/api/auth/refresh");
 
         return Ok(ApiResponse<AuthResponse>.SuccessResult(new AuthResponse(newAccessToken, user.Role.ToString(), user.Phone)));
     }
