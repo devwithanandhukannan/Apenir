@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
+using Microsoft.AspNetCore.Http;
 using System;
 using System.IO;
 using System.Net.Http;
@@ -9,9 +10,11 @@ using System.Text.Json;
 using System.Threading.Tasks;
 using System.Collections.Generic;
 using System.Linq;
+using System.Security.Cryptography;
 using Apenir.Core.Interfaces;
 using Apenir.Core.Entities;
 using Apenir.Core.Enums;
+using Apenir.API.BackgroundServices;
 
 namespace Apenir.API.Controllers
 {
@@ -74,18 +77,12 @@ namespace Apenir.API.Controllers
     public class WebhookController : ControllerBase
     {
         private const string DEFAULT_VERIFY_TOKEN = "MySuperSecretToken123";
-        private const string DEFAULT_WA_API_VERSION = "v25.0";
-        private const string DEFAULT_PHONE_NUMBER_ID = "1198940716632437";
-        private const string DEFAULT_ACCESS_TOKEN = "EAAOLfrg5aQcBRxBOf5iIvplpEeWST5E7ZAGXXfydZAZBZAcMM4G8hFsBa1xdiTNLZB7JfkZB7ICzqZBTepiZCyJZBFk38hZBaWuuTH39GLJzyyC7AWgk2jiR4SZCJZAXK0DTHuZAuA3kY0HCZA6tAVyL0LkZBie9TFQ52XA75nvz9e9R8kTEHOILpa5juCbeCS31U1b8JomQP9d9bByyZAqDnqmGxdSRYCvjoRzEdoqyk2V9hVf7OiHefcHXZA7ZAtv2KHYavflyxjjZB8v8JdZAzi1KNXZCaSPfuNfjg9svbOzucjAqPZCAZDZD";
-
-        private readonly IHttpClientFactory _httpClientFactory;
-        private readonly IApplicationDbContext _context;
+        private readonly IWhatsAppWebhookQueue _queue;
         private readonly IConfiguration _configuration;
 
-        public WebhookController(IHttpClientFactory httpClientFactory, IApplicationDbContext context, IConfiguration configuration)
+        public WebhookController(IWhatsAppWebhookQueue queue, IConfiguration configuration)
         {
-            _httpClientFactory = httpClientFactory;
-            _context = context;
+            _queue = queue;
             _configuration = configuration;
         }
 
@@ -118,7 +115,7 @@ namespace Apenir.API.Controllers
         }
 
         // ===================================================
-        // POST: Receive & Process WhatsApp Messages
+        // POST: Receive & Process WhatsApp Messages (Async Queue)
         // ===================================================
         [HttpPost]
         public async Task<IActionResult> ReceiveWebhook()
@@ -127,628 +124,63 @@ namespace Apenir.API.Controllers
             Console.WriteLine("Incoming WhatsApp Webhook");
             Console.WriteLine("====================================");
 
-            using var reader = new StreamReader(Request.Body);
-            var body = await reader.ReadToEndAsync();
+            // Enable buffering so we can read the stream for signature and later reset it
+            Request.EnableBuffering();
+
+            byte[] bodyBytes;
+            using (var ms = new MemoryStream())
+            {
+                await Request.Body.CopyToAsync(ms);
+                bodyBytes = ms.ToArray();
+            }
+
+            // Reset the body stream position so other reader/parsers can access it
+            Request.Body.Position = 0;
+
+            var body = Encoding.UTF8.GetString(bodyBytes);
             Console.WriteLine(body);
 
-            try
+            // Verify X-Hub-Signature-256
+            if (Request.Headers.TryGetValue("X-Hub-Signature-256", out var signatureHeader))
             {
-                using var doc = JsonDocument.Parse(body);
-                var root = doc.RootElement;
-
-                var entries = root.GetProperty("entry");
-                foreach (var entry in entries.EnumerateArray())
+                if (!VerifySignature(signatureHeader.ToString(), bodyBytes))
                 {
-                    var changes = entry.GetProperty("changes");
-                    foreach (var change in changes.EnumerateArray())
-                    {
-                        var value = change.GetProperty("value");
-                        if (!value.TryGetProperty("messages", out var messages)) continue;
-
-                        foreach (var message in messages.EnumerateArray())
-                        {
-                            var from = message.GetProperty("from").GetString()!;
-                            var msgType = message.GetProperty("type").GetString();
-
-                            Console.WriteLine($"📩 Message from: {from} | Type: {msgType}");
-
-                            // Auto-register patient/customer if they don't exist yet
-                            var user = await _context.Users.FirstOrDefaultAsync(u => u.Phone == from);
-                            if (user == null)
-                            {
-                                Console.WriteLine($"👤 Creating new Customer user for phone {from} via WhatsApp auto-registration");
-                                user = new User
-                                {
-                                    Phone = from,
-                                    Role = UserRole.Customer
-                                };
-                                _context.Users.Add(user);
-
-                                var customer = new Customer
-                                {
-                                    UserId = user.Id,
-                                    Phone = from,
-                                    Name = "WhatsApp Customer"
-                                };
-                                _context.Customers.Add(customer);
-                                await _context.SaveChangesAsync();
-                            }
-
-                            if (msgType == "text")
-                            {
-                                var text = message.GetProperty("text").GetProperty("body").GetString()!;
-                                Console.WriteLine($"   Text: {text}");
-                                await ProcessTextMessage(from, text);
-                            }
-                            else if (msgType == "location")
-                            {
-                                var lat = message.GetProperty("location").GetProperty("latitude").GetDouble();
-                                var lng = message.GetProperty("location").GetProperty("longitude").GetDouble();
-                                Console.WriteLine($"   Location: {lat}, {lng}");
-                                await ProcessLocationMessage(from, lat, lng);
-                            }
-                            else if (msgType == "interactive")
-                            {
-                                var interactive = message.GetProperty("interactive");
-                                var interactiveType = interactive.GetProperty("type").GetString();
-
-                                string? replyId = null;
-                                string? replyTitle = null;
-
-                                if (interactiveType == "button_reply")
-                                {
-                                    replyId = interactive.GetProperty("button_reply").GetProperty("id").GetString();
-                                    replyTitle = interactive.GetProperty("button_reply").GetProperty("title").GetString();
-                                }
-                                else if (interactiveType == "list_reply")
-                                {
-                                    replyId = interactive.GetProperty("list_reply").GetProperty("id").GetString();
-                                    replyTitle = interactive.GetProperty("list_reply").GetProperty("title").GetString();
-                                }
-
-                                if (replyId != null)
-                                {
-                                    Console.WriteLine($"   Interactive: {replyId} — {replyTitle}");
-                                    await ProcessInteractiveReply(from, replyId, replyTitle ?? "");
-                                }
-                            }
-                        }
-                    }
+                    Console.WriteLine("❌ Webhook Signature Verification Failed");
+                    return Unauthorized("Invalid webhook signature");
+                }
+                Console.WriteLine("✅ Webhook Signature Verified");
+            }
+            else
+            {
+                Console.WriteLine("⚠️ X-Hub-Signature-256 header missing from incoming webhook");
+                // In production, you might want to return Unauthorized here if app secret is configured
+                var appSecret = _configuration["WhatsApp:AppSecret"];
+                if (!string.IsNullOrEmpty(appSecret))
+                {
+                    return Unauthorized("Missing webhook signature");
                 }
             }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Error processing webhook: {ex.Message}");
-            }
+
+            // Queue the raw body for background processing
+            _queue.QueueWebhook(body);
 
             return Ok();
         }
 
-        // ===================================================
-        // Main message router
-        // ===================================================
-        private async Task ProcessTextMessage(string to, string text)
+        private bool VerifySignature(string signatureHeader, byte[] bodyBytes)
         {
-            var session = await GetOrCreateSessionAsync(to);
-            var lower = text.ToLower().Trim();
-
-            // Greeting triggers — restart flow
-            if (IsGreeting(lower))
+            var appSecret = _configuration["WhatsApp:AppSecret"] ?? "MySuperSecretAppSecret123";
+            if (string.IsNullOrEmpty(signatureHeader) || !signatureHeader.StartsWith("sha256="))
             {
-                session.CurrentState = WhatsAppState.Start;
-                await SaveSessionAsync(session);
-                await SendGreeting(to);
-                return;
+                return false;
             }
 
-            // Step-based text input handling
-            switch (session.CurrentState)
-            {
-                case WhatsAppState.Start:
-                    await SendGreeting(to);
-                    break;
+            var expectedSignature = signatureHeader.Substring("sha256=".Length);
+            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(appSecret));
+            var hashBytes = hmac.ComputeHash(bodyBytes);
+            var computedSignature = Convert.ToHexString(hashBytes).ToLower();
 
-                case WhatsAppState.MemberCount:
-                    if (int.TryParse(text.Trim(), out int count) && count >= 1 && count <= 6)
-                    {
-                        session.MemberCount = count;
-                        session.CurrentState = WhatsAppState.Location;
-                        await SaveSessionAsync(session);
-                        await SendLocationRequest(to);
-                    }
-                    else
-                    {
-                        await SendTextMessage(to, "Please enter a number between 1 and 6. How many people need the blood test?");
-                    }
-                    break;
-
-                default:
-                    // Catch-all: show main menu
-                    await SendGreeting(to);
-                    break;
-            }
-        }
-
-        private async Task ProcessLocationMessage(string to, double lat, double lng)
-        {
-            var session = await GetOrCreateSessionAsync(to);
-
-            if (session.CurrentState == WhatsAppState.Location)
-            {
-                session.LocationShared = true;
-                session.CurrentState = WhatsAppState.Confirm;
-                await SaveSessionAsync(session);
-
-                var summary = BuildBookingSummary(session);
-                await SendTextMessage(to,
-                    $"📍 Location received!\n\n{summary}\n\n" +
-                    "💳 To confirm your booking, complete the payment below.\n\n" +
-                    "👉 Reply *PAY* to simulate payment (demo mode)");
-            }
-        }
-
-        private async Task ProcessInteractiveReply(string to, string replyId, string replyTitle)
-        {
-            var session = await GetOrCreateSessionAsync(to);
-            Console.WriteLine($"🔀 Step: {session.CurrentState} | Reply: {replyId}");
-
-            switch (session.CurrentState)
-            {
-                // ── Main Menu ──────────────────────────────────────────
-                case WhatsAppState.Start:
-                    if (replyId == "menu_book")
-                    {
-                        session.CurrentState = WhatsAppState.ChoosingTest;
-                        await SaveSessionAsync(session);
-                        await SendServiceList(to);
-                    }
-                    else if (replyId == "menu_bookings")
-                    {
-                        await SendViewBookings(to);
-                    }
-                    else if (replyId == "menu_help")
-                    {
-                        await SendHelp(to);
-                    }
-                    break;
-
-                // ── Service Selection ──────────────────────────────────
-                case WhatsAppState.ChoosingTest:
-                    session.SelectedTestId = replyId; // e.g. "service_blood"
-                    if (replyId == "service_blood")
-                    {
-                        session.CurrentState = WhatsAppState.ChoosingCity;
-                        await SaveSessionAsync(session);
-                        await SendCityList(to);
-                    }
-                    else
-                    {
-                        await SendTextMessage(to, "This service is coming soon! Let's book a Blood Test for now.");
-                        session.CurrentState = WhatsAppState.ChoosingCity;
-                        await SaveSessionAsync(session);
-                        await SendCityList(to);
-                    }
-                    break;
-
-                // ── City Selection ─────────────────────────────────────
-                case WhatsAppState.ChoosingCity:
-                    var city = replyId.Replace("city_", "");
-                    if (DemoData.LabsByCity.ContainsKey(city))
-                    {
-                        session.SelectedCity = city;
-                        session.CurrentState = WhatsAppState.ChoosingLab;
-                        await SaveSessionAsync(session);
-                        await SendLabList(to, city);
-                    }
-                    else
-                    {
-                        await SendTextMessage(to, "We don't have labs in that city yet. Please choose Kochi or Trivandrum.");
-                        await SendCityList(to);
-                    }
-                    break;
-
-                // ── Lab Selection ──────────────────────────────────────
-                case WhatsAppState.ChoosingLab:
-                    var labId = replyId.Replace("lab_", "");
-                    var labs = DemoData.LabsByCity.GetValueOrDefault(session.SelectedCity ?? "", new List<Lab>());
-                    var selectedLab = labs.Find(l => l.Id == labId);
-                    if (selectedLab != null)
-                    {
-                        session.SelectedLabId = selectedLab.Id;
-                        session.SelectedLabName = selectedLab.Name;
-                        session.CurrentState = WhatsAppState.ChoosingSlot;
-                        await SaveSessionAsync(session);
-                        await SendSlotList(to, selectedLab.Name);
-                    }
-                    break;
-
-                // ── Slot Selection ─────────────────────────────────────
-                case WhatsAppState.ChoosingSlot:
-                    var slotTime = replyId.Replace("slot_", "").Replace("_", " ");
-                    session.SelectedSlot = slotTime;
-                    session.CurrentState = WhatsAppState.MemberCount;
-                    await SaveSessionAsync(session);
-                    await SendPersonCountPrompt(to);
-                    break;
-
-                // ── Payment Trigger (via button) ───────────────────────
-                case WhatsAppState.Confirm:
-                    if (replyId == "pay_now")
-                    {
-                        await SimulatePayment(to, session);
-                    }
-                    break;
-
-                // ── Post-booking ───────────────────────────────────────
-                case WhatsAppState.Done:
-                    if (replyId == "menu_book") 
-                    { 
-                        session.CurrentState = WhatsAppState.ChoosingTest; 
-                        await SaveSessionAsync(session);
-                        await SendServiceList(to); 
-                    }
-                    else if (replyId == "menu_bookings") 
-                    { 
-                        await SendViewBookings(to); 
-                    }
-                    else 
-                    { 
-                        session.CurrentState = WhatsAppState.Start; 
-                        await SaveSessionAsync(session);
-                        await SendGreeting(to); 
-                    }
-                    break;
-            }
-        }
-
-        // ===================================================
-        // Message Builders
-        // ===================================================
-        private async Task SendGreeting(string to)
-        {
-            var payload = new
-            {
-                messaging_product = "whatsapp",
-                to,
-                type = "interactive",
-                interactive = new
-                {
-                    type = "button",
-                    header = new { type = "text", text = "🧬 LabCare Assistant" },
-                    body = new
-                    {
-                        text = "👋 Hello! Welcome to *LabCare*.\n\nI can help you book blood tests and diagnostics at top NABL-certified labs near you.\n\nWhat would you like to do?"
-                    },
-                    footer = new { text = "LabCare · Trusted Diagnostics" },
-                    action = new
-                    {
-                        buttons = new[]
-                        {
-                            new { type = "reply", reply = new { id = "menu_book",     title = "📅 Book a test"     } },
-                            new { type = "reply", reply = new { id = "menu_bookings", title = "📋 My bookings"     } },
-                            new { type = "reply", reply = new { id = "menu_help",     title = "❓ Help"            } },
-                        }
-                    }
-                }
-            };
-
-            await SendWhatsAppMessage(payload);
-        }
-
-        private async Task SendServiceList(string to)
-        {
-            var payload = new
-            {
-                messaging_product = "whatsapp",
-                to,
-                type = "interactive",
-                interactive = new
-                {
-                    type = "list",
-                    header = new { type = "text", text = "🏥 Select a Service" },
-                    body = new { text = "Choose the type of test you'd like to book:" },
-                    footer = new { text = "All tests are NABL certified" },
-                    action = new
-                    {
-                        button = "View services",
-                        sections = new[]
-                        {
-                            new
-                            {
-                                title = "Diagnostic Services",
-                                rows = new[]
-                                {
-                                    new { id = "service_blood",  title = "🩸 Blood Test",          description = "CBC, LFT, RFT, Lipid profile & more" },
-                                    new { id = "service_urine",  title = "🔬 Urine Analysis",       description = "Routine & microscopy" },
-                                    new { id = "service_ecg",    title = "🫀 ECG",                  description = "Electrocardiogram" },
-                                    new { id = "service_xray",   title = "🫁 X-Ray",                description = "Chest, limb & spine" },
-                                    new { id = "service_full",   title = "🧬 Full Body Checkup",    description = "Comprehensive health package" },
-                                }
-                            }
-                        }
-                    }
-                }
-            };
-
-            await SendWhatsAppMessage(payload);
-        }
-
-        private async Task SendCityList(string to)
-        {
-            var payload = new
-            {
-                messaging_product = "whatsapp",
-                to,
-                type = "interactive",
-                interactive = new
-                {
-                    type = "button",
-                    body = new { text = "📍 *Select your city:*" },
-                    action = new
-                    {
-                        buttons = new[]
-                        {
-                            new { type = "reply", reply = new { id = "city_kochi",       title = "Kochi"       } },
-                            new { type = "reply", reply = new { id = "city_trivandrum",  title = "Trivandrum"  } },
-                            new { type = "reply", reply = new { id = "city_other",       title = "Other city"  } },
-                        }
-                    }
-                }
-            };
-
-            await SendWhatsAppMessage(payload);
-        }
-
-        private async Task SendLabList(string to, string city)
-        {
-            var labs = DemoData.LabsByCity.GetValueOrDefault(city, new List<Lab>());
-            var rows = labs.Select(l => new
-            {
-                id = $"lab_{l.Id}",
-                title = l.Name,
-                description = $"{l.Area} · {l.Distance} · {l.Rating} · ₹{l.Rate}"
-            }).ToList();
-
-            var cityName = char.ToUpper(city[0]) + city[1..];
-
-            var payload = new
-            {
-                messaging_product = "whatsapp",
-                to,
-                type = "interactive",
-                interactive = new
-                {
-                    type = "list",
-                    header = new { type = "text", text = $"Labs in {cityName}" },
-                    body = new { text = "Choose a NABL-certified lab for your blood test:" },
-                    footer = new { text = "All labs open from 6 AM" },
-                    action = new
-                    {
-                        button = "View labs",
-                        sections = new[]
-                        {
-                            new { title = $"Available in {cityName}", rows }
-                        }
-                    }
-                }
-            };
-
-            await SendWhatsAppMessage(payload);
-        }
-
-        private async Task SendSlotList(string to, string labName)
-        {
-            var availableSlots = DemoData.Slots.Where(s => s.Available).Take(6).ToList();
-            var rows = availableSlots.Select(s => new
-            {
-                id = $"slot_{s.Time.Replace(" ", "_").Replace(":", "")}",
-                title = s.Time,
-                description = "Available"
-            }).ToList();
-
-            var payload = new
-            {
-                messaging_product = "whatsapp",
-                to,
-                type = "interactive",
-                interactive = new
-                {
-                    type = "list",
-                    header = new { type = "text", text = "Select a Time Slot" },
-                    body = new { text = $"📅 *Jun 28, 2026* — {labName}\n\nChoose an available appointment time:" },
-                    footer = new { text = "Fasting required · No food 8–10 hrs before" },
-                    action = new
-                    {
-                        button = "View slots",
-                        sections = new[]
-                        {
-                            new { title = "Available slots", rows }
-                        }
-                    }
-                }
-            };
-
-            await SendWhatsAppMessage(payload);
-        }
-
-        private async Task SendPersonCountPrompt(string to)
-        {
-            await SendTextMessage(to,
-                "👥 *How many people need the blood test?*\n\n" +
-                "Reply with a number (1–6).\n" +
-                "e.g. reply *2* for 2 family members.");
-        }
-
-        private async Task SendLocationRequest(string to)
-        {
-            await SendTextMessage(to,
-                "📍 *Share your location*\n\n" +
-                "Please tap the paperclip 📎 → Location → and share your current location.\n\n" +
-                "This helps us confirm the nearest branch and arrange home sample collection if needed.");
-        }
-
-        private async Task SimulatePayment(string to, WhatsAppSession session)
-        {
-            session.CurrentState = WhatsAppState.Done;
-            await SaveSessionAsync(session);
-
-            var bookingId = $"BK-{DateTime.UtcNow:yyyyMMdd}-{new Random().Next(1000, 9999)}";
-            var labs = DemoData.LabsByCity.GetValueOrDefault(session.SelectedCity ?? "", new List<Lab>());
-            var lab = labs.Find(l => l.Id == session.SelectedLabId);
-            int rate = lab?.Rate ?? 450;
-            int total = rate + (session.MemberCount > 1 ? (int)Math.Round((session.MemberCount - 1) * rate * 0.8) : 0);
-
-            var confirmMsg =
-                $"✅ *Booking Confirmed!*\n\n" +
-                $"🆔 Booking ID: *{bookingId}*\n" +
-                $"🩸 Service: Blood Test\n" +
-                $"🏥 Lab: {session.SelectedLabName}\n" +
-                $"📅 Date & Time: Jun 28, 2026 · {session.SelectedSlot}\n" +
-                $"👥 Persons: {session.MemberCount}\n" +
-                $"💰 Amount Paid: ₹{total}\n\n" +
-                $"🧪 *Instructions:*\n" +
-                $"• Please fast for 8–10 hours before your test\n" +
-                $"• Bring this booking ID\n" +
-                $"• Report will be sent to your WhatsApp within 24 hrs\n\n" +
-                $"Thank you for choosing LabCare! 🙏";
-
-            var payload = new
-            {
-                messaging_product = "whatsapp",
-                to,
-                type = "interactive",
-                interactive = new
-                {
-                    type = "button",
-                    body = new { text = confirmMsg },
-                    footer = new { text = "LabCare · Trusted Diagnostics" },
-                    action = new
-                    {
-                        buttons = new[]
-                        {
-                            new { type = "reply", reply = new { id = "menu_book",     title = "📅 Book another"  } },
-                            new { type = "reply", reply = new { id = "menu_bookings", title = "📋 My bookings"   } },
-                            new { type = "reply", reply = new { id = "menu_help",     title = "🏠 Main menu"     } },
-                        }
-                    }
-                }
-            };
-
-            await SendWhatsAppMessage(payload);
-        }
-
-        private async Task SendViewBookings(string to)
-        {
-            await SendTextMessage(to,
-                "📋 *Your Bookings*\n\n" +
-                "─────────────────────\n" +
-                "🩸 Blood Test\n" +
-                "🏥 Lal PathLabs — Kochi\n" +
-                "📅 Jun 28, 2026 · 07:00 AM\n" +
-                "👥 2 persons\n" +
-                "🆔 BK-20260628-4821\n" +
-                "✅ Confirmed\n" +
-                "─────────────────────\n\n" +
-                "Reply *hi* to return to the main menu.");
-        }
-
-        private async Task SendHelp(string to)
-        {
-            await SendTextMessage(to,
-                "❓ *Help & FAQ*\n\n" +
-                "🩸 *Blood Test* — Fasting 8–10 hrs required\n" +
-                "📍 *Location* — Kochi & Trivandrum available\n" +
-                "📲 *Reports* — Sent via WhatsApp in 24 hrs\n" +
-                "💰 *Payment* — UPI, card, net banking\n" +
-                "📞 *Support* — 1800-123-4567 (Mon–Sat, 8am–8pm)\n\n" +
-                "Reply *hi* to return to the main menu.");
-        }
-
-        // ===================================================
-        // WhatsApp API Sender
-        // ===================================================
-        private async Task SendTextMessage(string to, string text)
-        {
-            var payload = new
-            {
-                messaging_product = "whatsapp",
-                to,
-                type = "text",
-                text = new { body = text }
-            };
-            await SendWhatsAppMessage(payload);
-        }
-
-        private async Task SendWhatsAppMessage(object payload)
-        {
-            try
-            {
-                var accessToken = _configuration["WhatsApp:AccessToken"] ?? DEFAULT_ACCESS_TOKEN;
-                var phoneNumberId = _configuration["WhatsApp:PhoneNumberId"] ?? DEFAULT_PHONE_NUMBER_ID;
-                var apiVersion = _configuration["WhatsApp:ApiVersion"] ?? DEFAULT_WA_API_VERSION;
-
-                var client = _httpClientFactory.CreateClient();
-                var url = $"https://graph.facebook.com/{apiVersion}/{phoneNumberId}/messages";
-                var json = JsonSerializer.Serialize(payload);
-                var content = new StringContent(json, Encoding.UTF8, "application/json");
-                client.DefaultRequestHeaders.Authorization =
-                    new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
-
-                Console.WriteLine($"📤 Sending to {url}");
-                Console.WriteLine(json);
-
-                var response = await client.PostAsync(url, content);
-                var responseBody = await response.Content.ReadAsStringAsync();
-
-                Console.WriteLine($"📬 WA Response [{(int)response.StatusCode}]: {responseBody}");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"❌ Failed to send WhatsApp message: {ex.Message}");
-            }
-        }
-
-        // ===================================================
-        // Helpers
-        // ===================================================
-        private async Task<WhatsAppSession> GetOrCreateSessionAsync(string phone)
-        {
-            var session = await _context.WhatsAppSessions.FirstOrDefaultAsync(s => s.Phone == phone);
-            if (session == null)
-            {
-                session = new WhatsAppSession
-                {
-                    Phone = phone,
-                    CurrentState = WhatsAppState.Start,
-                    UpdatedAt = DateTime.UtcNow
-                };
-                _context.WhatsAppSessions.Add(session);
-                await _context.SaveChangesAsync();
-            }
-            return session;
-        }
-
-        private async Task SaveSessionAsync(WhatsAppSession session)
-        {
-            session.UpdatedAt = DateTime.UtcNow;
-            _context.WhatsAppSessions.Update(session);
-            await _context.SaveChangesAsync();
-        }
-
-        private static bool IsGreeting(string text) =>
-            new[] { "hi", "hello", "hey", "hii", "helo", "hai", "start", "menu",
-                    "namaste", "good morning", "good evening", "howdy" }
-            .Any(g => text.Contains(g));
-
-        private static string BuildBookingSummary(WhatsAppSession session)
-        {
-            return
-                $"📋 *Booking Summary*\n" +
-                $"🩸 Blood Test\n" +
-                $"🏥 {session.SelectedLabName}\n" +
-                $"📅 Jun 28, 2026 · {session.SelectedSlot}\n" +
-                $"👥 {session.MemberCount} person{(session.MemberCount > 1 ? "s" : "")}\n" +
-                $"📍 Location: Shared ✓";
+            return string.Equals(expectedSignature, computedSignature, StringComparison.OrdinalIgnoreCase);
         }
     }
 }

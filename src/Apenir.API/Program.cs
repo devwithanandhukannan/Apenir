@@ -11,6 +11,7 @@ using Apenir.API.Middleware;
 using Apenir.Application;
 using Apenir.Infrastructure;
 using Apenir.Infrastructure.Services;
+using Apenir.API.BackgroundServices;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -21,6 +22,10 @@ builder.Services.AddInfrastructureServices(builder.Configuration);
 
 builder.Services.AddControllers();
 builder.Services.AddHttpClient();
+
+// Register background WhatsApp processing services
+builder.Services.AddSingleton<IWhatsAppWebhookQueue, WhatsAppWebhookQueue>();
+builder.Services.AddHostedService<WhatsAppWebhookProcessor>();
 
 // Configure OpenAPI (.NET 10 style document generation)
 builder.Services.AddOpenApi(options =>

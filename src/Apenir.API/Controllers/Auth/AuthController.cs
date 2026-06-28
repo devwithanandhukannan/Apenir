@@ -8,6 +8,7 @@ using Apenir.Core.Interfaces;
 using Apenir.API.DTOs;
 using Apenir.Infrastructure.Services;
 using Apenir.API.Middleware;
+using Apenir.Application.Common.Models;
 using System;
 using System.Linq;
 using System.Security.Cryptography;
@@ -52,7 +53,7 @@ public class AuthController : ControllerBase
         //send whatsapp sms
         await _whatsappService.SendTextMessageAsync(request.Phone, $"Your LabBook OTP is: {otp}. Valid for 5 minutes.");
 
-        return Ok(new { message = "OTP_SENT" });
+        return Ok(ApiResponse.SuccessResult("OTP_SENT"));
     }
 
     [HttpPost("otp/verify")]
@@ -66,7 +67,7 @@ public class AuthController : ControllerBase
 
         if (otpRecord == null || otpRecord.HashCode != hashedInput)
         {
-            return BadRequest(new { error = "OTP_INVALID_OR_EXPIRED" });
+            return BadRequest(ApiResponse<AuthResponse>.FailureResult("OTP_INVALID_OR_EXPIRED"));
         }
 
         _context.OtpCodes.Remove(otpRecord);
@@ -133,7 +134,7 @@ public class AuthController : ControllerBase
             Expires = DateTime.UtcNow.AddDays(7)
         });
 
-        return Ok(new AuthResponse(jwtToken, user.Role.ToString(), user.Phone));
+        return Ok(ApiResponse<AuthResponse>.SuccessResult(new AuthResponse(jwtToken, user.Role.ToString(), user.Phone)));
     }
 
     [HttpPost("refresh")]
@@ -141,7 +142,7 @@ public class AuthController : ControllerBase
     {
         if (!Request.Cookies.TryGetValue("refresh_token", out var rawRefreshToken) || string.IsNullOrEmpty(rawRefreshToken))
         {
-            return BadRequest(new { error = "REFRESH_TOKEN_REQUIRED" });
+            return BadRequest(ApiResponse<AuthResponse>.FailureResult("REFRESH_TOKEN_REQUIRED"));
         }
 
         using var sha256 = SHA256.Create();
@@ -153,7 +154,7 @@ public class AuthController : ControllerBase
 
         if (dbToken == null)
         {
-            return Unauthorized(new { code = "TOKEN_INVALID", message = "Invalid or expired refresh token" });
+            return Unauthorized(ApiResponse<AuthResponse>.FailureResult("Invalid or expired refresh token"));
         }
 
         // Rotate token: revoke old one immediately
@@ -164,7 +165,7 @@ public class AuthController : ControllerBase
         if (user == null)
         {
             await _context.SaveChangesAsync();
-            return Unauthorized(new { code = "TOKEN_INVALID", message = "User not found" });
+            return Unauthorized(ApiResponse<AuthResponse>.FailureResult("User not found"));
         }
 
         // Generate new Access Token
@@ -206,6 +207,6 @@ public class AuthController : ControllerBase
             Expires = DateTime.UtcNow.AddDays(7)
         });
 
-        return Ok(new AuthResponse(newAccessToken, user.Role.ToString(), user.Phone));
+        return Ok(ApiResponse<AuthResponse>.SuccessResult(new AuthResponse(newAccessToken, user.Role.ToString(), user.Phone)));
     }
 }
