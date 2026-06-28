@@ -3,4 +3,6 @@
   <Project Path="Apenir.Application/Apenir.Application.csproj" />
   <Project Path="Apenir.Core/Apenir.Core.csproj" />
   <Project Path="Apenir.Infrastructure/Apenir.Infrastructure.csproj" />
+  <Project Path="../tests/Apenir.UnitTests/Apenir.UnitTests.csproj" />
+  <Project Path="../tests/Apenir.IntegrationTests/Apenir.IntegrationTests.csproj" />
 </Solution>

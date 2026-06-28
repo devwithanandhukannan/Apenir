@@ -6,6 +6,10 @@
     <AssemblyName>Apenir.API</AssemblyName>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
+    <PackageReference Include="Scalar.AspNetCore" Version="2.0.4" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\Apenir.Application\Apenir.Application.csproj" />
     <ProjectReference Include="..\Apenir.Infrastructure\Apenir.Infrastructure.csproj" />
   </ItemGroup>
