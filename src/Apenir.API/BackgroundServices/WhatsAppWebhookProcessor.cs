@@ -188,6 +188,17 @@ namespace Apenir.API.BackgroundServices
                     }
                     break;
 
+                case WhatsAppState.Confirm:
+                    if (lower == "done" || lower == "pay")
+                    {
+                        await SimulatePayment(to, session, context, httpClientFactory, configuration, cancellationToken);
+                    }
+                    else
+                    {
+                        await SendTextMessage(to, "Please complete the payment and reply with *DONE*.", httpClientFactory, configuration);
+                    }
+                    break;
+
                 default:
                     await SendGreeting(to, httpClientFactory, configuration);
                     break;
@@ -206,9 +217,13 @@ namespace Apenir.API.BackgroundServices
 
                 var summary = BuildBookingSummary(session);
                 await SendTextMessage(to,
-                    $"📍 Location received!\n\n{summary}\n\n" +
-                    "💳 To confirm your booking, complete the payment below.\n\n" +
-                    "👉 Reply *PAY* to simulate payment (demo mode)",
+                    $"📍 Location received!\n\n{summary}\n",
+                    httpClientFactory, configuration);
+
+                await SendPaymentRequest(to, session, httpClientFactory, configuration, cancellationToken);
+
+                await SendTextMessage(to,
+                    "👉 Once you complete the payment, reply with *DONE* to get your booking confirmation.",
                     httpClientFactory, configuration);
             }
         }
@@ -497,6 +512,93 @@ namespace Apenir.API.BackgroundServices
                 "Please tap the paperclip 📎 → Location → and share your current location.\n\n" +
                 "This helps us confirm the nearest branch and arrange home sample collection if needed.",
                 httpClientFactory, configuration);
+        }
+
+        private async Task SendPaymentRequest(string to, WhatsAppSession session, IHttpClientFactory httpClientFactory, IConfiguration configuration, CancellationToken cancellationToken)
+        {
+            var rzpKeyId = configuration["Razorpay:KeyId"];
+            var rzpKeySecret = configuration["Razorpay:KeySecret"];
+
+            var labs = DemoData.LabsByCity.TryGetValue(session.SelectedCity ?? "", out var cityLabs) ? cityLabs : new List<Apenir.API.Controllers.Lab>();
+            var lab = labs.Find(l => l.Id == session.SelectedLabId);
+            int rate = lab?.Rate ?? 450;
+            int total = rate + (session.MemberCount > 1 ? (int)Math.Round((session.MemberCount - 1) * rate * 0.8) : 0);
+
+            string paymentUrl = "https://rzp.io/i/example";
+            try
+            {
+                var client = httpClientFactory.CreateClient();
+                var authString = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{rzpKeyId}:{rzpKeySecret}"));
+                client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", authString);
+
+                var rzpPayload = new
+                {
+                    amount = total * 100,
+                    currency = "INR",
+                    accept_partial = false,
+                    description = "LabCare Booking Payment",
+                    customer = new
+                    {
+                        name = "Customer",
+                        contact = $"+{to}",
+                    },
+                    notify = new
+                    {
+                        sms = false,
+                        email = false
+                    },
+                    reminder_enable = false,
+                    notes = new
+                    {
+                        phone = to,
+                        lab = lab?.Name
+                    }
+                };
+
+                var content = new StringContent(JsonSerializer.Serialize(rzpPayload), Encoding.UTF8, "application/json");
+                var response = await client.PostAsync("https://api.razorpay.com/v1/payment_links", content, cancellationToken);
+                
+                if (response.IsSuccessStatusCode)
+                {
+                    var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+                    using var doc = JsonDocument.Parse(responseBody);
+                    paymentUrl = doc.RootElement.GetProperty("short_url").GetString() ?? paymentUrl;
+                }
+                else
+                {
+                    var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+                    _logger.LogError("Razorpay API Error: {Error}", errorBody);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to create Razorpay payment link");
+            }
+
+            var waPayload = new
+            {
+                messaging_product = "whatsapp",
+                recipient_type = "individual",
+                to,
+                type = "interactive",
+                interactive = new
+                {
+                    type = "cta_url",
+                    header = new { type = "text", text = "Payment Request" },
+                    body = new { text = $"Please complete your payment of ₹{total} for {lab?.Name}." },
+                    footer = new { text = "Secure payment by Razorpay" },
+                    action = new
+                    {
+                        name = "cta_url",
+                        parameters = new
+                        {
+                            display_text = "Pay Now",
+                            url = paymentUrl
+                        }
+                    }
+                }
+            };
+            await SendWhatsAppMessage(waPayload, httpClientFactory, configuration);
         }
 
         private async Task SimulatePayment(string to, WhatsAppSession session, IApplicationDbContext context, IHttpClientFactory httpClientFactory, IConfiguration configuration, CancellationToken cancellationToken)
