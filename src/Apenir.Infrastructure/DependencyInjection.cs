@@ -9,7 +9,6 @@ using Apenir.Application.Common.Interfaces;
 using Apenir.Application.Common.Models;
 using Apenir.Core.Interfaces;
 using Apenir.Infrastructure.Data;
-using Apenir.Infrastructure.Persistence;
 using Apenir.Infrastructure.Repositories;
 using Apenir.Infrastructure.Security;
 using Apenir.Infrastructure.Services;
@@ -44,9 +43,6 @@ namespace Apenir.Infrastructure
             services.Configure<MongoSettings>(configuration.GetSection("MongoSettings"));
             services.Configure<JwtSettings>(configuration.GetSection("JwtSettings"));
             services.Configure<AdminSettings>(configuration.GetSection("AdminSettings"));
-
-            // Register DbContext
-            services.AddSingleton<MongoDbContext>();
 
             // Register Repositories
             services.AddScoped<IAdminRepository, AdminRepository>();

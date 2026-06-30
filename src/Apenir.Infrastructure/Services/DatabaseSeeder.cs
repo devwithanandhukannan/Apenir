@@ -1,13 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
-using MongoDB.Driver;
 using Apenir.Application.Common.Interfaces;
 using Apenir.Application.Common.Models;
 using Apenir.Core.Entities;
-using Apenir.Infrastructure.Persistence;
+using Apenir.Infrastructure.Data;
 
 namespace Apenir.Infrastructure.Services
 {
@@ -18,13 +18,13 @@ namespace Apenir.Infrastructure.Services
 
     public class DatabaseSeeder : IDatabaseSeeder
     {
-        private readonly MongoDbContext _context;
+        private readonly AppDbContext _context;
         private readonly IPasswordHasher _passwordHasher;
         private readonly AdminSettings _adminSettings;
         private readonly ILogger<DatabaseSeeder> _logger;
 
         public DatabaseSeeder(
-            MongoDbContext context,
+            AppDbContext context,
             IPasswordHasher passwordHasher,
             IOptions<AdminSettings> adminSettings,
             ILogger<DatabaseSeeder> logger)
@@ -39,8 +39,8 @@ namespace Apenir.Infrastructure.Services
         {
             try
             {
-                var adminCount = await _context.Admins.CountDocumentsAsync(Builders<Admin>.Filter.Empty);
-                if (adminCount == 0)
+                var hasAdmin = await _context.Admins.AnyAsync();
+                if (!hasAdmin)
                 {
                     _logger.LogInformation("No administrators found in database. Seeding default administrator account...");
 
@@ -57,7 +57,8 @@ namespace Apenir.Infrastructure.Services
                         CreatedAt = DateTime.UtcNow
                     };
 
-                    await _context.Admins.InsertOneAsync(defaultAdmin);
+                    _context.Admins.Add(defaultAdmin);
+                    await _context.SaveChangesAsync();
                     _logger.LogInformation("Default administrator account successfully seeded. Email: {Email}", defaultAdmin.Email);
                 }
             }

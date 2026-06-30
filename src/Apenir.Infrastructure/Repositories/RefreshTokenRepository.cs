@@ -2,78 +2,95 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using MongoDB.Driver;
+using Microsoft.EntityFrameworkCore;
 using Apenir.Application.Common.Interfaces;
 using Apenir.Core.Entities;
-using Apenir.Infrastructure.Persistence;
+using Apenir.Infrastructure.Data;
 
 namespace Apenir.Infrastructure.Repositories
 {
     public class RefreshTokenRepository : IRefreshTokenRepository
     {
-        private readonly MongoDbContext _context;
+        private readonly AppDbContext _context;
 
-        public RefreshTokenRepository(MongoDbContext context)
+        public RefreshTokenRepository(AppDbContext context)
         {
             _context = context;
         }
 
         public async Task AddAsync(RefreshToken token, CancellationToken cancellationToken = default)
         {
-            await _context.RefreshTokens.InsertOneAsync(token, null, cancellationToken);
+            _context.RefreshTokens.Add(token);
+            await _context.SaveChangesAsync(cancellationToken);
         }
 
         public async Task<RefreshToken?> GetByTokenAsync(string token, CancellationToken cancellationToken = default)
         {
             return await _context.RefreshTokens
-                .Find(t => t.Token == token)
-                .FirstOrDefaultAsync(cancellationToken);
+                .AsNoTracking()
+                .FirstOrDefaultAsync(t => t.Token == token, cancellationToken);
         }
 
         public async Task<RefreshToken?> GetActiveTokenAsync(string token, CancellationToken cancellationToken = default)
         {
             var now = DateTime.UtcNow;
             return await _context.RefreshTokens
-                .Find(t => t.Token == token && t.RevokedAt == null && t.ExpiresAt > now)
-                .FirstOrDefaultAsync(cancellationToken);
+                .AsNoTracking()
+                .FirstOrDefaultAsync(t => t.Token == token && t.RevokedAt == null && t.ExpiresAt > now, cancellationToken);
         }
 
         public async Task RevokeAsync(string token, string? revokedByIp, string? replacedByToken, CancellationToken cancellationToken = default)
         {
-            var filter = Builders<RefreshToken>.Filter.Eq(t => t.Token, token);
-            var update = Builders<RefreshToken>.Update
-                .Set(t => t.RevokedAt, DateTime.UtcNow)
-                .Set(t => t.RevokedByIp, revokedByIp)
-                .Set(t => t.ReplacedByToken, replacedByToken);
+            var dbToken = await _context.RefreshTokens.FirstOrDefaultAsync(t => t.Token == token, cancellationToken);
+            if (dbToken == null)
+            {
+                return;
+            }
 
-            await _context.RefreshTokens.UpdateOneAsync(filter, update, null, cancellationToken);
+            dbToken.RevokedAt = DateTime.UtcNow;
+            dbToken.RevokedByIp = revokedByIp;
+            dbToken.ReplacedByToken = replacedByToken;
+            _context.RefreshTokens.Update(dbToken);
+            await _context.SaveChangesAsync(cancellationToken);
         }
 
         public async Task RevokeAllForAdminAsync(Guid adminId, string? revokedByIp, CancellationToken cancellationToken = default)
         {
-            var filter = Builders<RefreshToken>.Filter.And(
-                Builders<RefreshToken>.Filter.Eq(t => t.AdminId, adminId),
-                Builders<RefreshToken>.Filter.Eq(t => t.RevokedAt, null)
-            );
-            var update = Builders<RefreshToken>.Update
-                .Set(t => t.RevokedAt, DateTime.UtcNow)
-                .Set(t => t.RevokedByIp, revokedByIp);
+            var tokens = await _context.RefreshTokens
+                .Where(t => t.AdminId == adminId && t.RevokedAt == null)
+                .ToListAsync(cancellationToken);
 
-            await _context.RefreshTokens.UpdateManyAsync(filter, update, null, cancellationToken);
+            foreach (var token in tokens)
+            {
+                token.RevokedAt = DateTime.UtcNow;
+                token.RevokedByIp = revokedByIp;
+            }
+
+            if (tokens.Count > 0)
+            {
+                _context.RefreshTokens.UpdateRange(tokens);
+                await _context.SaveChangesAsync(cancellationToken);
+            }
         }
 
         public async Task DeleteExpiredAsync(CancellationToken cancellationToken = default)
         {
-            // Note: MongoDB TTL index should handle this automatically, 
-            // but this manual cleanup provides an explicit fallback query.
-            var filter = Builders<RefreshToken>.Filter.Lt(t => t.ExpiresAt, DateTime.UtcNow);
-            await _context.RefreshTokens.DeleteManyAsync(filter, cancellationToken);
+            var expiredTokens = await _context.RefreshTokens
+                .Where(t => t.ExpiresAt < DateTime.UtcNow)
+                .ToListAsync(cancellationToken);
+
+            if (expiredTokens.Count > 0)
+            {
+                _context.RefreshTokens.RemoveRange(expiredTokens);
+                await _context.SaveChangesAsync(cancellationToken);
+            }
         }
 
         public async Task<List<RefreshToken>> GetByAdminIdAsync(Guid adminId, CancellationToken cancellationToken = default)
         {
             return await _context.RefreshTokens
-                .Find(t => t.AdminId == adminId)
+                .AsNoTracking()
+                .Where(t => t.AdminId == adminId)
                 .ToListAsync(cancellationToken);
         }
     }
