@@ -12,8 +12,8 @@ namespace Apenir.Application.Common.Interfaces
         Task<RefreshToken?> GetByTokenAsync(string token, CancellationToken cancellationToken = default);
         Task<RefreshToken?> GetActiveTokenAsync(string token, CancellationToken cancellationToken = default);
         Task RevokeAsync(string token, string? revokedByIp, string? replacedByToken, CancellationToken cancellationToken = default);
-        Task RevokeAllForAdminAsync(Guid adminId, string? revokedByIp, CancellationToken cancellationToken = default);
+        Task RevokeAllForUserAsync(string userId, string? revokedByIp, CancellationToken cancellationToken = default);
         Task DeleteExpiredAsync(CancellationToken cancellationToken = default);
-        Task<List<RefreshToken>> GetByAdminIdAsync(Guid adminId, CancellationToken cancellationToken = default);
+        Task<List<RefreshToken>> GetByUserIdAsync(string userId, CancellationToken cancellationToken = default);
     }
 }

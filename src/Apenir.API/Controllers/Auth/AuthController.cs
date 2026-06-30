@@ -1,200 +1,136 @@
-using Microsoft.AspNetCore.Mvc;
-using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Configuration;
-using Microsoft.AspNetCore.Http;
-using Apenir.Core.Entities;
-using Apenir.Core.Enums;
-using Apenir.Core.Interfaces;
-using Apenir.API.DTOs;
-using Apenir.Infrastructure.Services;
-using Apenir.API.Middleware;
-using Apenir.Application.Common.Models;
-using Apenir.API.Helpers;
-using System;
-using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
+using MediatR;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Authorization;
+using Apenir.API.DTOs;
+using Apenir.Application.Common.Models;
+using Apenir.Application.DTOs;
+using Apenir.Application.Features.Auth.Commands;
+using Apenir.API.Helpers;
 
-namespace Apenir.API.Controllers;
-
-[ApiController]
-[Route("api/[controller]")]
-public class AuthController : ControllerBase
+namespace Apenir.API.Controllers
 {
-    private readonly IApplicationDbContext _context;
-    private readonly IWhatsAppService _whatsappService;
-    private readonly IConfiguration _configuration;
-
-    public AuthController(IApplicationDbContext context, IWhatsAppService whatsappService, IConfiguration configuration)
+    [ApiController]
+    [Route("api/[controller]")]
+    public class AuthController : ControllerBase
     {
-        _context = context;
-        _whatsappService = whatsappService;
-        _configuration = configuration;
-    }
+        private readonly IMediator _mediator;
 
-    [HttpPost("otp/send")]
-    public async Task<IActionResult> SendOtp([FromBody] SendOtpRequest request)
-    {
-        var random = new Random();
-        string otp = random.Next(100000, 999999).ToString();
-        string hashedOtp = WhatsAppService.HashOtp(otp);
-        var oldCodes = await _context.OtpCodes.Where(o => o.Phone == request.Phone).ToListAsync();
-        _context.OtpCodes.RemoveRange(oldCodes);
-
-        var otpEntry = new OtpCode
+        public AuthController(IMediator mediator)
         {
-            Phone = request.Phone,
-            HashCode = hashedOtp,
-            ExpiresAt = DateTime.UtcNow.AddMinutes(5)
-        };
-
-        _context.OtpCodes.Add(otpEntry);
-        await _context.SaveChangesAsync();
-        //send whatsapp sms
-        await _whatsappService.SendTextMessageAsync(request.Phone, $"Your LabBook OTP is: {otp}. Valid for 5 minutes.");
-
-        return Ok(ApiResponse.SuccessResult("OTP_SENT"));
-    }
-
-    [HttpPost("otp/verify")]
-    public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpRequest request)
-    {
-        string hashedInput = WhatsAppService.HashOtp(request.Otp);
-
-        var otpRecord = await _context.OtpCodes
-            .Where(o => o.Phone == request.Phone && o.ExpiresAt > DateTime.UtcNow)
-            .FirstOrDefaultAsync();
-
-        if (otpRecord == null || otpRecord.HashCode != hashedInput)
-        {
-            return BadRequest(ApiResponse<AuthResponse>.FailureResult("OTP_INVALID_OR_EXPIRED"));
+            _mediator = mediator;
         }
 
-        _context.OtpCodes.Remove(otpRecord);
-
-        var user = await _context.Users.FirstOrDefaultAsync(u => u.Phone == request.Phone);
-        if (user == null)
+        [HttpPost("otp/send")]
+        [EndpointSummary("Send OTP")]
+        [EndpointDescription("Sends an OTP to the provided phone number.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> SendOtp([FromBody] SendOtpRequest request, CancellationToken cancellationToken)
         {
-            user = new User 
-            { 
-                Phone = request.Phone, 
-                Role = UserRole.Customer 
-            };
-            _context.Users.Add(user);
-
-            var customer = new Customer 
-            { 
-                UserId = user.Id, 
-                Phone = request.Phone 
-            };
-            _context.Customers.Add(customer);
-
-            await _context.SaveChangesAsync();
+            var result = await _mediator.Send(new SendOtpCommand(request), cancellationToken);
+            return Ok(result);
         }
 
-        // Generate JWT Access Token using JwtHelper
-        var secret = _configuration["Jwt:Secret"] ?? "super_secret_key_which_is_at_least_32_bytes_long_1234567890";
-        var issuer = _configuration["Jwt:Issuer"] ?? "labbook.in";
-        var audience = _configuration["Jwt:Audience"] ?? "labbook-app";
-
-        string jwtToken = JwtHelper.GenerateToken(user.Id, user.Role.ToString(), user.Phone, secret, issuer, audience, 15);
-
-        // Generate Refresh Token
-        var secureBytes = new byte[32];
-        using (var rng = RandomNumberGenerator.Create())
+        [HttpPost("otp/verify")]
+        [EndpointSummary("Verify OTP")]
+        [EndpointDescription("Verifies the OTP and issues a JWT and Refresh Token.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<AuthResponse>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse<AuthResponse>))]
+        public async Task<IActionResult> VerifyOtp([FromBody] VerifyOtpRequest request, CancellationToken cancellationToken)
         {
-            rng.GetBytes(secureBytes);
-        }
-        string rawRefreshToken = Convert.ToBase64String(secureBytes);
+            var result = await _mediator.Send(
+                new VerifyOtpCommand(request, Request.Headers["User-Agent"].ToString(), HttpContext.Connection.RemoteIpAddress?.ToString()), 
+                cancellationToken);
 
-        using var sha256 = SHA256.Create();
-        byte[] hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(rawRefreshToken));
-        string tokenHash = Convert.ToHexString(hashBytes).ToLower();
+            if (result.Success && result.Data != null)
+            {
+                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/api/auth/refresh");
+                result.Data = result.Data with { RefreshToken = string.Empty }; // Hide from response body
+            }
 
-        var dbRefreshToken = new RefreshToken
-        {
-            UserId = user.Id,
-            TokenHash = tokenHash,
-            ExpiresAt = DateTime.UtcNow.AddDays(7),
-            CreatedAt = DateTime.UtcNow,
-            IpAddress = HttpContext.Connection.RemoteIpAddress?.ToString(),
-            UserAgent = Request.Headers["User-Agent"].ToString()
-        };
+            if (!result.Success)
+            {
+                return BadRequest(result);
+            }
 
-        _context.RefreshTokens.Add(dbRefreshToken);
-        await _context.SaveChangesAsync();
-
-        // Refresh Token as HttpOnly Cookie
-        CookieHelper.SetRefreshTokenCookie(HttpContext, rawRefreshToken, "/api/auth/refresh");
-
-        return Ok(ApiResponse<AuthResponse>.SuccessResult(new AuthResponse(jwtToken, user.Role.ToString(), user.Phone)));
-    }
-
-    [HttpPost("refresh")]
-    public async Task<IActionResult> RefreshToken()
-    {
-        var rawRefreshToken = CookieHelper.GetRefreshTokenCookie(HttpContext);
-        if (string.IsNullOrEmpty(rawRefreshToken))
-        {
-            return BadRequest(ApiResponse<AuthResponse>.FailureResult("REFRESH_TOKEN_REQUIRED"));
+            return Ok(result);
         }
 
-        using var sha256 = SHA256.Create();
-        byte[] hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(rawRefreshToken));
-        string tokenHash = Convert.ToHexString(hashBytes).ToLower();
-
-        var dbToken = await _context.RefreshTokens
-            .FirstOrDefaultAsync(r => r.TokenHash == tokenHash && !r.IsRevoked && r.ExpiresAt > DateTime.UtcNow);
-
-        if (dbToken == null)
+        [HttpPost("refresh")]
+        [EndpointSummary("Refresh Token")]
+        [EndpointDescription("Issues a new access token using a valid refresh token.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<RefreshTokenResponse>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse<AuthResponse>))]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized, Type = typeof(ApiResponse<AuthResponse>))]
+        public async Task<IActionResult> RefreshToken([FromBody] RefreshTokenRequest request, CancellationToken cancellationToken)
         {
-            return Unauthorized(ApiResponse<AuthResponse>.FailureResult("Invalid or expired refresh token"));
+            string? refreshToken = request?.RefreshToken;
+            var cookieToken = CookieHelper.GetRefreshTokenCookie(HttpContext);
+            if (!string.IsNullOrEmpty(cookieToken))
+            {
+                refreshToken = cookieToken;
+            }
+
+            if (string.IsNullOrEmpty(refreshToken))
+            {
+                return BadRequest(ApiResponse<AuthResponse>.FailureResult("Refresh token is required."));
+            }
+
+            var result = await _mediator.Send(
+                new CommonRefreshTokenCommand(new RefreshTokenRequest { RefreshToken = refreshToken }, HttpContext.Connection.RemoteIpAddress?.ToString(), Request.Headers["User-Agent"].ToString()), 
+                cancellationToken);
+
+            if (result.Success && result.Data != null)
+            {
+                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/api/auth/refresh");
+                result.Data.RefreshToken = string.Empty;
+                return Ok(ApiResponse<AuthResponse>.SuccessResult(new AuthResponse(result.Data.AccessToken, string.Empty, string.Empty, string.Empty))); // Ideally we'd have a unified response type
+            }
+            
+            return Unauthorized(result);
+        }
+        
+        [HttpPost("logout")]
+        [EndpointSummary("Logout")]
+        [EndpointDescription("Revokes the current refresh token.")]
+        public async Task<IActionResult> Logout([FromBody] RefreshTokenRequest request, CancellationToken cancellationToken)
+        {
+            string? refreshToken = request?.RefreshToken;
+            var cookieToken = CookieHelper.GetRefreshTokenCookie(HttpContext);
+            if (!string.IsNullOrEmpty(cookieToken))
+            {
+                refreshToken = cookieToken;
+            }
+
+            if (string.IsNullOrEmpty(refreshToken))
+            {
+                return BadRequest(ApiResponse.FailureResult("Refresh token is required."));
+            }
+
+            var result = await _mediator.Send(new CommonLogoutCommand(refreshToken, HttpContext.Connection.RemoteIpAddress?.ToString()), cancellationToken);
+            if (result.Success)
+            {
+                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/api/auth/refresh");
+            }
+            return Ok(result);
         }
 
-        // Rotate token: revoke old one immediately
-        dbToken.IsRevoked = true;
-        _context.RefreshTokens.Update(dbToken);
-
-        var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == dbToken.UserId);
-        if (user == null)
+        [Authorize]
+        [HttpPost("logout-all")]
+        [EndpointSummary("Logout From All Devices")]
+        [EndpointDescription("Revokes all refresh tokens issued to the currently logged in user.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status401Unauthorized, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> LogoutAll(CancellationToken cancellationToken)
         {
-            await _context.SaveChangesAsync();
-            return Unauthorized(ApiResponse<AuthResponse>.FailureResult("User not found"));
+            var result = await _mediator.Send(new CommonLogoutAllDevicesCommand(), cancellationToken);
+            if (result.Success)
+            {
+                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/api/auth/refresh");
+            }
+            return Ok(result);
         }
-
-        // Generate new Access Token
-        var secret = _configuration["Jwt:Secret"] ?? "super_secret_key_which_is_at_least_32_bytes_long_1234567890";
-        var issuer = _configuration["Jwt:Issuer"] ?? "labbook.in";
-        var audience = _configuration["Jwt:Audience"] ?? "labbook-app";
-
-        string newAccessToken = JwtHelper.GenerateToken(user.Id, user.Role.ToString(), user.Phone, secret, issuer, audience, 15);
-
-        // Generate new Refresh Token
-        var secureBytes = new byte[32];
-        using (var rng = RandomNumberGenerator.Create())
-        {
-            rng.GetBytes(secureBytes);
-        }
-        string newRawRefreshToken = Convert.ToBase64String(secureBytes);
-        byte[] newHashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(newRawRefreshToken));
-        string newTokenHash = Convert.ToHexString(newHashBytes).ToLower();
-
-        var newDbToken = new RefreshToken
-        {
-            UserId = user.Id,
-            TokenHash = newTokenHash,
-            ExpiresAt = DateTime.UtcNow.AddDays(7),
-            CreatedAt = DateTime.UtcNow,
-            IpAddress = HttpContext.Connection.RemoteIpAddress?.ToString(),
-            UserAgent = Request.Headers["User-Agent"].ToString()
-        };
-        _context.RefreshTokens.Add(newDbToken);
-
-        await _context.SaveChangesAsync();
-
-        CookieHelper.SetRefreshTokenCookie(HttpContext, newRawRefreshToken, "/api/auth/refresh");
-
-        return Ok(ApiResponse<AuthResponse>.SuccessResult(new AuthResponse(newAccessToken, user.Role.ToString(), user.Phone)));
     }
 }

@@ -65,7 +65,7 @@ namespace Apenir.Application.Features.AdminAuth.Commands
             {
                 Id = Guid.NewGuid(),
                 Token = refreshTokenString,
-                AdminId = admin.Id,
+                UserId = admin.Id.ToString(),
                 ExpiresAt = DateTime.UtcNow.AddDays(_jwtSettings.RefreshTokenExpiryDays),
                 CreatedAt = DateTime.UtcNow,
                 CreatedByIp = _currentUserService.IpAddress ?? "unknown",
@@ -129,9 +129,7 @@ namespace Apenir.Application.Features.AdminAuth.Commands
 
             if (activeToken.IsRevoked)
             {
-                // Refresh token reuse/replay attack protection
-                // Revoke all tokens for this admin to secure the account
-                await _refreshTokenRepository.RevokeAllForAdminAsync(activeToken.AdminId, _currentUserService.IpAddress, cancellationToken);
+                await _refreshTokenRepository.RevokeAllForUserAsync(activeToken.UserId, _currentUserService.IpAddress, cancellationToken);
                 throw new RefreshTokenRevokedException("Warning: Replay attack detected. Token was already revoked. Revoking all tokens for security.");
             }
 
@@ -140,7 +138,12 @@ namespace Apenir.Application.Features.AdminAuth.Commands
                 throw new RefreshTokenExpiredException();
             }
 
-            var admin = await _adminRepository.GetByIdAsync(activeToken.AdminId, cancellationToken);
+            if (!Guid.TryParse(activeToken.UserId, out var adminId)) 
+            {
+                throw new UnauthorizedException();
+            }
+
+            var admin = await _adminRepository.GetByIdAsync(adminId, cancellationToken);
             if (admin == null || admin.IsDeleted || !admin.IsActive)
             {
                 throw new AccountDisabledException();
@@ -157,7 +160,7 @@ namespace Apenir.Application.Features.AdminAuth.Commands
             {
                 Id = Guid.NewGuid(),
                 Token = newRefreshTokenString,
-                AdminId = admin.Id,
+                UserId = admin.Id.ToString(),
                 ExpiresAt = DateTime.UtcNow.AddDays(_jwtSettings.RefreshTokenExpiryDays),
                 CreatedAt = DateTime.UtcNow,
                 CreatedByIp = _currentUserService.IpAddress ?? "unknown",
@@ -305,7 +308,7 @@ namespace Apenir.Application.Features.AdminAuth.Commands
                 throw new UnauthorizedException();
             }
 
-            await _refreshTokenRepository.RevokeAllForAdminAsync(adminId.Value, _currentUserService.IpAddress, cancellationToken);
+            await _refreshTokenRepository.RevokeAllForUserAsync(adminId.Value.ToString(), _currentUserService.IpAddress, cancellationToken);
             return ApiResponse.SuccessResult("Successfully logged out from all devices");
         }
     }

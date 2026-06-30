@@ -39,5 +39,28 @@ namespace Apenir.Infrastructure.Repositories
             return await _context.Admins
                 .AnyAsync(a => a.Email.ToLower() == lowercaseEmail && !a.IsDeleted, cancellationToken);
         }
+
+        public async Task CreateAsync(Admin admin, CancellationToken cancellationToken = default)
+        {
+            _context.Admins.Add(admin);
+            await _context.SaveChangesAsync(cancellationToken);
+        }
+
+        public async Task UpdateAsync(Admin admin, CancellationToken cancellationToken = default)
+        {
+            _context.Admins.Update(admin);
+            await _context.SaveChangesAsync(cancellationToken);
+        }
+
+        public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            var admin = await _context.Admins.FindAsync(new object[] { id }, cancellationToken);
+            if (admin != null)
+            {
+                admin.IsDeleted = true;
+                _context.Admins.Update(admin);
+                await _context.SaveChangesAsync(cancellationToken);
+            }
+        }
     }
 }

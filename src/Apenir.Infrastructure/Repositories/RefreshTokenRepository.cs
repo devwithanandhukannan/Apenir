@@ -54,10 +54,10 @@ namespace Apenir.Infrastructure.Repositories
             await _context.SaveChangesAsync(cancellationToken);
         }
 
-        public async Task RevokeAllForAdminAsync(Guid adminId, string? revokedByIp, CancellationToken cancellationToken = default)
+        public async Task RevokeAllForUserAsync(string userId, string? revokedByIp, CancellationToken cancellationToken = default)
         {
             var tokens = await _context.RefreshTokens
-                .Where(t => t.AdminId == adminId && t.RevokedAt == null)
+                .Where(t => t.UserId == userId && t.RevokedAt == null)
                 .ToListAsync(cancellationToken);
 
             foreach (var token in tokens)
@@ -86,11 +86,11 @@ namespace Apenir.Infrastructure.Repositories
             }
         }
 
-        public async Task<List<RefreshToken>> GetByAdminIdAsync(Guid adminId, CancellationToken cancellationToken = default)
+        public async Task<List<RefreshToken>> GetByUserIdAsync(string userId, CancellationToken cancellationToken = default)
         {
             return await _context.RefreshTokens
                 .AsNoTracking()
-                .Where(t => t.AdminId == adminId)
+                .Where(t => t.UserId == userId)
                 .ToListAsync(cancellationToken);
         }
     }

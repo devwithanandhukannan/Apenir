@@ -8,6 +8,7 @@ using Apenir.Application.Common.Models;
 using Apenir.Application.DTOs;
 using Apenir.Application.Features.AdminAuth.Commands;
 using Apenir.Application.Features.AdminAuth.Queries;
+using Apenir.Application.Features.Auth.Commands;
 using Apenir.API.Helpers;
 
 namespace Apenir.API.Controllers
@@ -34,80 +35,8 @@ namespace Apenir.API.Controllers
             var result = await _mediator.Send(new AdminLoginCommand(request), cancellationToken);
             if (result.Success && result.Data != null)
             {
-                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/api/AdminAuth/refresh");
+                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/api/auth/refresh");
                 result.Data.RefreshToken = string.Empty;
-            }
-            return Ok(result);
-        }
-
-        [HttpPost("refresh")]
-        [EndpointSummary("Refresh Access Token")]
-        [EndpointDescription("Uses a valid refresh token to rotate keys and issue a new access/refresh token pair.")]
-        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<RefreshTokenResponse>))]
-        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
-        [ProducesResponseType(StatusCodes.Status401Unauthorized, Type = typeof(ApiResponse))]
-        public async Task<IActionResult> Refresh([FromBody] RefreshTokenRequest request, CancellationToken cancellationToken)
-        {
-            string? refreshToken = request?.RefreshToken;
-            var cookieToken = CookieHelper.GetRefreshTokenCookie(HttpContext);
-            if (!string.IsNullOrEmpty(cookieToken))
-            {
-                refreshToken = cookieToken;
-            }
-
-            if (string.IsNullOrEmpty(refreshToken))
-            {
-                return BadRequest(ApiResponse<RefreshTokenResponse>.FailureResult("Refresh token is required."));
-            }
-
-            var result = await _mediator.Send(new RefreshTokenCommand(new RefreshTokenRequest { RefreshToken = refreshToken }), cancellationToken);
-            if (result.Success && result.Data != null)
-            {
-                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/api/AdminAuth/refresh");
-                result.Data.RefreshToken = string.Empty;
-            }
-            return Ok(result);
-        }
-
-        [HttpPost("logout")]
-        [EndpointSummary("Revoke Current Refresh Token / Logout")]
-        [EndpointDescription("Invalidates a specific refresh token, ending the active session.")]
-        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
-        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
-        public async Task<IActionResult> Logout([FromBody] RefreshTokenRequest request, CancellationToken cancellationToken)
-        {
-            string? refreshToken = request?.RefreshToken;
-            var cookieToken = CookieHelper.GetRefreshTokenCookie(HttpContext);
-            if (!string.IsNullOrEmpty(cookieToken))
-            {
-                refreshToken = cookieToken;
-            }
-
-            if (string.IsNullOrEmpty(refreshToken))
-            {
-                return BadRequest(ApiResponse.FailureResult("Refresh token is required."));
-            }
-
-            var result = await _mediator.Send(new LogoutCommand(refreshToken), cancellationToken);
-            if (result.Success)
-            {
-                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/api/AdminAuth/refresh");
-            }
-            return Ok(result);
-        }
-
-        [Authorize]
-        [HttpPost("logout-all")]
-        [EndpointSummary("Logout From All Devices")]
-        [EndpointDescription("Revokes all refresh tokens issued to the currently logged in administrator.")]
-        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
-        [ProducesResponseType(StatusCodes.Status401Unauthorized, Type = typeof(ApiResponse))]
-        public async Task<IActionResult> LogoutAll(CancellationToken cancellationToken)
-        {
-            var result = await _mediator.Send(new LogoutAllDevicesCommand(), cancellationToken);
-            if (result.Success)
-            {
-                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/api/AdminAuth/refresh");
             }
             return Ok(result);
         }

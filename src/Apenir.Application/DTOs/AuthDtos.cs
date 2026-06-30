@@ -14,5 +14,6 @@ public record VerifyOtpRequest(
 public record AuthResponse(
     string AccessToken, 
     string Role, 
-    string Phone
+    string Phone,
+    string RefreshToken = ""
 );
