@@ -13,22 +13,22 @@ namespace Apenir.Core.Entities
 
 		[Required]
 		[StringLength(255)]
-		public string VendorName { get; private set; }
+		public string VendorName { get; private set; } = string.Empty;
 
 		[Required]
 		[StringLength(20)]
-		public string ContactNumber1 { get; private set; }
+		public string ContactNumber1 { get; private set; } = string.Empty;
 
 		[StringLength(20)]
-		public string ContactNumber2 { get; private set; }
+		public string ContactNumber2 { get; private set; } = string.Empty;
 
 		[Required]
 		[StringLength(255)]
 		[EmailAddress]
-		public string Email { get; private set; }
+		public string Email { get; private set; } = string.Empty;
 
 		[Required]
-		public string PasswordHash { get; private set; }
+		public string PasswordHash { get; private set; } = string.Empty;
 
 		[DatabaseGenerated(DatabaseGeneratedOption.Computed)]
 		public DateTime CreatedAt { get; private set; }

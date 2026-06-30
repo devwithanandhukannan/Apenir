@@ -44,12 +44,18 @@ namespace Apenir.Infrastructure.Services
                 {
                     _logger.LogInformation("No administrators found in database. Seeding default administrator account...");
 
+                    if (string.IsNullOrWhiteSpace(_adminSettings.DefaultEmail) || string.IsNullOrWhiteSpace(_adminSettings.DefaultPassword))
+                    {
+                        _logger.LogWarning("AdminSettings:DefaultEmail or AdminSettings:DefaultPassword is not configured. Skipping default administrator seeding.");
+                        return;
+                    }
+
                     var defaultAdmin = new Admin
                     {
                         Id = Guid.NewGuid(),
-                        Email = string.IsNullOrWhiteSpace(_adminSettings.DefaultEmail) ? "admin@apenir.com" : _adminSettings.DefaultEmail,
-                        FullName = string.IsNullOrWhiteSpace(_adminSettings.DefaultFullName) ? "Default Administrator" : _adminSettings.DefaultFullName,
-                        PasswordHash = _passwordHasher.Hash(string.IsNullOrWhiteSpace(_adminSettings.DefaultPassword) ? "Admin@Pass123" : _adminSettings.DefaultPassword),
+                        Email = _adminSettings.DefaultEmail,
+                        FullName = string.IsNullOrWhiteSpace(_adminSettings.DefaultFullName) ? "Super Admin" : _adminSettings.DefaultFullName,
+                        PasswordHash = _passwordHasher.Hash(_adminSettings.DefaultPassword),
                         IsActive = true,
                         IsDeleted = false,
                         Roles = new List<string> { "SuperAdmin", "Admin" },

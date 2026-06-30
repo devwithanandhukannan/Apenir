@@ -46,7 +46,7 @@ Admin endpoints manage administrator sessions, tokens, and password management. 
     }
     ```
 *   **Response (200 OK)**:
-    *   **Cookie set**: `refresh_token` (HttpOnly, Secure, SameSite=Strict, Path=/api/AdminAuth/refresh)
+    *   **Cookie set**: `refresh_token` (HttpOnly, Secure, SameSite=Strict, Path=/api/auth/refresh)
     *   **Body** (`ApiResponse<LoginResponse>`):
          ```json
          {
@@ -63,52 +63,7 @@ Admin endpoints manage administrator sessions, tokens, and password management. 
          }
          ```
 
-### POST `/api/AdminAuth/refresh`
-*   **Description**: Rotates keys and returns a fresh JWT access token.
-*   **Headers**: None (reads from the `refresh_token` cookie)
-*   **Request Body**: None (Fallback: accepts `{"refreshToken": "string"}` if cookies are not used)
-*   **Response (200 OK)**:
-    *   **Cookie set**: Sets new rotated `refresh_token` cookie.
-    *   **Body** (`ApiResponse<RefreshTokenResponse>`):
-        ```json
-        {
-          "success": true,
-          "message": "",
-          "data": {
-            "accessToken": "eyJhbGciOi...",
-            "refreshToken": "" // Rotated refresh token placed in cookie
-          },
-          "errors": []
-        }
-        ```
 
-### POST `/api/AdminAuth/logout`
-*   **Description**: Invalidates the current refresh token and logs out the admin.
-*   **Headers**: None (reads cookie)
-*   **Request Body**: None (Fallback: accepts `{"refreshToken": "string"}`)
-*   **Response (200 OK)** (`ApiResponse`):
-    *   **Cookie cleared**: Clears `refresh_token` cookie.
-    *   **Body**:
-        ```json
-        {
-          "success": true,
-          "message": "Logged out successfully",
-          "errors": []
-        }
-        ```
-
-### POST `/api/AdminAuth/logout-all`
-*   **Description**: Revokes all active refresh tokens for the authenticated administrator.
-*   **Headers**: `Authorization: Bearer <AccessToken>`
-*   **Request Body**: None
-*   **Response (200 OK)** (`ApiResponse`):
-    ```json
-    {
-      "success": true,
-      "message": "Logged out from all devices",
-      "errors": []
-    }
-    ```
 
 ### POST `/api/AdminAuth/change-password`
 *   **Description**: Updates password for the authenticated administrator.
@@ -260,10 +215,10 @@ This layer handles user registration and login via standard WhatsApp message val
         ```
 
 ### POST `/api/Auth/refresh`
-*   **Description**: Refreshes JWT access token for customer.
+*   **Description**: Refreshes JWT access token for any user (Customer or Admin).
 *   **Headers**: None (reads `refresh_token` cookie)
-*   **Request Body**: None
-*   **Response (200 OK)** (`ApiResponse<AuthResponse>`):
+*   **Request Body**: None (Fallback: accepts `{"refreshToken": "string"}` if cookies are not used)
+*   **Response (200 OK)** (`ApiResponse<RefreshTokenResponse>`):
     *   **Cookie set**: Rotated `refresh_token` cookie.
     *   **Body**:
         ```json
@@ -272,9 +227,38 @@ This layer handles user registration and login via standard WhatsApp message val
           "message": "",
           "data": {
             "accessToken": "eyJhbGciOi...",
-            "role": "Customer",
-            "phone": "+919876543210"
+            "refreshToken": ""
           },
+          "errors": []
+        }
+        ```
+
+### POST `/api/Auth/logout`
+*   **Description**: Invalidates the current refresh token and logs out the user (Customer or Admin) from this device.
+*   **Headers**: None (reads cookie)
+*   **Request Body**: None (Fallback: accepts `{"refreshToken": "string"}`)
+*   **Response (200 OK)** (`ApiResponse`):
+    *   **Cookie cleared**: Clears `refresh_token` cookie from `/api/auth/refresh`.
+    *   **Body**:
+        ```json
+        {
+          "success": true,
+          "message": "Logout successful",
+          "errors": []
+        }
+        ```
+
+### POST `/api/Auth/logout-all`
+*   **Description**: Revokes all active refresh tokens for the authenticated user (Customer or Admin) across all devices.
+*   **Headers**: `Authorization: Bearer <AccessToken>`
+*   **Request Body**: None
+*   **Response (200 OK)** (`ApiResponse`):
+    *   **Cookie cleared**: Clears `refresh_token` cookie from `/api/auth/refresh`.
+    *   **Body**:
+        ```json
+        {
+          "success": true,
+          "message": "Successfully logged out from all devices",
           "errors": []
         }
         ```

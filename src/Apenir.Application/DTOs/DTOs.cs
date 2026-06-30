@@ -12,7 +12,10 @@ namespace Apenir.Application.DTOs
     public class LoginResponse
     {
         public string AccessToken { get; set; } = string.Empty;
+        
+        [System.Text.Json.Serialization.JsonIgnore]
         public string RefreshToken { get; set; } = string.Empty;
+        
         public int ExpiresIn { get; set; }
         public Guid AdminId { get; set; }
         public string Email { get; set; } = string.Empty;
@@ -26,6 +29,8 @@ namespace Apenir.Application.DTOs
     public class RefreshTokenResponse
     {
         public string AccessToken { get; set; } = string.Empty;
+        
+        [System.Text.Json.Serialization.JsonIgnore]
         public string RefreshToken { get; set; } = string.Empty;
     }
 

@@ -140,4 +140,31 @@ namespace Apenir.Application.Features.Auth.Commands
             return ApiResponse.SuccessResult("Logout successful");
         }
     }
+
+    // --- Common Logout All Devices ---
+    public record CommonLogoutAllDevicesCommand : IRequest<ApiResponse>;
+
+    public class CommonLogoutAllDevicesCommandHandler : IRequestHandler<CommonLogoutAllDevicesCommand, ApiResponse>
+    {
+        private readonly IRefreshTokenRepository _refreshTokenRepository;
+        private readonly ICurrentUserService _currentUserService;
+
+        public CommonLogoutAllDevicesCommandHandler(IRefreshTokenRepository refreshTokenRepository, ICurrentUserService currentUserService)
+        {
+            _refreshTokenRepository = refreshTokenRepository;
+            _currentUserService = currentUserService;
+        }
+
+        public async Task<ApiResponse> Handle(CommonLogoutAllDevicesCommand command, CancellationToken cancellationToken)
+        {
+            var userId = _currentUserService.UserId;
+            if (userId == null)
+            {
+                throw new UnauthorizedException();
+            }
+
+            await _refreshTokenRepository.RevokeAllForUserAsync(userId.Value.ToString(), _currentUserService.IpAddress, cancellationToken);
+            return ApiResponse.SuccessResult("Successfully logged out from all devices");
+        }
+    }
 }

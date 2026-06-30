@@ -15,5 +15,5 @@ public record AuthResponse(
     string AccessToken, 
     string Role, 
     string Phone,
-    string RefreshToken = ""
+    [property: System.Text.Json.Serialization.JsonIgnore] string RefreshToken = ""
 );
