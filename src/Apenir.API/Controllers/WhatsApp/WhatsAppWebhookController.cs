@@ -169,7 +169,14 @@ namespace Apenir.API.Controllers
 
         private bool VerifySignature(string signatureHeader, byte[] bodyBytes)
         {
-            var appSecret = _configuration["WhatsApp:AppSecret"] ?? "MySuperSecretAppSecret123";
+            var appSecret = _configuration["WhatsApp:AppSecret"];
+            if (string.IsNullOrEmpty(appSecret))
+            {
+                // If no AppSecret is configured, bypass verification (useful for dev/testing)
+                Console.WriteLine("⚠️ Bypassing Webhook Signature Verification (WhatsApp:AppSecret is not configured)");
+                return true;
+            }
+
             if (string.IsNullOrEmpty(signatureHeader) || !signatureHeader.StartsWith("sha256="))
             {
                 return false;
