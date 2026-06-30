@@ -48,6 +48,11 @@ builder.Services.AddOpenApi(options =>
             return Task.CompletedTask;
         }
 
+        document.Servers = new List<OpenApiServer>
+        {
+            new OpenApiServer { Url = "https://api.anandhu-kannan.in", Description = "Production Server" }
+        };
+
         document.Info = new OpenApiInfo
         {
             Title = "Apenir Platform API",
