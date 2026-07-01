@@ -13,9 +13,8 @@ public class User
     [StringLength(36)]
     public string Id { get; set; } = Guid.NewGuid().ToString();
 
-    [Required]
     [StringLength(120)]
-    public string Name { get; set; } = string.Empty;
+    public string? Name { get; set; } = string.Empty;
 
     [StringLength(255)]
     [EmailAddress]
@@ -32,8 +31,7 @@ public class User
 
     public bool? IsActive { get; set; } = true;
 
-    [Required]
-    public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+    public DateTime? CreatedAt { get; set; } = DateTime.UtcNow;
 
     public DateTime? UpdatedAt { get; set; }
 }

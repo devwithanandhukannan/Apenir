@@ -57,6 +57,9 @@ public class AppDbContext : DbContext, IApplicationDbContext
         modelBuilder.Entity<OtpCode>().HasIndex(o => o.Phone);
         modelBuilder.Entity<RefreshToken>().HasIndex(r => r.TokenHash);
 
+        modelBuilder.Entity<User>().Property(u => u.Name).IsRequired(false);
+        modelBuilder.Entity<User>().Property(u => u.CreatedAt).IsRequired(false);
+
         var trueFallbackConverter = new Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<bool, bool?>(
             v => (bool?)v,
             v => v ?? true

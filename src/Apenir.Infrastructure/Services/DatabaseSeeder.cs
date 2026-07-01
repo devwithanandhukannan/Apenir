@@ -72,6 +72,8 @@ namespace Apenir.Infrastructure.Services
                     }
                 }
 
+                await BackfillLegacyUsersAsync();
+
                 // 2. Seed SuperAdmin User in users table
                 var superAdminUser = await _context.Users.FirstOrDefaultAsync(u => u.Role == UserRole.SuperAdmin);
                 if (superAdminUser == null)
@@ -371,9 +373,42 @@ namespace Apenir.Infrastructure.Services
             }
         }
         catch (Exception ex)
+        {
+            _logger.LogError(ex, "An error occurred while seeding the database.");
+        }
+    }
+
+    private async Task BackfillLegacyUsersAsync()
+    {
+        var legacyUsers = await _context.Users
+            .Where(u => u.Name == null || u.CreatedAt == null || u.IsActive == null)
+            .ToListAsync();
+
+        if (!legacyUsers.Any())
+        {
+            return;
+        }
+
+        _logger.LogInformation("Backfilling {Count} legacy user records missing Name/CreatedAt/IsActive.", legacyUsers.Count);
+
+        foreach (var user in legacyUsers)
+        {
+            if (string.IsNullOrWhiteSpace(user.Name))
             {
-                _logger.LogError(ex, "An error occurred while seeding the database.");
+                user.Name = "WhatsApp Customer";
+            }
+
+            if (user.CreatedAt == null)
+            {
+                user.CreatedAt = DateTime.UtcNow;
+            }
+
+            if (user.IsActive == null)
+            {
+                user.IsActive = true;
             }
         }
+
+        await _context.SaveChangesAsync();
     }
 }
