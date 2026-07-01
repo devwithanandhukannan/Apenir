@@ -56,6 +56,27 @@ public class AppDbContext : DbContext, IApplicationDbContext
         modelBuilder.Entity<Customer>().HasIndex(c => c.Phone).IsUnique();
         modelBuilder.Entity<OtpCode>().HasIndex(o => o.Phone);
         modelBuilder.Entity<RefreshToken>().HasIndex(r => r.TokenHash);
+
+        var trueFallbackConverter = new Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<bool, bool?>(
+            v => (bool?)v,
+            v => v ?? true
+        );
+
+        var falseFallbackConverter = new Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<bool, bool?>(
+            v => (bool?)v,
+            v => v ?? false
+        );
+
+        modelBuilder.Entity<Admin>().Property(a => a.IsActive).HasConversion(trueFallbackConverter);
+        modelBuilder.Entity<Admin>().Property(a => a.IsDeleted).HasConversion(falseFallbackConverter);
+        modelBuilder.Entity<User>().Property(u => u.IsActive).HasConversion(trueFallbackConverter);
+        modelBuilder.Entity<Branch>().Property(b => b.IsActive).HasConversion(trueFallbackConverter);
+        modelBuilder.Entity<Service>().Property(s => s.IsActive).HasConversion(trueFallbackConverter);
+        modelBuilder.Entity<BranchService>().Property(bs => bs.IsActive).HasConversion(trueFallbackConverter);
+        modelBuilder.Entity<AppointmentSlot>().Property(s => s.IsAvailable).HasConversion(trueFallbackConverter);
+        modelBuilder.Entity<BranchSlotConfiguration>().Property(c => c.IsLeave).HasConversion(falseFallbackConverter);
+        modelBuilder.Entity<Report>().Property(r => r.WhatsappSent).HasConversion(falseFallbackConverter);
+        modelBuilder.Entity<RefreshToken>().Property(r => r.IsRevoked).HasConversion(falseFallbackConverter);
     }
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
