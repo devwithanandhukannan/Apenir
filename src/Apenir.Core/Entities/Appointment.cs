@@ -62,6 +62,9 @@ public class Appointment
 
     public DateTime? UpdatedAt { get; set; }
 
+    [Required]
+    public int MemberCount { get; set; } = 1;
+
     // Navigation properties
     [ForeignKey(nameof(CustomerUserId))]
     public virtual User? CustomerUser { get; set; }
