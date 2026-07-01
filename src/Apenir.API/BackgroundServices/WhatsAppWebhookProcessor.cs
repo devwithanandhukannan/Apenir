@@ -714,7 +714,8 @@ namespace Apenir.API.BackgroundServices
                 TotalAmount = total,
                 PlatformCommission = total * 0.15m,
                 LabPayout = total * 0.85m,
-                CreatedAt = DateTime.UtcNow
+                CreatedAt = DateTime.UtcNow,
+                MemberCount = session.MemberCount
             };
             context.Appointments.Add(appointment);
 
