@@ -1,12 +1,11 @@
 using System;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
-using Apenir.Core.Enums;
 
 namespace Apenir.Core.Entities;
 
-[Table("users")]
-public class User
+[Table("services")]
+public class Service
 {
     [Key]
     [Required]
@@ -14,27 +13,24 @@ public class User
     public string Id { get; set; } = Guid.NewGuid().ToString();
 
     [Required]
-    [StringLength(120)]
+    [StringLength(200)]
     public string Name { get; set; } = string.Empty;
 
-    [StringLength(255)]
-    [EmailAddress]
-    public string? Email { get; set; }
-
-    [StringLength(20)]
-    public string? Phone { get; set; }
+    public string? Description { get; set; }
 
     [Required]
-    public UserRole Role { get; set; } = UserRole.Customer;
+    [StringLength(100)]
+    public string Category { get; set; } = string.Empty;
 
-    [StringLength(255)]
-    public string? PasswordHash { get; set; }
+    [Required]
+    public decimal BasePrice { get; set; }
+
+    [Required]
+    public decimal PlatformCommissionPct { get; set; } = 15.00m;
 
     [Required]
     public bool IsActive { get; set; } = true;
 
     [Required]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-
-    public DateTime? UpdatedAt { get; set; }
 }
