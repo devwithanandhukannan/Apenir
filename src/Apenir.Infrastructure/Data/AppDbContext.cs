@@ -83,7 +83,29 @@ public class AppDbContext : DbContext, IApplicationDbContext
         configurationBuilder.Properties<DateOnly>()
             .HaveConversion<string>();
 
+        configurationBuilder.Properties<DateOnly?>()
+            .HaveConversion<NullableDateOnlyConverter>();
+
         configurationBuilder.Properties<TimeOnly>()
             .HaveConversion<string>();
+
+        configurationBuilder.Properties<TimeOnly?>()
+            .HaveConversion<NullableTimeOnlyConverter>();
     }
+}
+
+public class NullableDateOnlyConverter : Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<DateOnly?, string?>
+{
+    public NullableDateOnlyConverter() : base(
+        d => d.HasValue ? d.Value.ToString("O") : null,
+        s => string.IsNullOrEmpty(s) ? null : DateOnly.Parse(s))
+    { }
+}
+
+public class NullableTimeOnlyConverter : Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<TimeOnly?, string?>
+{
+    public NullableTimeOnlyConverter() : base(
+        t => t.HasValue ? t.Value.ToString("O") : null,
+        s => string.IsNullOrEmpty(s) ? null : TimeOnly.Parse(s))
+    { }
 }
