@@ -30,8 +30,7 @@ public class User
     [StringLength(255)]
     public string? PasswordHash { get; set; }
 
-    [Required]
-    public bool IsActive { get; set; } = true;
+    public bool? IsActive { get; set; } = true;
 
     [Required]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
