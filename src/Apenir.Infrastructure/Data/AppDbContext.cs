@@ -60,26 +60,20 @@ public class AppDbContext : DbContext, IApplicationDbContext
         modelBuilder.Entity<User>().Property(u => u.Name).IsRequired(false);
         modelBuilder.Entity<User>().Property(u => u.CreatedAt).IsRequired(false);
 
-        var trueFallbackConverter = new Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<bool, bool?>(
-            v => (bool?)v,
-            v => v ?? true
+        var trueFallbackConverter = new Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<bool, bool>(
+            v => v,
+            v => v
         );
 
-        var falseFallbackConverter = new Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<bool, bool?>(
-            v => (bool?)v,
-            v => v ?? false
+        var falseFallbackConverter = new Microsoft.EntityFrameworkCore.Storage.ValueConversion.ValueConverter<bool, bool>(
+            v => v,
+            v => v
         );
 
-        modelBuilder.Entity<Admin>().Property(a => a.IsActive).HasConversion(trueFallbackConverter);
-        modelBuilder.Entity<Admin>().Property(a => a.IsDeleted).HasConversion(falseFallbackConverter);
-        modelBuilder.Entity<User>().Property(u => u.IsActive).HasConversion(trueFallbackConverter);
-        modelBuilder.Entity<Branch>().Property(b => b.IsActive).HasConversion(trueFallbackConverter);
-        modelBuilder.Entity<Service>().Property(s => s.IsActive).HasConversion(trueFallbackConverter);
-        modelBuilder.Entity<BranchService>().Property(bs => bs.IsActive).HasConversion(trueFallbackConverter);
-        modelBuilder.Entity<AppointmentSlot>().Property(s => s.IsAvailable).HasConversion(trueFallbackConverter);
-        modelBuilder.Entity<BranchSlotConfiguration>().Property(c => c.IsLeave).HasConversion(falseFallbackConverter);
-        modelBuilder.Entity<Report>().Property(r => r.WhatsappSent).HasConversion(falseFallbackConverter);
-        modelBuilder.Entity<RefreshToken>().Property(r => r.IsRevoked).HasConversion(falseFallbackConverter);
+        // Alternatively, since EF Core handles nullable bools natively, we can just remove these HasConversion calls
+        // But to be safe and avoid compilation errors if we just delete, I will just apply an identity converter.
+        // Actually, it's better to just not apply any converter for nullable bools if they are crashing!
+        // Let me just remove the HasConversion calls for these nullable bools.
     }
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)
