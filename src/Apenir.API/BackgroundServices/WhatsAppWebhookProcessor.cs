@@ -418,9 +418,44 @@ namespace Apenir.API.BackgroundServices
                     break;
 
                 case WhatsAppState.ChoosingLab:
-                    var labId       = replyId.Replace("lab_", "");
+                    var rawLabId = replyId ?? string.Empty;
+                    var labId = rawLabId.Replace("lab_", "").Replace("lab_branch_", "").Replace("lab_branch_user_", "");
                     var allBranches = await GetCachedBranchesAsync(context, cancellationToken);
-                    var selectedLab = allBranches.FirstOrDefault(b => b.Id == labId);
+                    Branch? selectedLab = null;
+
+                    // 1) Try direct Id matches (several common prefixes)
+                    var tryIds = new[] { labId, rawLabId, rawLabId.Replace("lab_", ""), rawLabId.Replace("lab_branch_", "") };
+                    foreach (var idTry in tryIds.Where(x => !string.IsNullOrEmpty(x)))
+                    {
+                        selectedLab = allBranches.FirstOrDefault(b => string.Equals(b.Id, idTry, StringComparison.OrdinalIgnoreCase));
+                        if (selectedLab != null) break;
+                    }
+
+                    // 2) If not found by id, try matching by title/name (exact, startswith, contains)
+                    if (selectedLab == null && !string.IsNullOrEmpty(replyTitle))
+                    {
+                        selectedLab = allBranches.FirstOrDefault(b => string.Equals(b.Name, replyTitle, StringComparison.OrdinalIgnoreCase)
+                            || b.Name.StartsWith(replyTitle, StringComparison.OrdinalIgnoreCase)
+                            || b.Name.Contains(replyTitle, StringComparison.OrdinalIgnoreCase));
+                    }
+
+                    // 3) If still not found, narrow by selected city/district then attempt name match
+                    if (selectedLab == null && !string.IsNullOrEmpty(session.SelectedCity))
+                    {
+                        var city = session.SelectedCity.ToLower();
+                        var cityBranches = allBranches.Where(b => (b.District ?? string.Empty).ToLower() == city || (b.City ?? string.Empty).ToLower() == city).ToList();
+                        if (cityBranches.Count == 1)
+                        {
+                            selectedLab = cityBranches.First();
+                        }
+                        else if (!string.IsNullOrEmpty(replyTitle))
+                        {
+                            selectedLab = cityBranches.FirstOrDefault(b => string.Equals(b.Name, replyTitle, StringComparison.OrdinalIgnoreCase)
+                                || b.Name.StartsWith(replyTitle, StringComparison.OrdinalIgnoreCase)
+                                || b.Name.Contains(replyTitle, StringComparison.OrdinalIgnoreCase));
+                        }
+                    }
+
                     if (selectedLab != null)
                     {
                         session.SelectedLabId   = selectedLab.Id;
