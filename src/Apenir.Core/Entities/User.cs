@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using Apenir.Core.Enums;
@@ -30,6 +31,14 @@ public class User
     public string? PasswordHash { get; set; }
 
     public bool? IsActive { get; set; } = true;
+
+    public bool IsDeleted { get; set; } = false;
+
+    public List<string> Roles { get; set; } = new();
+
+    public List<string> Permissions { get; set; } = new();
+
+    public DateTime? LastLoginAt { get; set; }
 
     public DateTime? CreatedAt { get; set; } = DateTime.UtcNow;
 

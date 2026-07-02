@@ -17,7 +17,7 @@ namespace Apenir.Application.DTOs
         public string RefreshToken { get; set; } = string.Empty;
         
         public int ExpiresIn { get; set; }
-        public Guid AdminId { get; set; }
+        public string AdminId { get; set; } = string.Empty;
         public string Email { get; set; } = string.Empty;
     }
 
@@ -36,7 +36,7 @@ namespace Apenir.Application.DTOs
 
     public class CurrentAdminResponse
     {
-        public Guid Id { get; set; }
+        public string Id { get; set; } = string.Empty;
         public string Email { get; set; } = string.Empty;
         public string FullName { get; set; } = string.Empty;
         public List<string> Roles { get; set; } = new();
@@ -66,7 +66,7 @@ namespace Apenir.Application.DTOs
     public class TokenValidationResponse
     {
         public bool IsValid { get; set; }
-        public Guid? AdminId { get; set; }
+        public string? AdminId { get; set; }
         public string? Email { get; set; }
         public List<string>? Roles { get; set; }
         public List<string>? Permissions { get; set; }

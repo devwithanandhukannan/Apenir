@@ -66,7 +66,7 @@ namespace Apenir.Application.Features.Auth.Commands
                 var admin = await _adminRepository.GetByIdAsync(adminGuid, cancellationToken);
                 if (admin != null)
                 {
-                    if (admin.IsDeleted || !admin.IsActive) throw new AccountDisabledException();
+                    if (admin.IsDeleted || admin.IsActive != true) throw new AccountDisabledException();
                     newAccessToken = _jwtTokenService.GenerateAccessToken(admin);
                 }
                 else

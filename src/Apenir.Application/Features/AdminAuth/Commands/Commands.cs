@@ -48,12 +48,12 @@ namespace Apenir.Application.Features.AdminAuth.Commands
                 throw new InvalidCredentialsException();
             }
 
-            if (!_passwordHasher.Verify(req.Password, admin.PasswordHash))
+            if (string.IsNullOrWhiteSpace(admin.PasswordHash) || !_passwordHasher.Verify(req.Password, admin.PasswordHash))
             {
                 throw new InvalidCredentialsException();
             }
 
-            if (!admin.IsActive)
+            if (admin.IsActive != true)
             {
                 throw new AccountDisabledException();
             }
@@ -85,7 +85,7 @@ namespace Apenir.Application.Features.AdminAuth.Commands
                 RefreshToken = refreshTokenString,
                 ExpiresIn = _jwtSettings.AccessTokenExpiryMinutes * 60,
                 AdminId = admin.Id,
-                Email = admin.Email
+                Email = admin.Email ?? string.Empty
             };
 
             return ApiResponse<LoginResponse>.SuccessResult(response, "Login successful");
@@ -144,7 +144,7 @@ namespace Apenir.Application.Features.AdminAuth.Commands
             }
 
             var admin = await _adminRepository.GetByIdAsync(adminId, cancellationToken);
-            if (admin == null || admin.IsDeleted || !admin.IsActive)
+            if (admin == null || admin.IsDeleted || admin.IsActive != true)
             {
                 throw new AccountDisabledException();
             }
@@ -237,7 +237,7 @@ namespace Apenir.Application.Features.AdminAuth.Commands
             }
 
             var admin = await _adminRepository.GetByIdAsync(adminId.Value, cancellationToken);
-            if (admin == null || admin.IsDeleted || !admin.IsActive)
+            if (admin == null || admin.IsDeleted || admin.IsActive != true)
             {
                 throw new AccountDisabledException();
             }

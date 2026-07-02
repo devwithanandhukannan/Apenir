@@ -17,48 +17,50 @@ namespace Apenir.Infrastructure.Repositories
             _context = context;
         }
 
-        public async Task<Admin?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
+        public async Task<User?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
         {
-            return await _context.Admins
+            var userId = id.ToString();
+            return await _context.Users
                 .AsNoTracking()
-                .FirstOrDefaultAsync(a => a.Id == id && !a.IsDeleted, cancellationToken);
+                .FirstOrDefaultAsync(u => u.Id == userId && !u.IsDeleted && u.Roles != null && u.Roles.Count > 0, cancellationToken);
         }
 
-        public async Task<Admin?> GetByEmailAsync(string email, CancellationToken cancellationToken = default)
+        public async Task<User?> GetByEmailAsync(string email, CancellationToken cancellationToken = default)
         {
             var lowercaseEmail = email.ToLowerInvariant();
-            return await _context.Admins
+            return await _context.Users
                 .AsNoTracking()
-                .FirstOrDefaultAsync(a => a.Email.ToLower() == lowercaseEmail && !a.IsDeleted, cancellationToken);
+                .FirstOrDefaultAsync(u => u.Email != null && u.Email.ToLower() == lowercaseEmail && !u.IsDeleted && u.Roles != null && u.Roles.Count > 0, cancellationToken);
         }
 
         public async Task<bool> ExistsAsync(string email, CancellationToken cancellationToken = default)
         {
             var lowercaseEmail = email.ToLowerInvariant();
             
-            return await _context.Admins
-                .AnyAsync(a => a.Email.ToLower() == lowercaseEmail && !a.IsDeleted, cancellationToken);
+            return await _context.Users
+                .AnyAsync(u => u.Email != null && u.Email.ToLower() == lowercaseEmail && !u.IsDeleted && u.Roles != null && u.Roles.Count > 0, cancellationToken);
         }
 
-        public async Task CreateAsync(Admin admin, CancellationToken cancellationToken = default)
+        public async Task CreateAsync(User admin, CancellationToken cancellationToken = default)
         {
-            _context.Admins.Add(admin);
+            _context.Users.Add(admin);
             await _context.SaveChangesAsync(cancellationToken);
         }
 
-        public async Task UpdateAsync(Admin admin, CancellationToken cancellationToken = default)
+        public async Task UpdateAsync(User admin, CancellationToken cancellationToken = default)
         {
-            _context.Admins.Update(admin);
+            _context.Users.Update(admin);
             await _context.SaveChangesAsync(cancellationToken);
         }
 
         public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
         {
-            var admin = await _context.Admins.FindAsync(new object[] { id }, cancellationToken);
+            var userId = id.ToString();
+            var admin = await _context.Users.FindAsync(new object[] { userId }, cancellationToken);
             if (admin != null)
             {
                 admin.IsDeleted = true;
-                _context.Admins.Update(admin);
+                _context.Users.Update(admin);
                 await _context.SaveChangesAsync(cancellationToken);
             }
         }

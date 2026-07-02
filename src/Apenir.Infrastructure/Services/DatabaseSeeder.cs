@@ -42,65 +42,98 @@ namespace Apenir.Infrastructure.Services
             try
             {
                 // ─────────────────────────────────────────────────────────────
-                // 1. ADMINS
+                // 1. ADMIN USERS
                 // ─────────────────────────────────────────────────────────────
-                if (!await _context.Admins.AnyAsync())
+                var superAdminUser = await _context.Users.FirstOrDefaultAsync(u => u.Role == UserRole.SuperAdmin && !u.IsDeleted);
+                if (superAdminUser == null)
                 {
-                    _logger.LogInformation("Seeding administrator accounts...");
+                    _logger.LogInformation("Seeding administrator user accounts...");
 
-                    var admins = new List<Admin>();
-
-                    // Default admin from appsettings
-                    if (!string.IsNullOrWhiteSpace(_adminSettings.DefaultEmail) &&
-                        !string.IsNullOrWhiteSpace(_adminSettings.DefaultPassword))
+                    superAdminUser = new User
                     {
-                        admins.Add(new Admin
-                        {
-                            Id           = Guid.NewGuid(),
-                            Email        = _adminSettings.DefaultEmail,
-                            FullName     = string.IsNullOrWhiteSpace(_adminSettings.DefaultFullName) ? "Super Admin" : _adminSettings.DefaultFullName,
-                            PasswordHash = _passwordHasher.Hash(_adminSettings.DefaultPassword),
-                            IsActive     = true,
-                            IsDeleted    = false,
-                            Roles        = new List<string> { "SuperAdmin", "Admin" },
-                            Permissions  = new List<string> { "all" },
-                            CreatedAt    = DateTime.UtcNow.AddDays(-60)
-                        });
+                        Id = Guid.NewGuid().ToString(),
+                        Name = string.IsNullOrWhiteSpace(_adminSettings.DefaultFullName) ? "Super Admin User" : _adminSettings.DefaultFullName,
+                        Email = string.IsNullOrWhiteSpace(_adminSettings.DefaultEmail) ? "admin@apenir.com" : _adminSettings.DefaultEmail,
+                        Phone = "1800111111",
+                        Role = UserRole.SuperAdmin,
+                        PasswordHash = _passwordHasher.Hash(string.IsNullOrWhiteSpace(_adminSettings.DefaultPassword) ? "AdminPassword123!" : _adminSettings.DefaultPassword),
+                        IsActive = true,
+                        IsDeleted = false,
+                        Roles = new List<string> { "SuperAdmin", "Admin" },
+                        Permissions = new List<string> { "all" },
+                        CreatedAt = DateTime.UtcNow.AddDays(-90)
+                    };
+
+                    _context.Users.Add(superAdminUser);
+                    await _context.SaveChangesAsync();
+                    _logger.LogInformation("Admin user seeded.");
+                }
+                else
+                {
+                    var updated = false;
+                    if (superAdminUser.Roles == null || superAdminUser.Roles.Count == 0)
+                    {
+                        superAdminUser.Roles = new List<string> { "SuperAdmin", "Admin" };
+                        updated = true;
                     }
 
-                    // Demo Ops Manager
-                    admins.Add(new Admin
+                    if (superAdminUser.Permissions == null || superAdminUser.Permissions.Count == 0)
                     {
-                        Id           = Guid.NewGuid(),
-                        Email        = "ops.manager@apenir.com",
-                        FullName     = "Ravi Menon",
+                        superAdminUser.Permissions = new List<string> { "all" };
+                        updated = true;
+                    }
+
+                    if (updated)
+                    {
+                        _context.Users.Update(superAdminUser);
+                        await _context.SaveChangesAsync();
+                    }
+                }
+
+                var hasExistingOpsManager = await _context.Users.AnyAsync(u => u.Email == "ops.manager@apenir.com" && !u.IsDeleted);
+                if (!hasExistingOpsManager)
+                {
+                    var opsManager = new User
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        Name = "Ravi Menon",
+                        Email = "ops.manager@apenir.com",
+                        Phone = "1800123456",
+                        Role = UserRole.Staff,
                         PasswordHash = _passwordHasher.Hash("OpsPass@2025"),
-                        IsActive     = true,
-                        IsDeleted    = false,
-                        Roles        = new List<string> { "Admin", "OpsManager" },
-                        Permissions  = new List<string> { "branches.read", "appointments.read", "reports.read", "payrolls.manage" },
-                        LastLoginAt  = DateTime.UtcNow.AddHours(-3),
-                        CreatedAt    = DateTime.UtcNow.AddDays(-30)
-                    });
+                        IsActive = true,
+                        IsDeleted = false,
+                        Roles = new List<string> { "Admin", "OpsManager" },
+                        Permissions = new List<string> { "branches.read", "appointments.read", "reports.read", "payrolls.manage" },
+                        LastLoginAt = DateTime.UtcNow.AddHours(-3),
+                        CreatedAt = DateTime.UtcNow.AddDays(-30)
+                    };
 
-                    // Demo Support Lead
-                    admins.Add(new Admin
-                    {
-                        Id           = Guid.NewGuid(),
-                        Email        = "support@apenir.com",
-                        FullName     = "Priya Nair",
-                        PasswordHash = _passwordHasher.Hash("SupportPass@2025"),
-                        IsActive     = true,
-                        IsDeleted    = false,
-                        Roles        = new List<string> { "Support" },
-                        Permissions  = new List<string> { "customers.read", "appointments.read" },
-                        LastLoginAt  = DateTime.UtcNow.AddHours(-1),
-                        CreatedAt    = DateTime.UtcNow.AddDays(-15)
-                    });
-
-                    _context.Admins.AddRange(admins);
+                    _context.Users.Add(opsManager);
                     await _context.SaveChangesAsync();
-                    _logger.LogInformation("Admins seeded ({Count} records).", admins.Count);
+                }
+
+                var hasExistingSupport = await _context.Users.AnyAsync(u => u.Email == "support@apenir.com" && !u.IsDeleted);
+                if (!hasExistingSupport)
+                {
+                    var supportLead = new User
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        Name = "Priya Nair",
+                        Email = "support@apenir.com",
+                        Phone = "1800123457",
+                        Role = UserRole.Staff,
+                        PasswordHash = _passwordHasher.Hash("SupportPass@2025"),
+                        IsActive = true,
+                        IsDeleted = false,
+                        Roles = new List<string> { "Support" },
+                        Permissions = new List<string> { "customers.read", "appointments.read" },
+                        LastLoginAt = DateTime.UtcNow.AddHours(-1),
+                        CreatedAt = DateTime.UtcNow.AddDays(-15)
+                    };
+
+                    _context.Users.Add(supportLead);
+                    await _context.SaveChangesAsync();
                 }
 
                 await BackfillLegacyUsersAsync();
@@ -108,25 +141,6 @@ namespace Apenir.Infrastructure.Services
                 // ─────────────────────────────────────────────────────────────
                 // 2. USERS  (SuperAdmin, Customer, Staff, Lab roles)
                 // ─────────────────────────────────────────────────────────────
-                var superAdminUser = await _context.Users.FirstOrDefaultAsync(u => u.Role == UserRole.SuperAdmin);
-                if (superAdminUser == null)
-                {
-                    superAdminUser = new User
-                    {
-                        Id           = "user_superadmin_001",
-                        Name         = "Super Admin User",
-                        Email        = "admin@apenir.com",
-                        Phone        = "1800111111",
-                        Role         = UserRole.SuperAdmin,
-                        PasswordHash = _passwordHasher.Hash("AdminPassword123!"),
-                        IsActive     = true,
-                        CreatedAt    = DateTime.UtcNow.AddDays(-90)
-                    };
-                    _context.Users.Add(superAdminUser);
-                    await _context.SaveChangesAsync();
-                    _logger.LogInformation("SuperAdmin user seeded.");
-                }
-
                 // Customer users
                 var customerUserCount = await _context.Users.CountAsync(u => u.Role == UserRole.Customer);
                 if (customerUserCount < 5)

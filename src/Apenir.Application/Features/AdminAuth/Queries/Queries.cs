@@ -39,7 +39,7 @@ namespace Apenir.Application.Features.AdminAuth.Queries
                 throw new UnauthorizedException("User not found.");
             }
 
-            if (!admin.IsActive)
+            if (admin.IsActive != true)
             {
                 throw new AccountDisabledException();
             }
@@ -47,12 +47,12 @@ namespace Apenir.Application.Features.AdminAuth.Queries
             var response = new CurrentAdminResponse
             {
                 Id = admin.Id,
-                Email = admin.Email,
-                FullName = admin.FullName,
+                Email = admin.Email ?? string.Empty,
+                FullName = admin.Name ?? string.Empty,
                 Roles = admin.Roles,
                 Permissions = admin.Permissions,
                 LastLoginAt = admin.LastLoginAt,
-                CreatedAt = admin.CreatedAt
+                CreatedAt = admin.CreatedAt ?? DateTime.UtcNow
             };
 
             return ApiResponse<CurrentAdminResponse>.SuccessResult(response, "Current admin retrieved successfully");
@@ -105,7 +105,7 @@ namespace Apenir.Application.Features.AdminAuth.Queries
                 var response = new TokenValidationResponse
                 {
                     IsValid = true,
-                    AdminId = adminIdStr != null ? Guid.Parse(adminIdStr) : null,
+                    AdminId = adminIdStr,
                     Email = email,
                     Roles = roles,
                     Permissions = permissions
