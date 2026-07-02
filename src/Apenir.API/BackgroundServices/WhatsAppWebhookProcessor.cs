@@ -109,6 +109,7 @@ namespace Apenir.API.BackgroundServices
 
         /// <summary>
         /// Returns distinct active districts that have at least one branch offering the given serviceId.
+        /// Uses two separate queries (MongoDB EF Core does not support cross-collection LINQ .Join()).
         /// Cached per service for 5 minutes.
         /// </summary>
         private async Task<List<string>> GetCachedDistrictsForServiceAsync(
@@ -120,22 +121,43 @@ namespace Apenir.API.BackgroundServices
 
             _logger.LogDebug("Cache miss – loading districts for service {ServiceId} from DB.", serviceId);
 
-            // Only districts where at least one active branch offers this service
-            var districts = await context.BranchServices
+            // Step 1: Get branch IDs that offer this service (MongoDB-compatible single-collection query)
+            var eligibleBranchIds = await context.BranchServices
                 .Where(bs => bs.ServiceId == serviceId && bs.IsActive)
-                .Join(context.Branches,
-                      bs => bs.BranchId,
-                      b  => b.Id,
-                      (bs, b) => b)
-                .Where(b => b.IsActive)
-                .Select(b => b.District.ToLower())
-                .Distinct()
-                .OrderBy(d => d)
+                .Select(bs => bs.BranchId)
                 .ToListAsync(ct);
+
+            List<string> districts;
+            if (eligibleBranchIds.Any())
+            {
+                // Step 2: Filter branches by those IDs and get distinct districts
+                // Use the cached branches list (already loaded) to avoid another DB round-trip
+                var allBranches = await GetCachedBranchesAsync(context, ct);
+                var eligibleSet = eligibleBranchIds.ToHashSet();
+                districts = allBranches
+                    .Where(b => b.IsActive && eligibleSet.Contains(b.Id))
+                    .Select(b => b.District.ToLower())
+                    .Distinct()
+                    .OrderBy(d => d)
+                    .ToList();
+            }
+            else
+            {
+                // No BranchService records configured – fall back to all active districts
+                // so the service is still bookable at base price everywhere
+                var allBranches = await GetCachedBranchesAsync(context, ct);
+                districts = allBranches
+                    .Where(b => b.IsActive)
+                    .Select(b => b.District.ToLower())
+                    .Distinct()
+                    .OrderBy(d => d)
+                    .ToList();
+            }
 
             _cache.Set(cacheKey, districts, CacheDuration);
             return districts;
         }
+
 
         // ─── Payload processing ──────────────────────────────────────────────────────
 
