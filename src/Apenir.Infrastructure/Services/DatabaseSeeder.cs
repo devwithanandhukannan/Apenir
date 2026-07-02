@@ -59,7 +59,6 @@ namespace Apenir.Infrastructure.Services
                         PasswordHash = _passwordHasher.Hash(string.IsNullOrWhiteSpace(_adminSettings.DefaultPassword) ? "AdminPassword123!" : _adminSettings.DefaultPassword),
                         IsActive = true,
                         IsDeleted = false,
-                        Roles = new List<string> { "SuperAdmin", "Admin" },
                         Permissions = new List<string> { "all" },
                         CreatedAt = DateTime.UtcNow.AddDays(-90)
                     };
@@ -71,11 +70,6 @@ namespace Apenir.Infrastructure.Services
                 else
                 {
                     var updated = false;
-                    if (superAdminUser.Roles == null || superAdminUser.Roles.Count == 0)
-                    {
-                        superAdminUser.Roles = new List<string> { "SuperAdmin", "Admin" };
-                        updated = true;
-                    }
 
                     if (superAdminUser.Permissions == null || superAdminUser.Permissions.Count == 0)
                     {
@@ -103,7 +97,6 @@ namespace Apenir.Infrastructure.Services
                         PasswordHash = _passwordHasher.Hash("OpsPass@2025"),
                         IsActive = true,
                         IsDeleted = false,
-                        Roles = new List<string> { "Admin", "OpsManager" },
                         Permissions = new List<string> { "branches.read", "appointments.read", "reports.read", "payrolls.manage" },
                         LastLoginAt = DateTime.UtcNow.AddHours(-3),
                         CreatedAt = DateTime.UtcNow.AddDays(-30)
@@ -126,7 +119,6 @@ namespace Apenir.Infrastructure.Services
                         PasswordHash = _passwordHasher.Hash("SupportPass@2025"),
                         IsActive = true,
                         IsDeleted = false,
-                        Roles = new List<string> { "Support" },
                         Permissions = new List<string> { "customers.read", "appointments.read" },
                         LastLoginAt = DateTime.UtcNow.AddHours(-1),
                         CreatedAt = DateTime.UtcNow.AddDays(-15)

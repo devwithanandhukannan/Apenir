@@ -34,17 +34,7 @@ namespace Apenir.Infrastructure.Security
                 new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString())
             };
 
-            if (user.Roles != null && user.Roles.Count > 0)
-            {
-                foreach (var role in user.Roles)
-                {
-                    claims.Add(new Claim(ClaimTypes.Role, role));
-                }
-            }
-            else
-            {
-                claims.Add(new Claim(ClaimTypes.Role, user.Role.ToString()));
-            }
+            claims.Add(new Claim(ClaimTypes.Role, user.Role.ToString()));
 
             if (user.Permissions != null)
             {

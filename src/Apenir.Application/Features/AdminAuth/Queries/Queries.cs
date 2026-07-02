@@ -49,7 +49,7 @@ namespace Apenir.Application.Features.AdminAuth.Queries
                 Id = admin.Id,
                 Email = admin.Email ?? string.Empty,
                 FullName = admin.Name ?? string.Empty,
-                Roles = admin.Roles,
+                Roles = new List<string> { admin.Role.ToString() },
                 Permissions = admin.Permissions,
                 LastLoginAt = admin.LastLoginAt,
                 CreatedAt = admin.CreatedAt ?? DateTime.UtcNow
