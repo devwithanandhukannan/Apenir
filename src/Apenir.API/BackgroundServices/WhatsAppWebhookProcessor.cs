@@ -393,7 +393,7 @@ namespace Apenir.API.BackgroundServices
                     break;
 
                 case WhatsAppState.ChoosingCity:
-                    var city       = replyId.Replace("city_", "").ToLower();
+                    var city       = (replyId ?? string.Empty).Replace("city_", "").ToLower();
                     // Validate the city has branches for the selected service (service-aware check)
                     var serviceDistricts = await GetCachedDistrictsForServiceAsync(session.SelectedTestId ?? "", context, cancellationToken);
                     var hasBranches      = serviceDistricts.Contains(city);
@@ -477,7 +477,7 @@ namespace Apenir.API.BackgroundServices
                     break;
 
                 case WhatsAppState.ChoosingSlot:
-                    var slotId       = replyId.Replace("slot_", "");
+                    var slotId       = (replyId ?? string.Empty).Replace("slot_", "");
                     // Slots are not cached – availability changes frequently
                     var selectedSlot = await context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == slotId, cancellationToken);
                     if (selectedSlot != null)
@@ -638,7 +638,7 @@ namespace Apenir.API.BackgroundServices
                 type  = "reply",
                 reply = new
                 {
-                    id    = $"city_{d}",
+                    id    = d,
                     title = char.ToUpper(d[0]) + d[1..]
                 }
             }).ToArray();
@@ -705,7 +705,7 @@ namespace Apenir.API.BackgroundServices
 
                 rows.Add(new
                 {
-                    id          = $"lab_{b.Id}",
+                    id          = b.Id,
                     title       = b.Name.Length > 24 ? b.Name[..24] : b.Name,
                     description = $"{b.City} · {b.Pincode} · ₹{displayPrice}"
                 });
@@ -762,7 +762,7 @@ namespace Apenir.API.BackgroundServices
             // BUG FIX: Use FormatTime() helper — hh\:mm in interpolated strings is a broken escape
             var rows = slots.Select(s => new
             {
-                id          = $"slot_{s.Id}",
+                id          = s.Id,
                 title       = $"{s.SlotDate:MMM dd} {FormatTime(s.StartTime)}",
                 description = $"Available: {s.MaxCapacity - s.BookedCount} spot(s)"
             }).ToArray();
