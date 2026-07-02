@@ -349,6 +349,9 @@ namespace Apenir.API.BackgroundServices
         {
             var session = await GetOrCreateSessionAsync(to, context, cancellationToken);
 
+            _logger.LogInformation("🧭 Interactive reply received: From={From} | State={State} | ReplyId={ReplyId} | ReplyTitle={ReplyTitle}",
+                to, session.CurrentState, replyId ?? "(null)", replyTitle ?? "(null)");
+
             switch (session.CurrentState)
             {
                 case WhatsAppState.Start:
@@ -426,6 +429,16 @@ namespace Apenir.API.BackgroundServices
                         await SaveSessionAsync(session, context, cancellationToken);
                         await SendSlotList(to, selectedLab.Id, selectedLab.Name, context, httpClientFactory, configuration, cancellationToken);
                     }
+                    else
+                    {
+                        _logger.LogWarning("Selected lab not found for ReplyId={ReplyId} (parsed labId={LabId}). Available branches: {Count}", replyId, labId, allBranches.Count);
+                        await SendTextMessage(to, "Sorry, that lab could not be found. Please choose a different lab.", httpClientFactory, configuration);
+                        // Re-send lab list for the city to let user try again
+                        if (!string.IsNullOrEmpty(session.SelectedCity))
+                        {
+                            await SendLabList(to, session.SelectedCity, session.SelectedTestId ?? "", context, httpClientFactory, configuration, cancellationToken);
+                        }
+                    }
                     break;
 
                 case WhatsAppState.ChoosingSlot:
@@ -438,6 +451,15 @@ namespace Apenir.API.BackgroundServices
                         session.CurrentState = WhatsAppState.MemberCount;
                         await SaveSessionAsync(session, context, cancellationToken);
                         await SendPersonCountPrompt(to, httpClientFactory, configuration);
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Selected slot not found for ReplyId={ReplyId} (parsed slotId={SlotId}).", replyId, slotId);
+                        await SendTextMessage(to, "Selected time slot is no longer available. Please choose another slot.", httpClientFactory, configuration);
+                        if (!string.IsNullOrEmpty(session.SelectedLabId) && !string.IsNullOrEmpty(session.SelectedLabName))
+                        {
+                            await SendSlotList(to, session.SelectedLabId, session.SelectedLabName, context, httpClientFactory, configuration, cancellationToken);
+                        }
                     }
                     break;
 
@@ -467,6 +489,9 @@ namespace Apenir.API.BackgroundServices
                     }
                     break;
             }
+
+            _logger.LogDebug("Session after processing: Phone={Phone} State={State} SelectedTest={Test} SelectedCity={City} SelectedLab={Lab} SelectedSlot={Slot}",
+                session.Phone, session.CurrentState, session.SelectedTestId ?? "(none)", session.SelectedCity ?? "(none)", session.SelectedLabId ?? "(none)", session.SelectedSlot ?? "(none)");
         }
 
         // ─── WhatsApp message senders ───────────────────────────────────────────────
