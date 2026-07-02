@@ -22,6 +22,7 @@ builder.Services.AddInfrastructureServices(builder.Configuration);
 
 builder.Services.AddControllers();
 builder.Services.AddHttpClient();
+builder.Services.AddMemoryCache(); // Used by WhatsAppWebhookProcessor to cache services/branches for 5 min
 
 builder.Services.AddCors(options =>
 {
