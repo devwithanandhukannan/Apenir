@@ -30,7 +30,9 @@ namespace Apenir.API.BackgroundServices
         private static readonly TimeSpan CacheDuration = TimeSpan.FromMinutes(5);
         private const string CacheKeyServices  = "wa_active_services";
         private const string CacheKeyBranches  = "wa_active_branches";
-        private const string CacheKeyDistricts = "wa_active_districts";
+
+        // Formats a TimeOnly as "07:30 AM" — avoids broken hh\:mm escape in interpolated strings
+        private static string FormatTime(TimeOnly t) => t.ToString("hh:mm tt");
 
         public WhatsAppWebhookProcessor(
             IWhatsAppWebhookQueue queue,
@@ -106,22 +108,32 @@ namespace Apenir.API.BackgroundServices
         }
 
         /// <summary>
-        /// Returns distinct active districts, cached for 5 minutes.
+        /// Returns distinct active districts that have at least one branch offering the given serviceId.
+        /// Cached per service for 5 minutes.
         /// </summary>
-        private async Task<List<string>> GetCachedDistrictsAsync(IApplicationDbContext context, CancellationToken ct)
+        private async Task<List<string>> GetCachedDistrictsForServiceAsync(
+            string serviceId, IApplicationDbContext context, CancellationToken ct)
         {
-            if (_cache.TryGetValue(CacheKeyDistricts, out List<string>? cached) && cached != null)
+            var cacheKey = $"wa_districts_svc_{serviceId}";
+            if (_cache.TryGetValue(cacheKey, out List<string>? cached) && cached != null)
                 return cached;
 
-            _logger.LogDebug("Cache miss – loading active districts from DB.");
-            var districts = await context.Branches
+            _logger.LogDebug("Cache miss – loading districts for service {ServiceId} from DB.", serviceId);
+
+            // Only districts where at least one active branch offers this service
+            var districts = await context.BranchServices
+                .Where(bs => bs.ServiceId == serviceId && bs.IsActive)
+                .Join(context.Branches,
+                      bs => bs.BranchId,
+                      b  => b.Id,
+                      (bs, b) => b)
                 .Where(b => b.IsActive)
                 .Select(b => b.District.ToLower())
                 .Distinct()
                 .OrderBy(d => d)
                 .ToListAsync(ct);
 
-            _cache.Set(CacheKeyDistricts, districts, CacheDuration);
+            _cache.Set(cacheKey, districts, CacheDuration);
             return districts;
         }
 
@@ -343,7 +355,8 @@ namespace Apenir.API.BackgroundServices
                         session.SelectedTestId = selectedService.Id;
                         session.CurrentState   = WhatsAppState.ChoosingCity;
                         await SaveSessionAsync(session, context, cancellationToken);
-                        await SendCityList(to, context, httpClientFactory, configuration, cancellationToken);
+                        // Pass serviceId so city list is filtered by service availability
+                        await SendCityList(to, selectedService.Id, context, httpClientFactory, configuration, cancellationToken);
                     }
                     else
                     {
@@ -356,8 +369,15 @@ namespace Apenir.API.BackgroundServices
 
                 case WhatsAppState.ChoosingCity:
                     var city       = replyId.Replace("city_", "").ToLower();
-                    var branches   = await GetCachedBranchesAsync(context, cancellationToken);
-                    var hasBranches = branches.Any(b => b.District.ToLower() == city);
+                    // Validate the city has branches for the selected service (service-aware check)
+                    var serviceDistricts = await GetCachedDistrictsForServiceAsync(session.SelectedTestId ?? "", context, cancellationToken);
+                    var hasBranches      = serviceDistricts.Contains(city);
+                    // Fallback: also check raw branches (in case BranchServices not configured)
+                    if (!hasBranches)
+                    {
+                        var allBranchesCheck = await GetCachedBranchesAsync(context, cancellationToken);
+                        hasBranches = allBranchesCheck.Any(b => b.District.ToLower() == city);
+                    }
                     if (hasBranches)
                     {
                         session.SelectedCity = city;
@@ -367,8 +387,8 @@ namespace Apenir.API.BackgroundServices
                     }
                     else
                     {
-                        await SendTextMessage(to, $"We don't have labs in {city} yet. Please choose one of the available cities.", httpClientFactory, configuration);
-                        await SendCityList(to, context, httpClientFactory, configuration, cancellationToken);
+                        await SendTextMessage(to, $"We don't have labs for this service in {city} yet. Please choose one of the available cities.", httpClientFactory, configuration);
+                        await SendCityList(to, session.SelectedTestId ?? "", context, httpClientFactory, configuration, cancellationToken);
                     }
                     break;
 
@@ -515,18 +535,19 @@ namespace Apenir.API.BackgroundServices
 
         private async Task SendCityList(
             string to,
+            string serviceId,
             IApplicationDbContext context,
             IHttpClientFactory httpClientFactory,
             IConfiguration configuration,
             CancellationToken cancellationToken)
         {
-            // Use cached districts – max 3 buttons for WhatsApp
-            var districts = await GetCachedDistrictsAsync(context, cancellationToken);
+            // Only show cities where the SELECTED SERVICE is available – max 3 buttons
+            var districts = await GetCachedDistrictsForServiceAsync(serviceId, context, cancellationToken);
             var top3      = districts.Take(3).ToList();
 
             if (!top3.Any())
             {
-                await SendTextMessage(to, "Sorry, no service locations are available right now. Please try again later.", httpClientFactory, configuration);
+                await SendTextMessage(to, "Sorry, no locations are currently available for this service. Please choose a different test.", httpClientFactory, configuration);
                 return;
             }
 
@@ -567,21 +588,32 @@ namespace Apenir.API.BackgroundServices
             var service     = allServices.FirstOrDefault(s => s.Id == serviceId);
             var basePrice   = service?.BasePrice ?? 0m;
 
-            // Branches from cache, filtered by city
-            var allBranches    = await GetCachedBranchesAsync(context, cancellationToken);
-            var cityBranches   = allBranches.Where(b => b.District.ToLower() == city.ToLower()).ToList();
+            // Only show labs that ACTUALLY OFFER the selected service in this city
+            var branchServices = await context.BranchServices
+                .Where(bs => bs.ServiceId == serviceId && bs.IsActive)
+                .ToListAsync(cancellationToken);
+
+            var eligibleBranchIds = branchServices.Select(bs => bs.BranchId).ToHashSet();
+
+            var allBranches  = await GetCachedBranchesAsync(context, cancellationToken);
+            var cityBranches = allBranches
+                .Where(b => b.District.ToLower() == city.ToLower() && eligibleBranchIds.Contains(b.Id))
+                .ToList();
+
+            // Fallback: if no BranchService records exist, show all active city branches
+            // (means the service uses the global base price for all branches)
+            if (!cityBranches.Any())
+            {
+                cityBranches = allBranches
+                    .Where(b => b.District.ToLower() == city.ToLower())
+                    .ToList();
+            }
 
             if (!cityBranches.Any())
             {
-                await SendTextMessage(to, $"No labs found in {city}. Please choose another city.", httpClientFactory, configuration);
+                await SendTextMessage(to, $"No labs found in {city} for this service. Please choose another city.", httpClientFactory, configuration);
                 return;
             }
-
-            // Branch-level price overrides must still be fetched from DB (branch-service specific)
-            var branchIds      = cityBranches.Select(b => b.Id).ToList();
-            var branchServices = await context.BranchServices
-                .Where(bs => branchIds.Contains(bs.BranchId) && bs.ServiceId == serviceId && bs.IsActive)
-                .ToListAsync(cancellationToken);
 
             var rows = new List<object>();
             foreach (var b in cityBranches)
@@ -593,7 +625,7 @@ namespace Apenir.API.BackgroundServices
                 {
                     id          = $"lab_{b.Id}",
                     title       = b.Name.Length > 24 ? b.Name[..24] : b.Name,
-                    description = $"{b.City} · Pincode: {b.Pincode} · ₹{displayPrice}"
+                    description = $"{b.City} · {b.Pincode} · ₹{displayPrice}"
                 });
             }
 
@@ -608,7 +640,7 @@ namespace Apenir.API.BackgroundServices
                 {
                     type   = "list",
                     header = new { type = "text", text = $"Labs in {cityName}" },
-                    body   = new { text  = $"Choose a NABL-certified lab for your {service?.Name ?? "test"}:" },
+                    body   = new { text  = $"Choose a NABL-certified lab for *{service?.Name ?? "the test"}*:" },
                     footer = new { text  = "All labs open from 6 AM" },
                     action = new
                     {
@@ -645,10 +677,11 @@ namespace Apenir.API.BackgroundServices
                 return;
             }
 
+            // BUG FIX: Use FormatTime() helper — hh\:mm in interpolated strings is a broken escape
             var rows = slots.Select(s => new
             {
                 id          = $"slot_{s.Id}",
-                title       = $"{s.SlotDate:MMM dd} {s.StartTime:hh\\:mm tt}",
+                title       = $"{s.SlotDate:MMM dd} {FormatTime(s.StartTime)}",
                 description = $"Available: {s.MaxCapacity - s.BookedCount} spot(s)"
             }).ToArray();
 
@@ -850,7 +883,8 @@ namespace Apenir.API.BackgroundServices
             string slotDisplay = "Confirmed Slot";
             if (slot != null)
             {
-                slotDisplay = $"{slot.SlotDate:dddd, MMM dd yyyy} @ {slot.StartTime:hh\\:mm tt}";
+                // BUG FIX: Use FormatTime() helper instead of hh\:mm escape in interpolated strings
+                slotDisplay = $"{slot.SlotDate:dddd, MMM dd yyyy} @ {FormatTime(slot.StartTime)}";
                 slot.BookedCount++;
                 if (slot.BookedCount >= slot.MaxCapacity)
                     slot.IsAvailable = false;
@@ -1015,7 +1049,7 @@ namespace Apenir.API.BackgroundServices
                 // Fetch slot for real date/time display
                 var slot = await context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == b.AppointmentSlotId, cancellationToken);
                 string slotDisplay = slot != null
-                    ? $"{slot.SlotDate:MMM dd, yyyy} · {slot.StartTime:hh\\:mm tt}"
+                    ? $"{slot.SlotDate:MMM dd, yyyy} · {FormatTime(slot.StartTime)}"
                     : "Time TBD";
 
                 sb.AppendLine("─────────────────────");
@@ -1136,7 +1170,7 @@ namespace Apenir.API.BackgroundServices
             // Slot is real-time
             var slot       = await context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == session.SelectedSlot, cancellationToken);
             string slotDisplay = slot != null
-                ? $"{slot.SlotDate:dddd, MMM dd yyyy} · {slot.StartTime:hh\\:mm tt}"
+                ? $"{slot.SlotDate:dddd, MMM dd yyyy} · {FormatTime(slot.StartTime)}"
                 : session.SelectedSlot ?? "Selected Slot";
 
             // Calculate price
