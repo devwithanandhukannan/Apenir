@@ -442,8 +442,8 @@ namespace Apenir.API.BackgroundServices
                     // 3) If still not found, narrow by selected city/district then attempt name match
                     if (selectedLab == null && !string.IsNullOrEmpty(session.SelectedCity))
                     {
-                        var city = session.SelectedCity.ToLower();
-                        var cityBranches = allBranches.Where(b => (b.District ?? string.Empty).ToLower() == city || (b.City ?? string.Empty).ToLower() == city).ToList();
+                        var selectedCity = session.SelectedCity.ToLower();
+                        var cityBranches = allBranches.Where(b => (b.District ?? string.Empty).ToLower() == selectedCity || (b.City ?? string.Empty).ToLower() == selectedCity).ToList();
                         if (cityBranches.Count == 1)
                         {
                             selectedLab = cityBranches.First();
