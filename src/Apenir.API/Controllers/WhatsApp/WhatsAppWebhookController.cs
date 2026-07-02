@@ -143,12 +143,20 @@ namespace Apenir.API.Controllers
             // Verify X-Hub-Signature-256
             if (Request.Headers.TryGetValue("X-Hub-Signature-256", out var signatureHeader))
             {
-                if (!VerifySignature(signatureHeader.ToString(), bodyBytes))
+                if (!VerifySignature(signatureHeader.ToString(), bodyBytes, out var bypassed))
                 {
                     Console.WriteLine("❌ Webhook Signature Verification Failed");
                     return Unauthorized("Invalid webhook signature");
                 }
-                Console.WriteLine("✅ Webhook Signature Verified");
+
+                if (bypassed)
+                {
+                    Console.WriteLine("⚠️ Webhook Signature Verification bypassed (WhatsApp:AppSecret is not configured)");
+                }
+                else
+                {
+                    Console.WriteLine("✅ Webhook Signature Verified");
+                }
             }
             else
             {
@@ -167,13 +175,14 @@ namespace Apenir.API.Controllers
             return Ok();
         }
 
-        private bool VerifySignature(string signatureHeader, byte[] bodyBytes)
+        private bool VerifySignature(string signatureHeader, byte[] bodyBytes, out bool bypassed)
         {
+            bypassed = false;
             var appSecret = _configuration["WhatsApp:AppSecret"];
             if (string.IsNullOrEmpty(appSecret))
             {
                 // If no AppSecret is configured, bypass verification (useful for dev/testing)
-                Console.WriteLine("⚠️ Bypassing Webhook Signature Verification (WhatsApp:AppSecret is not configured)");
+                bypassed = true;
                 return true;
             }
 
