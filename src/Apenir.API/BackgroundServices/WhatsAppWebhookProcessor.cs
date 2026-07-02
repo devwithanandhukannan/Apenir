@@ -136,30 +136,20 @@ namespace Apenir.API.BackgroundServices
                 var eligibleSet = eligibleBranchIds.ToHashSet();
                 districts = allBranches
                     .Where(b => b.IsActive && eligibleSet.Contains(b.Id))
-                    .Select(b => b.District.ToLower())
+                    .Select(b => (b.District ?? string.Empty).ToLower())
+                    .Where(d => !string.IsNullOrWhiteSpace(d))
                     .Distinct()
                     .OrderBy(d => d)
                     .ToList();
             }
             else
             {
-                // No BranchService records configured – fall back to all active districts
-                // so the service is still bookable at base price everywhere
-                var allBranches = await GetCachedBranchesAsync(context, ct);
-                districts = allBranches
-                    .Where(b => b.IsActive)
-                    .Select(b => b.District.ToLower())
-                    .Distinct()
-                    .OrderBy(d => d)
-                    .ToList();
+                districts = new List<string>();
             }
 
             _cache.Set(cacheKey, districts, CacheDuration);
             return districts;
         }
-
-
-        // ─── Payload processing ──────────────────────────────────────────────────────
 
         private async Task ProcessPayloadAsync(string body, CancellationToken cancellationToken)
         {
@@ -393,28 +383,31 @@ namespace Apenir.API.BackgroundServices
                     break;
 
                 case WhatsAppState.ChoosingCity:
-                    var city       = (replyId ?? string.Empty).Replace("city_", "").ToLower();
-                    // Validate the city has branches for the selected service (service-aware check)
-                    var serviceDistricts = await GetCachedDistrictsForServiceAsync(session.SelectedTestId ?? "", context, cancellationToken);
-                    var hasBranches      = serviceDistricts.Contains(city);
-                    // Fallback: also check raw branches (in case BranchServices not configured)
-                    if (!hasBranches)
+                    var city = (replyId ?? string.Empty).Replace("city_", "").ToLower();
+                    var serviceId = session.SelectedTestId ?? string.Empty;
+
+                    if (string.IsNullOrEmpty(serviceId))
                     {
-                        var allBranchesCheck = await GetCachedBranchesAsync(context, cancellationToken);
-                        hasBranches = allBranchesCheck.Any(b => b.District.ToLower() == city);
-                    }
-                    if (hasBranches)
-                    {
-                        session.SelectedCity = city;
-                        session.CurrentState = WhatsAppState.ChoosingLab;
+                        await SendTextMessage(to, "Please choose a test first before selecting a city.", httpClientFactory, configuration);
+                        session.CurrentState = WhatsAppState.ChoosingTest;
                         await SaveSessionAsync(session, context, cancellationToken);
-                        await SendLabList(to, city, session.SelectedTestId ?? "", context, httpClientFactory, configuration, cancellationToken);
+                        await SendServiceList(to, context, httpClientFactory, configuration, cancellationToken);
+                        break;
                     }
-                    else
+
+                    // Verify the selected service actually has branches in this city
+                    var hasServiceCityAvailability = await HasServiceAvailableInCityAsync(serviceId, city, context, cancellationToken);
+                    if (!hasServiceCityAvailability)
                     {
-                        await SendTextMessage(to, $"We don't have labs for this service in {city} yet. Please choose one of the available cities.", httpClientFactory, configuration);
-                        await SendCityList(to, session.SelectedTestId ?? "", context, httpClientFactory, configuration, cancellationToken);
+                        await SendTextMessage(to, $"Sorry, the selected service is not available in {city}. Please choose one of the available cities.", httpClientFactory, configuration);
+                        await SendCityList(to, serviceId, context, httpClientFactory, configuration, cancellationToken);
+                        break;
                     }
+
+                    session.SelectedCity = city;
+                    session.CurrentState = WhatsAppState.ChoosingLab;
+                    await SaveSessionAsync(session, context, cancellationToken);
+                    await SendLabList(to, city, serviceId, context, httpClientFactory, configuration, cancellationToken);
                     break;
 
                 case WhatsAppState.ChoosingLab:
@@ -682,13 +675,12 @@ namespace Apenir.API.BackgroundServices
                 .Where(b => b.District.ToLower() == city.ToLower() && eligibleBranchIds.Contains(b.Id))
                 .ToList();
 
-            // Fallback: if no BranchService records exist, show all active city branches
-            // (means the service uses the global base price for all branches)
             if (!cityBranches.Any())
             {
-                cityBranches = allBranches
-                    .Where(b => b.District.ToLower() == city.ToLower())
-                    .ToList();
+                // If there are no branch-service mappings for this service, the service isn't available in any branch.
+                await SendTextMessage(to, $"No labs are currently available in {city} for this service. Please choose another city.", httpClientFactory, configuration);
+                await SendCityList(to, serviceId, context, httpClientFactory, configuration, cancellationToken);
+                return;
             }
 
             if (!cityBranches.Any())
@@ -923,6 +915,31 @@ namespace Apenir.API.BackgroundServices
                 }
             };
             await SendWhatsAppMessage(waPayload, httpClientFactory, configuration);
+        }
+
+        private async Task<bool> HasServiceAvailableInCityAsync(
+            string serviceId,
+            string city,
+            IApplicationDbContext context,
+            CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(serviceId) || string.IsNullOrWhiteSpace(city))
+                return false;
+
+            var branchServices = await context.BranchServices
+                .Where(bs => bs.ServiceId == serviceId && bs.IsActive)
+                .Select(bs => bs.BranchId)
+                .ToListAsync(cancellationToken);
+
+            if (!branchServices.Any())
+                return false;
+
+            var eligibleBranchIds = branchServices.ToHashSet();
+            var allBranches = await GetCachedBranchesAsync(context, cancellationToken);
+
+            return allBranches
+                .Where(b => b.IsActive)
+                .Any(b => eligibleBranchIds.Contains(b.Id) && string.Equals((b.District ?? string.Empty).ToLower(), city.ToLower(), StringComparison.OrdinalIgnoreCase));
         }
 
         private async Task SimulatePayment(
