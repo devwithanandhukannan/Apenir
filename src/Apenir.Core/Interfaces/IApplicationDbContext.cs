@@ -21,5 +21,6 @@ public interface IApplicationDbContext
     DbSet<OtpCode> OtpCodes { get; }
     DbSet<WhatsAppSession> WhatsAppSessions { get; }
     DbSet<RefreshToken> RefreshTokens { get; }
+    DbSet<BranchInvite> BranchInvites { get; }
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }
