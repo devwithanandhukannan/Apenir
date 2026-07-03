@@ -208,6 +208,27 @@ namespace Apenir.API.Controllers
             user.IsActive = true;
             user.UpdatedAt = DateTime.UtcNow;
 
+            // Generate unique 6-digit LabId if not already set
+            if (string.IsNullOrWhiteSpace(user.LabId))
+            {
+                var random = new Random();
+                string generatedLabId;
+                bool isUnique;
+                do
+                {
+                    generatedLabId = random.Next(100000, 1000000).ToString();
+                    isUnique = !await _context.Users.AnyAsync(u => u.LabId == generatedLabId, cancellationToken) &&
+                               !await _context.Branches.AnyAsync(b => b.LabId == generatedLabId, cancellationToken);
+                } while (!isUnique);
+
+                user.LabId = generatedLabId;
+                branch.LabId = generatedLabId;
+            }
+            else
+            {
+                branch.LabId = user.LabId;
+            }
+
             // Update Branch
             branch.Phone = request.Phone;
             branch.City = request.City;
