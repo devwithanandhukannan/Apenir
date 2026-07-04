@@ -167,9 +167,9 @@ namespace Apenir.API.Controllers
             await _context.SaveChangesAsync(cancellationToken);
 
             // Trigger Email transmission
-            var requestScheme = Request.Scheme;
-            var requestHost = Request.Host;
-            var verifyUrl = $"{requestScheme}://{requestHost}/api/lab-invitation/verify?token={token}";
+            var config = HttpContext.RequestServices.GetService(typeof(Microsoft.Extensions.Configuration.IConfiguration)) as Microsoft.Extensions.Configuration.IConfiguration;
+            var frontendUrl = config?["FrontendUrl"] ?? "https://admin.anandhu-kannan.in";
+            var verifyUrl = $"{frontendUrl.TrimEnd('/')}/register?token={token}";
 
             var emailSubject = $"Welcome to Apenir - Complete Registration for {request.LabName}";
             var emailBody = $@"
@@ -236,60 +236,41 @@ namespace Apenir.API.Controllers
             return Ok(ApiResponse.SuccessResult("Lab invited and email sent successfully."));
         }
 
-        [HttpGet("test-smtp")]
-        [AllowAnonymous]
-        public async Task<IActionResult> TestSmtp([FromQuery] string to)
-        {
-            if (string.IsNullOrWhiteSpace(to))
-            {
-                return BadRequest("Query parameter 'to' is required.");
-            }
-
-            try
-            {
-                await _emailService.SendEmailAsync(to, "Apenir SMTP Verification Test", "<h1>This is a verified test email from Apenir.</h1>");
-                return Ok(new { success = true, message = $"Email sent successfully to {to}" });
-            }
-            catch (Exception ex)
-            {
-                return StatusCode(500, new { success = false, message = "Failed to send email.", error = ex.Message, stackTrace = ex.StackTrace });
-            }
-        }
-
         [HttpGet("verify")]
         [AllowAnonymous]
-        [Produces("text/html")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<object>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
         public async Task<IActionResult> VerifyInvite([FromQuery] string token, CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(token))
             {
-                return Content(GetExpiredHtml(), "text/html");
+                return BadRequest(ApiResponse.FailureResult("Token is required."));
             }
 
             var invite = await _context.BranchInvites.FirstOrDefaultAsync(i => i.Token == token, cancellationToken);
             if (invite == null || invite.IsUsed || invite.ExpiresAt < DateTime.UtcNow)
             {
-                return Content(GetExpiredHtml(), "text/html");
+                return BadRequest(ApiResponse.FailureResult("Invitation link is expired or already used."));
             }
 
-            return Content(GetRegistrationFormHtml(token, invite.LabName), "text/html");
+            return Ok(ApiResponse<object>.SuccessResult(new { email = invite.Email, labName = invite.LabName }));
         }
 
         [HttpPost("verify")]
         [AllowAnonymous]
-        [Consumes("application/x-www-form-urlencoded")]
-        [Produces("text/html")]
-        public async Task<IActionResult> CompleteRegistration([FromForm] CompleteRegistrationRequest request, CancellationToken cancellationToken)
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> CompleteRegistration([FromBody] CompleteRegistrationRequest request, CancellationToken cancellationToken)
         {
             if (request == null || string.IsNullOrWhiteSpace(request.Token))
             {
-                return Content(GetExpiredHtml(), "text/html");
+                return BadRequest(ApiResponse.FailureResult("Invalid registration payload."));
             }
 
             var invite = await _context.BranchInvites.FirstOrDefaultAsync(i => i.Token == request.Token, cancellationToken);
             if (invite == null || invite.IsUsed || invite.ExpiresAt < DateTime.UtcNow)
             {
-                return Content(GetExpiredHtml(), "text/html");
+                return BadRequest(ApiResponse.FailureResult("Invitation link is expired or already used."));
             }
 
             // Find User
@@ -297,14 +278,14 @@ namespace Apenir.API.Controllers
             var user = await _context.Users.FirstOrDefaultAsync(u => u.Email != null && u.Email.ToLower() == lowercaseEmail && !u.IsDeleted, cancellationToken);
             if (user == null)
             {
-                return Content("<html><body><h1>Error</h1><p>User shell not found.</p></body></html>", "text/html");
+                return BadRequest(ApiResponse.FailureResult("User shell not found."));
             }
 
             // Find Branch
             var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == user.Id, cancellationToken);
             if (branch == null)
             {
-                return Content("<html><body><h1>Error</h1><p>Branch shell not found.</p></body></html>", "text/html");
+                return BadRequest(ApiResponse.FailureResult("Branch shell not found."));
             }
 
             // Update User
@@ -354,303 +335,7 @@ namespace Apenir.API.Controllers
 
             await _context.SaveChangesAsync(cancellationToken);
 
-            return Content(GetSuccessHtml(), "text/html");
-        }
-
-        private string GetExpiredHtml()
-        {
-            return @"
-<!DOCTYPE html>
-<html lang='en'>
-<head>
-    <meta charset='UTF-8'>
-    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-    <title>Apenir - Invitation Expired</title>
-    <link href='https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap' rel='stylesheet'>
-    <style>
-        body {
-            font-family: 'Outfit', sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-            color: #f8fafc;
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-        .card {
-            background: rgba(30, 41, 59, 0.7);
-            backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 24px;
-            padding: 45px 30px;
-            text-align: center;
-            width: 100%;
-            max-width: 450px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
-        }
-        .icon {
-            font-size: 64px;
-            color: #ef4444;
-            margin-bottom: 20px;
-        }
-        h1 {
-            font-size: 26px;
-            font-weight: 800;
-            margin-bottom: 12px;
-            color: #f8fafc;
-        }
-        p {
-            color: #94a3b8;
-            font-size: 15px;
-            line-height: 1.6;
-            margin-bottom: 25px;
-        }
-        .contact {
-            font-size: 13px;
-            color: #6366f1;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-    </style>
-</head>
-<body>
-    <div class='card'>
-        <div class='icon'>⚠️</div>
-        <h1>Invitation Link Expired</h1>
-        <p>The invitation session has timed out (15-minute limit exceeded) or this link has already been used.</p>
-        <div class='contact'>Please contact your administrator</div>
-    </div>
-</body>
-</html>";
-        }
-
-        private string GetRegistrationFormHtml(string token, string labName)
-        {
-            return $@"
-<!DOCTYPE html>
-<html lang='en'>
-<head>
-    <meta charset='UTF-8'>
-    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-    <title>Apenir - Complete Lab Registration</title>
-    <link href='https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap' rel='stylesheet'>
-    <style>
-        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        body {{
-            font-family: 'Outfit', sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-            color: #f8fafc;
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }}
-        .card {{
-            background: rgba(30, 41, 59, 0.7);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 24px;
-            padding: 40px;
-            width: 100%;
-            max-width: 500px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
-        }}
-        h1 {{
-            font-size: 28px;
-            font-weight: 800;
-            margin-bottom: 8px;
-            background: linear-gradient(to right, #38bdf8, #818cf8);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }}
-        p.subtitle {{
-            color: #94a3b8;
-            font-size: 14px;
-            margin-bottom: 30px;
-        }}
-        .form-group {{
-            margin-bottom: 20px;
-        }}
-        label {{
-            display: block;
-            font-size: 13px;
-            font-weight: 600;
-            margin-bottom: 6px;
-            color: #cbd5e1;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }}
-        input {{
-            width: 100%;
-            padding: 12px 16px;
-            border-radius: 12px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            background: rgba(15, 23, 42, 0.6);
-            color: #fff;
-            font-size: 15px;
-            transition: all 0.3s ease;
-        }}
-        input:focus {{
-            outline: none;
-            border-color: #6366f1;
-            box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.2);
-        }}
-        .btn {{
-            display: block;
-            width: 100%;
-            padding: 14px;
-            background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
-            color: white;
-            border: none;
-            border-radius: 12px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
-            margin-top: 10px;
-        }}
-        .btn:hover {{
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(99, 102, 241, 0.4);
-        }}
-        .btn:active {{
-            transform: translateY(0);
-        }}
-    </style>
-</head>
-<body>
-    <div class='card'>
-        <h1>Complete Registration</h1>
-        <p class='subtitle'>Activate your partner account for <strong>{labName}</strong>.</p>
-        <form method='POST' action='/api/lab-invitation/verify' onsubmit='return validateForm()'>
-            <input type='hidden' name='token' value='{token}'>
-            
-            <div class='form-group'>
-                <label for='password'>Create Password</label>
-                <input type='password' id='password' name='password' required placeholder='Min 8 characters'>
-            </div>
-
-            <div class='form-group'>
-                <label for='phone'>Contact Phone Number</label>
-                <input type='text' id='phone' name='phone' required placeholder='+919876543210'>
-            </div>
-
-            <div style='display: grid; grid-template-columns: 1fr 1fr; gap: 16px;'>
-                <div class='form-group'>
-                    <label for='city'>City</label>
-                    <input type='text' id='city' name='city' required placeholder='Kochi'>
-                </div>
-                <div class='form-group'>
-                    <label for='district'>District</label>
-                    <input type='text' id='district' name='district' required placeholder='Ernakulam'>
-                </div>
-            </div>
-
-            <div class='form-group'>
-                <label for='pincode'>Pincode</label>
-                <input type='text' id='pincode' name='pincode' required placeholder='682016'>
-            </div>
-
-            <div style='display: grid; grid-template-columns: 1fr 1fr; gap: 16px;'>
-                <div class='form-group'>
-                    <label for='latitude'>Latitude</label>
-                    <input type='number' step='any' id='latitude' name='latitude' required placeholder='9.9788'>
-                </div>
-                <div class='form-group'>
-                    <label for='longitude'>Longitude</label>
-                    <input type='number' step='any' id='longitude' name='longitude' required placeholder='76.2798'>
-                </div>
-            </div>
-
-            <button type='submit' class='btn'>Activate Account</button>
-        </form>
-    </div>
-    <script>
-        function validateForm() {{
-            var pass = document.getElementById('password').value;
-            if (pass.length < 8) {{
-                alert('Password must be at least 8 characters long.');
-                return false;
-            }}
-            return true;
-        }}
-    </script>
-</body>
-</html>";
-        }
-
-        private string GetSuccessHtml()
-        {
-            return @"
-<!DOCTYPE html>
-<html lang='en'>
-<head>
-    <meta charset='UTF-8'>
-    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-    <title>Apenir - Activation Successful</title>
-    <link href='https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap' rel='stylesheet'>
-    <style>
-        body {
-            font-family: 'Outfit', sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-            color: #f8fafc;
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-        .card {
-            background: rgba(30, 41, 59, 0.7);
-            backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 24px;
-            padding: 45px 30px;
-            text-align: center;
-            width: 100%;
-            max-width: 450px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
-        }
-        .icon {
-            font-size: 64px;
-            color: #10b981;
-            margin-bottom: 20px;
-        }
-        h1 {
-            font-size: 26px;
-            font-weight: 800;
-            margin-bottom: 12px;
-            color: #f8fafc;
-        }
-        p {
-            color: #94a3b8;
-            font-size: 15px;
-            line-height: 1.6;
-            margin-bottom: 25px;
-        }
-        .success-text {
-            font-size: 13px;
-            color: #10b981;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-    </style>
-</head>
-<body>
-    <div class='card'>
-        <div class='icon'>✓</div>
-        <h1>Account Activated</h1>
-        <p>Your lab branch and user accounts are now active. You may now log in using your email and password.</p>
-        <div class='success-text'>Registration Complete</div>
-    </div>
-</body>
-</html>";
+            return Ok(ApiResponse.SuccessResult("Lab account registration completed successfully."));
         }
     }
 

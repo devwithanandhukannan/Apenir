@@ -579,9 +579,9 @@ namespace Apenir.API.Controllers
             _context.StaffInvites.Add(invite);
             await _context.SaveChangesAsync(cancellationToken);
 
-            var requestScheme = Request.Scheme;
-            var requestHost = Request.Host;
-            var verifyUrl = $"{requestScheme}://{requestHost}/api/lab/staff/verify?token={token}";
+            var config = HttpContext.RequestServices.GetService(typeof(Microsoft.Extensions.Configuration.IConfiguration)) as Microsoft.Extensions.Configuration.IConfiguration;
+            var frontendUrl = config?["FrontendUrl"] ?? "https://admin.anandhu-kannan.in";
+            var verifyUrl = $"{frontendUrl.TrimEnd('/')}/staff/register?token={token}";
 
             var emailSubject = $"Welcome to Apenir - Complete Registration for {request.Name}";
             var emailBody = $@"
@@ -650,144 +650,45 @@ namespace Apenir.API.Controllers
 
         [HttpGet("staff/verify")]
         [AllowAnonymous]
-        [Produces("text/html")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<object>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
         public async Task<IActionResult> VerifyStaffInvite([FromQuery] string token, CancellationToken cancellationToken)
         {
             if (string.IsNullOrWhiteSpace(token))
             {
-                return Content("<html><body><h1>Expired</h1><p>Invitation link is invalid.</p></body></html>", "text/html");
+                return BadRequest(ApiResponse.FailureResult("Token is required."));
             }
 
             var invite = await _context.StaffInvites.FirstOrDefaultAsync(i => i.Token == token, cancellationToken);
             if (invite == null || invite.IsUsed || invite.ExpiresAt < DateTime.UtcNow)
             {
-                return Content("<html><body><h1>Expired</h1><p>Invitation link is expired or already used.</p></body></html>", "text/html");
+                return BadRequest(ApiResponse.FailureResult("Invitation link is expired or already used."));
             }
 
-            var formHtml = $@"
-<!DOCTYPE html>
-<html lang='en'>
-<head>
-    <meta charset='UTF-8'>
-    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-    <title>Apenir - Complete Staff Registration</title>
-    <link href='https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap' rel='stylesheet'>
-    <style>
-        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        body {{
-            font-family: 'Outfit', sans-serif;
-            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
-            color: #f8fafc;
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }}
-        .card {{
-            background: rgba(30, 41, 59, 0.7);
-            backdrop-filter: blur(16px);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 24px;
-            padding: 40px;
-            width: 100%;
-            max-width: 500px;
-            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
-        }}
-        h1 {{
-            font-size: 28px;
-            font-weight: 800;
-            margin-bottom: 8px;
-            background: linear-gradient(to right, #38bdf8, #818cf8);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }}
-        p.subtitle {{
-            color: #94a3b8;
-            font-size: 14px;
-            margin-bottom: 30px;
-        }}
-        .form-group {{
-            margin-bottom: 20px;
-        }}
-        label {{
-            display: block;
-            font-size: 13px;
-            font-weight: 600;
-            margin-bottom: 6px;
-            color: #cbd5e1;
-            text-transform: uppercase;
-        }}
-        input {{
-            width: 100%;
-            padding: 12px 16px;
-            border-radius: 12px;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            background: rgba(15, 23, 42, 0.6);
-            color: #fff;
-            font-size: 15px;
-        }}
-        .btn {{
-            display: block;
-            width: 100%;
-            padding: 14px;
-            background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
-            color: white;
-            border: none;
-            border-radius: 12px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-        }}
-    </style>
-</head>
-<body>
-    <div class='card'>
-        <h1>Complete Staff Registration</h1>
-        <p class='subtitle'>Activate your phlebotomist account for <strong>{invite.Name}</strong>.</p>
-        <form method='POST' action='/api/lab/staff/verify'>
-            <input type='hidden' name='token' value='{token}'>
-            
-            <div class='form-group'>
-                <label for='password'>Create Password</label>
-                <input type='password' id='password' name='password' required placeholder='Min 8 characters'>
-            </div>
-
-            <div class='form-group'>
-                <label for='phone'>Contact Phone Number</label>
-                <input type='text' id='phone' name='phone' required placeholder='+919876543210'>
-            </div>
-
-            <button type='submit' class='btn'>Activate Account</button>
-        </form>
-    </div>
-</body>
-</html>";
-
-            return Content(formHtml, "text/html");
+            return Ok(ApiResponse<object>.SuccessResult(new { email = invite.Email, name = invite.Name }));
         }
 
         [HttpPost("staff/verify")]
         [AllowAnonymous]
-        [Consumes("application/x-www-form-urlencoded")]
-        [Produces("text/html")]
-        public async Task<IActionResult> CompleteStaffRegistration([FromForm] CompleteStaffRegistrationRequest request, CancellationToken cancellationToken)
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> CompleteStaffRegistration([FromBody] CompleteStaffRegistrationRequest request, CancellationToken cancellationToken)
         {
             if (request == null || string.IsNullOrWhiteSpace(request.Token))
             {
-                return Content("<html><body><h1>Error</h1><p>Invalid registration payload.</p></body></html>", "text/html");
+                return BadRequest(ApiResponse.FailureResult("Invalid registration payload."));
             }
 
             var invite = await _context.StaffInvites.FirstOrDefaultAsync(i => i.Token == request.Token, cancellationToken);
             if (invite == null || invite.IsUsed || invite.ExpiresAt < DateTime.UtcNow)
             {
-                return Content("<html><body><h1>Expired</h1><p>Invitation link is expired or already used.</p></body></html>", "text/html");
+                return BadRequest(ApiResponse.FailureResult("Invitation link is expired or already used."));
             }
 
             var user = await _context.Users.FirstOrDefaultAsync(u => u.Email != null && u.Email.ToLower() == invite.Email.ToLower() && !u.IsDeleted, cancellationToken);
             if (user == null)
             {
-                return Content("<html><body><h1>Error</h1><p>User shell not found.</p></body></html>", "text/html");
+                return BadRequest(ApiResponse.FailureResult("User shell not found."));
             }
 
             user.PasswordHash = _passwordHasher.Hash(request.Password);
@@ -802,27 +703,7 @@ namespace Apenir.API.Controllers
             _context.StaffInvites.Update(invite);
             await _context.SaveChangesAsync(cancellationToken);
 
-            var successHtml = @"
-<!DOCTYPE html>
-<html lang='en'>
-<head>
-    <meta charset='UTF-8'>
-    <title>Apenir - Activation Successful</title>
-    <style>
-        body { font-family: sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
-        .card { background: #1e293b; padding: 40px; border-radius: 12px; text-align: center; max-width: 400px; }
-        h1 { color: #10b981; }
-    </style>
-</head>
-<body>
-    <div class='card'>
-        <h1>Account Activated</h1>
-        <p>Your phlebotomist staff account is now active. You may now log in using the mobile app or portal.</p>
-    </div>
-</body>
-</html>";
-
-            return Content(successHtml, "text/html");
+            return Ok(ApiResponse.SuccessResult("Staff account registration completed successfully."));
         }
 
         [HttpPost("appointments/{id}/upload-report")]
