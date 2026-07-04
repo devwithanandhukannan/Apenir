@@ -3,12 +3,12 @@ namespace Apenir.Core.Enums;
 public enum WhatsAppState
 {
     Start,
+    AwaitingLocation,
     ChoosingTest,
-    ChoosingCity,
+    AwaitingAddressDetails,
     ChoosingLab,
     ChoosingSlot,
     MemberCount,
-    Location,
     Confirm,
     AwaitingPayment,
     Done

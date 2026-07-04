@@ -24,6 +24,7 @@ public class AppDbContext : DbContext, IApplicationDbContext
     public DbSet<WhatsAppSession> WhatsAppSessions => Set<WhatsAppSession>();
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
     public DbSet<BranchInvite> BranchInvites => Set<BranchInvite>();
+    public DbSet<StaffInvite> StaffInvites => Set<StaffInvite>();
 
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options)
     {
@@ -50,6 +51,7 @@ public class AppDbContext : DbContext, IApplicationDbContext
         modelBuilder.Entity<WhatsAppSession>().ToCollection("whatsapp_sessions");
         modelBuilder.Entity<RefreshToken>().ToCollection("refresh_tokens");
         modelBuilder.Entity<BranchInvite>().ToCollection("branch_invites");
+        modelBuilder.Entity<StaffInvite>().ToCollection("staff_invites");
 
         modelBuilder.Entity<User>().HasIndex(u => u.Email).IsUnique();
         modelBuilder.Entity<User>().HasIndex(u => u.Phone).IsUnique();

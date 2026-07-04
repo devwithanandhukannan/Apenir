@@ -15,5 +15,10 @@ public class WhatsAppSession
     public int MemberCount { get; set; }
     public bool LocationShared { get; set; }
     public string? Passcode { get; set; }
+    public double? Latitude { get; set; }
+    public double? Longitude { get; set; }
+    public string? Landmark { get; set; }
+    public string? BuildingDetails { get; set; }
+    public string? Floor { get; set; }
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }

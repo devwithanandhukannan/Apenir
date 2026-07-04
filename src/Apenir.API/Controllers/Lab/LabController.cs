@@ -27,6 +27,8 @@ namespace Apenir.API.Controllers
         private readonly IJwtTokenService _jwtTokenService;
         private readonly IRefreshTokenRepository _refreshTokenRepository;
         private readonly ICurrentUserService _currentUserService;
+        private readonly IEmailService _emailService;
+        private readonly IWhatsAppService _whatsAppService;
         private readonly JwtSettings _jwtSettings;
 
         public LabController(
@@ -35,6 +37,8 @@ namespace Apenir.API.Controllers
             IJwtTokenService jwtTokenService,
             IRefreshTokenRepository refreshTokenRepository,
             ICurrentUserService currentUserService,
+            IEmailService emailService,
+            IWhatsAppService whatsAppService,
             IOptions<JwtSettings> jwtSettings)
         {
             _context = context;
@@ -42,6 +46,8 @@ namespace Apenir.API.Controllers
             _jwtTokenService = jwtTokenService;
             _refreshTokenRepository = refreshTokenRepository;
             _currentUserService = currentUserService;
+            _emailService = emailService;
+            _whatsAppService = whatsAppService;
             _jwtSettings = jwtSettings.Value;
         }
 
@@ -60,7 +66,7 @@ namespace Apenir.API.Controllers
             }
 
             var lowercaseEmail = request.Email.Trim().ToLower();
-            var user = await _context.Users.FirstOrDefaultAsync(u => u.Email != null && u.Email.ToLower() == lowercaseEmail && !u.IsDeleted && u.Role == UserRole.Lab, cancellationToken);
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Email != null && u.Email.ToLower() == lowercaseEmail && !u.IsDeleted && (u.Role == UserRole.Lab || u.Role == UserRole.Staff), cancellationToken);
 
             if (user == null)
             {
@@ -136,11 +142,14 @@ namespace Apenir.API.Controllers
                 return NotFound(ApiResponse.FailureResult("Branch not found."));
             }
 
-            var staff = await _context.Appointments
+            var staffIds = await _context.Appointments
                 .Where(a => a.BranchId == branchId && a.AssignedStaffId != null)
-                .Select(a => a.AssignedStaff!)
-                .Where(s => !s.IsDeleted)
+                .Select(a => a.AssignedStaffId!)
                 .Distinct()
+                .ToListAsync(cancellationToken);
+
+            var staff = await _context.Users
+                .Where(u => staffIds.Contains(u.Id) && !u.IsDeleted)
                 .ToListAsync(cancellationToken);
 
             return Ok(ApiResponse<List<User>>.SuccessResult(staff, "Branch staff retrieved successfully."));
@@ -206,8 +215,8 @@ namespace Apenir.API.Controllers
             var totalAppointments = appointments.Count;
             var completedAppointments = appointments.Count(a => a.Status == AppointmentStatus.Completed);
             var pendingAppointments = appointments.Count(a => a.Status == AppointmentStatus.Pending);
-            var totalRevenue = appointments.Sum(a => a.TotalAmount);
-            var totalLabPayout = appointments.Sum(a => a.LabPayout);
+            var totalRevenue = appointments.Where(a => a.Status != AppointmentStatus.Cancelled).Sum(a => a.TotalAmount);
+            var totalLabPayout = appointments.Where(a => a.Status != AppointmentStatus.Cancelled).Sum(a => a.LabPayout);
 
             var staffCount = appointments
                 .Where(a => a.AssignedStaffId != null)
@@ -269,8 +278,13 @@ namespace Apenir.API.Controllers
             var start = startDate ?? DateOnly.FromDateTime(DateTime.UtcNow);
             var end = endDate ?? start.AddDays(7);
 
+            var slotIds = await _context.AppointmentSlots
+                .Where(s => s.BranchId == branchId && s.SlotDate >= start && s.SlotDate <= end)
+                .Select(s => s.Id)
+                .ToListAsync(cancellationToken);
+
             var appointments = await _context.Appointments
-                .Where(a => a.BranchId == branchId && a.AppointmentSlot!.SlotDate >= start && a.AppointmentSlot!.SlotDate <= end)
+                .Where(a => a.BranchId == branchId && slotIds.Contains(a.AppointmentSlotId))
                 .Include(a => a.CustomerUser)
                 .Include(a => a.AssignedStaff)
                 .Include(a => a.AppointmentSlot)
@@ -494,6 +508,326 @@ namespace Apenir.API.Controllers
             await _context.SaveChangesAsync(cancellationToken);
             return Ok(ApiResponse.SuccessResult("Branch service updated successfully."));
         }
+
+        [HttpPost("staff/invite")]
+        [Authorize]
+        [EndpointSummary("Invite Staff member")]
+        [EndpointDescription("Registers a pending staff user with 'notverified' status and triggers an SMTP verification email.")]
+        public async Task<IActionResult> InviteStaff([FromBody] InviteStaffRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Name))
+            {
+                return BadRequest(ApiResponse.FailureResult("Email and Name are required."));
+            }
+
+            var lowercaseEmail = request.Email.Trim().ToLower();
+            var exists = await _context.Users.AnyAsync(u => u.Email != null && u.Email.ToLower() == lowercaseEmail && !u.IsDeleted, cancellationToken);
+            if (exists)
+            {
+                return BadRequest(ApiResponse.FailureResult("A user with this email already exists."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var ownerBranch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            if (ownerBranch == null)
+            {
+                return BadRequest(ApiResponse.FailureResult("Logged-in user does not manage a lab branch."));
+            }
+
+            var user = new User
+            {
+                Id = Guid.NewGuid().ToString(),
+                Name = request.Name.Trim(),
+                Email = request.Email.Trim(),
+                Role = UserRole.Staff,
+                IsActive = true,
+                IsDeleted = false,
+                Status = "notverified",
+                CreatedAt = DateTime.UtcNow,
+                Permissions = new List<string>()
+            };
+
+            var token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
+            var invite = new StaffInvite
+            {
+                Id = Guid.NewGuid().ToString(),
+                Email = request.Email.Trim(),
+                Name = request.Name.Trim(),
+                BranchId = ownerBranch.Id,
+                Token = token,
+                CreatedAt = DateTime.UtcNow,
+                ExpiresAt = DateTime.UtcNow.AddMinutes(15),
+                IsUsed = false
+            };
+
+            _context.Users.Add(user);
+            _context.StaffInvites.Add(invite);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            var requestScheme = Request.Scheme;
+            var requestHost = Request.Host;
+            var verifyUrl = $"{requestScheme}://{requestHost}/api/lab/staff/verify?token={token}";
+
+            var emailSubject = $"Welcome to Apenir - Complete Registration for {request.Name}";
+            var emailBody = $@"
+                <div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;'>
+                    <h2 style='color: #4f46e5;'>Apenir Staff Partner Invitation</h2>
+                    <p>Hello,</p>
+                    <p>You have been invited to join the Apenir Medical Lab Booking platform as a staff phlebotomist for <strong>{ownerBranch.Name}</strong>.</p>
+                    <p>Please click the button below to complete your registration, set up your password:</p>
+                    <div style='text-align: center; margin: 30px 0;'>
+                        <a href='{verifyUrl}' style='background-color: #4f46e5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;'>Complete Registration</a>
+                    </div>
+                    <p style='color: #ef4444; font-weight: bold;'>Important: This invitation link is only valid for 15 minutes.</p>
+                    <p>If you did not request this invitation, please ignore this email or contact our support team.</p>
+                    <hr style='border: 0; border-top: 1px solid #cbd5e1; margin: 20px 0;' />
+                    <p style='font-size: 12px; color: #64748b;'>This is an automated email. Please do not reply directly.</p>
+                </div>";
+
+            await _emailService.SendEmailAsync(request.Email.Trim(), emailSubject, emailBody);
+
+            return Ok(ApiResponse.SuccessResult("Staff invited and email sent successfully."));
+        }
+
+        [HttpGet("staff/verify")]
+        [AllowAnonymous]
+        [Produces("text/html")]
+        public async Task<IActionResult> VerifyStaffInvite([FromQuery] string token, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(token))
+            {
+                return Content("<html><body><h1>Expired</h1><p>Invitation link is invalid.</p></body></html>", "text/html");
+            }
+
+            var invite = await _context.StaffInvites.FirstOrDefaultAsync(i => i.Token == token, cancellationToken);
+            if (invite == null || invite.IsUsed || invite.ExpiresAt < DateTime.UtcNow)
+            {
+                return Content("<html><body><h1>Expired</h1><p>Invitation link is expired or already used.</p></body></html>", "text/html");
+            }
+
+            var formHtml = $@"
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>Apenir - Complete Staff Registration</title>
+    <link href='https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap' rel='stylesheet'>
+    <style>
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+        body {{
+            font-family: 'Outfit', sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e1b4b 100%);
+            color: #f8fafc;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }}
+        .card {{
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(16px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 24px;
+            padding: 40px;
+            width: 100%;
+            max-width: 500px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+        }}
+        h1 {{
+            font-size: 28px;
+            font-weight: 800;
+            margin-bottom: 8px;
+            background: linear-gradient(to right, #38bdf8, #818cf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }}
+        p.subtitle {{
+            color: #94a3b8;
+            font-size: 14px;
+            margin-bottom: 30px;
+        }}
+        .form-group {{
+            margin-bottom: 20px;
+        }}
+        label {{
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 6px;
+            color: #cbd5e1;
+            text-transform: uppercase;
+        }}
+        input {{
+            width: 100%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(15, 23, 42, 0.6);
+            color: #fff;
+            font-size: 15px;
+        }}
+        .btn {{
+            display: block;
+            width: 100%;
+            padding: 14px;
+            background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+        }}
+    </style>
+</head>
+<body>
+    <div class='card'>
+        <h1>Complete Staff Registration</h1>
+        <p class='subtitle'>Activate your phlebotomist account for <strong>{invite.Name}</strong>.</p>
+        <form method='POST' action='/api/lab/staff/verify'>
+            <input type='hidden' name='token' value='{token}'>
+            
+            <div class='form-group'>
+                <label for='password'>Create Password</label>
+                <input type='password' id='password' name='password' required placeholder='Min 8 characters'>
+            </div>
+
+            <div class='form-group'>
+                <label for='phone'>Contact Phone Number</label>
+                <input type='text' id='phone' name='phone' required placeholder='+919876543210'>
+            </div>
+
+            <button type='submit' class='btn'>Activate Account</button>
+        </form>
+    </div>
+</body>
+</html>";
+
+            return Content(formHtml, "text/html");
+        }
+
+        [HttpPost("staff/verify")]
+        [AllowAnonymous]
+        [Consumes("application/x-www-form-urlencoded")]
+        [Produces("text/html")]
+        public async Task<IActionResult> CompleteStaffRegistration([FromForm] CompleteStaffRegistrationRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Token))
+            {
+                return Content("<html><body><h1>Error</h1><p>Invalid registration payload.</p></body></html>", "text/html");
+            }
+
+            var invite = await _context.StaffInvites.FirstOrDefaultAsync(i => i.Token == request.Token, cancellationToken);
+            if (invite == null || invite.IsUsed || invite.ExpiresAt < DateTime.UtcNow)
+            {
+                return Content("<html><body><h1>Expired</h1><p>Invitation link is expired or already used.</p></body></html>", "text/html");
+            }
+
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Email != null && u.Email.ToLower() == invite.Email.ToLower() && !u.IsDeleted, cancellationToken);
+            if (user == null)
+            {
+                return Content("<html><body><h1>Error</h1><p>User shell not found.</p></body></html>", "text/html");
+            }
+
+            user.PasswordHash = _passwordHasher.Hash(request.Password);
+            user.Phone = request.Phone;
+            user.Status = "Active";
+            user.IsActive = true;
+            user.UpdatedAt = DateTime.UtcNow;
+
+            invite.IsUsed = true;
+
+            _context.Users.Update(user);
+            _context.StaffInvites.Update(invite);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            var successHtml = @"
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <title>Apenir - Activation Successful</title>
+    <style>
+        body { font-family: sans-serif; background: #0f172a; color: #f8fafc; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+        .card { background: #1e293b; padding: 40px; border-radius: 12px; text-align: center; max-width: 400px; }
+        h1 { color: #10b981; }
+    </style>
+</head>
+<body>
+    <div class='card'>
+        <h1>Account Activated</h1>
+        <p>Your phlebotomist staff account is now active. You may now log in using the mobile app or portal.</p>
+    </div>
+</body>
+</html>";
+
+            return Content(successHtml, "text/html");
+        }
+
+        [HttpPost("appointments/{id}/upload-report")]
+        [Authorize]
+        [EndpointSummary("Upload diagnostic report PDF")]
+        [EndpointDescription("Saves the uploaded report PDF, changes status to Completed, and immediately sends the PDF file to the customer's WhatsApp.")]
+        public async Task<IActionResult> UploadReport([FromRoute] string id, [FromForm] IFormFile report, CancellationToken cancellationToken)
+        {
+            if (report == null || report.Length == 0)
+            {
+                return BadRequest(ApiResponse.FailureResult("Report PDF file is required."));
+            }
+
+            var appointment = await _context.Appointments
+                .Include(a => a.CustomerUser)
+                .FirstOrDefaultAsync(a => a.Id == id, cancellationToken);
+
+            if (appointment == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Appointment not found."));
+            }
+
+            var uploadDir = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "reports");
+            if (!Directory.Exists(uploadDir))
+            {
+                Directory.CreateDirectory(uploadDir);
+            }
+
+            var filename = $"Report_{appointment.AppointmentNumber}.pdf";
+            var filePath = Path.Combine(uploadDir, filename);
+
+            using (var stream = new FileStream(filePath, FileMode.Create))
+            {
+                await report.CopyToAsync(stream, cancellationToken);
+            }
+
+            var relativeUrl = $"/reports/{filename}";
+            appointment.ReportPdfPath = relativeUrl;
+            appointment.Status = AppointmentStatus.Completed;
+            appointment.UpdatedAt = DateTime.UtcNow;
+
+            _context.Appointments.Update(appointment);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            var requestScheme = Request.Scheme;
+            var requestHost = Request.Host;
+            var absoluteUrl = $"{requestScheme}://{requestHost}{relativeUrl}";
+
+            if (appointment.CustomerUser != null && !string.IsNullOrEmpty(appointment.CustomerUser.Phone))
+            {
+                await _whatsAppService.SendDocumentMessageAsync(appointment.CustomerUser.Phone, absoluteUrl, filename);
+            }
+
+            return Ok(ApiResponse<string>.SuccessResult(relativeUrl, "Report uploaded and delivered to WhatsApp successfully."));
+        }
+    }
+
+    public record InviteStaffRequest(string Email, string Name);
+    
+    public class CompleteStaffRegistrationRequest
+    {
+        public string Token { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
+        public string Phone { get; set; } = string.Empty;
     }
 
     public class LabDashboardSummaryResponse

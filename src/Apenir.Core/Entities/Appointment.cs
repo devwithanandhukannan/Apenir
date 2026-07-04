@@ -65,6 +65,18 @@ public class Appointment
     [Required]
     public int MemberCount { get; set; } = 1;
 
+    [StringLength(100)]
+    public string? Landmark { get; set; }
+
+    [StringLength(100)]
+    public string? BuildingDetails { get; set; }
+
+    [StringLength(20)]
+    public string? Floor { get; set; }
+
+    [StringLength(500)]
+    public string? ReportPdfPath { get; set; }
+
     // Navigation properties
     [ForeignKey(nameof(CustomerUserId))]
     public virtual User? CustomerUser { get; set; }

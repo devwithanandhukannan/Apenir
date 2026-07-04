@@ -22,5 +22,6 @@ public interface IApplicationDbContext
     DbSet<WhatsAppSession> WhatsAppSessions { get; }
     DbSet<RefreshToken> RefreshTokens { get; }
     DbSet<BranchInvite> BranchInvites { get; }
+    DbSet<StaffInvite> StaffInvites { get; }
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }

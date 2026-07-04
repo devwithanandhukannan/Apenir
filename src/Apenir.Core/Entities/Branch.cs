@@ -51,6 +51,11 @@ public class Branch
     [StringLength(6)]
     public string? LabId { get; set; }
 
+    public double ServiceRangeKm { get; set; } = 10.0;
+
+    [StringLength(20)]
+    public string? NotificationPhone { get; set; }
+
     [Required]
     [StringLength(36)]
     public string CreatedBy { get; set; } = string.Empty;

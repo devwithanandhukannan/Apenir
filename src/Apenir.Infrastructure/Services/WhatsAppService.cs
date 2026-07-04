@@ -62,6 +62,53 @@ public class WhatsAppService : IWhatsAppService
         }
     }
 
+    public async Task SendDocumentMessageAsync(string toPhone, string url, string filename)
+    {
+        try
+        {
+            var accessToken = _configuration["WhatsApp:AccessToken"];
+            var phoneNumberId = _configuration["WhatsApp:PhoneNumberId"];
+            var apiVersion = _configuration["WhatsApp:ApiVersion"] ?? "v25.0";
+
+            if (string.IsNullOrEmpty(accessToken) || string.IsNullOrEmpty(phoneNumberId))
+            {
+                Console.WriteLine("[META WHATSAPP SERVICE]: AccessToken or PhoneNumberId not configured. Logging outbound document instead.");
+                Console.WriteLine($"[META WHATSAPP API OUTBOUND DOCUMENT to {toPhone}]: Link={url}, Filename={filename}");
+                return;
+            }
+
+            var payload = new
+            {
+                messaging_product = "whatsapp",
+                recipient_type = "individual",
+                to = toPhone,
+                type = "document",
+                document = new
+                {
+                    link = url,
+                    filename = filename
+                }
+            };
+
+            var client = _httpClientFactory.CreateClient();
+            var targetUrl = $"https://graph.facebook.com/{apiVersion}/{phoneNumberId}/messages";
+            var json = JsonSerializer.Serialize(payload);
+            var content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            client.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
+
+            Console.WriteLine($"[META WHATSAPP SERVICE] 📤 Sending document request to {targetUrl}");
+            var response = await client.PostAsync(targetUrl, content);
+            var responseBody = await response.Content.ReadAsStringAsync();
+            Console.WriteLine($"[META WHATSAPP SERVICE] 📬 Status: {response.StatusCode} | Body: {responseBody}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[META WHATSAPP SERVICE] Exception: {ex.Message}");
+        }
+    }
+
     public static string HashOtp(string otp)
     {
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(otp));

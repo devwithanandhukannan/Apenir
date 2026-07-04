@@ -55,8 +55,7 @@ namespace Apenir.Infrastructure
             services.AddScoped<ICurrentUserService, CurrentUserService>();
             services.AddScoped<IEmailService, EmailService>();
 
-            // Register Seeder
-            services.AddScoped<IDatabaseSeeder, DatabaseSeeder>();
+
 
             // HTTP context accessor is required for CurrentUserService
             services.AddHttpContextAccessor();

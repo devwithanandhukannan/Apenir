@@ -112,11 +112,6 @@ app.MapGet("/", () => Results.Ok(new { Status = "Apenir API is running", Environ
 
 app.MapControllers();
 
-// Seed Database on startup
-using (var scope = app.Services.CreateScope())
-{
-    var seeder = scope.ServiceProvider.GetRequiredService<IDatabaseSeeder>();
-    await seeder.SeedAsync();
-}
+
 
 app.Run();
