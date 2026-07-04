@@ -50,10 +50,20 @@ public class StaffController : ControllerBase
 
         var appointments = await _context.Appointments
             .Where(a => a.AssignedStaffId == currentUserId)
-            .Include(a => a.CustomerUser)
-            .Include(a => a.AppointmentSlot)
             .OrderByDescending(a => a.CreatedAt)
             .ToListAsync(cancellationToken);
+
+        var customerIds = appointments.Select(a => a.CustomerUserId).Distinct().ToList();
+        var slotIds = appointments.Select(a => a.AppointmentSlotId).Distinct().ToList();
+
+        var customers = await _context.Users.Where(u => customerIds.Contains(u.Id)).ToListAsync(cancellationToken);
+        var slots = await _context.AppointmentSlots.Where(s => slotIds.Contains(s.Id)).ToListAsync(cancellationToken);
+
+        foreach (var a in appointments)
+        {
+            a.CustomerUser = customers.FirstOrDefault(c => c.Id == a.CustomerUserId);
+            a.AppointmentSlot = slots.FirstOrDefault(s => s.Id == a.AppointmentSlotId);
+        }
 
         var result = appointments.Select(a => new StaffAppointmentDto
         {
@@ -93,13 +103,14 @@ public class StaffController : ControllerBase
 
         var currentUserId = _currentUserService.UserId?.ToString();
         var appointment = await _context.Appointments
-            .Include(a => a.CustomerUser)
             .FirstOrDefaultAsync(a => a.Id == id && a.AssignedStaffId == currentUserId, cancellationToken);
 
         if (appointment == null)
         {
             return NotFound(ApiResponse.FailureResult("Assigned appointment not found."));
         }
+
+        appointment.CustomerUser = await _context.Users.FirstOrDefaultAsync(u => u.Id == appointment.CustomerUserId, cancellationToken);
 
         AppointmentStatus targetStatus;
         string waMessage;
@@ -158,13 +169,14 @@ public class StaffController : ControllerBase
 
         var currentUserId = _currentUserService.UserId?.ToString();
         var appointment = await _context.Appointments
-            .Include(a => a.CustomerUser)
             .FirstOrDefaultAsync(a => a.Id == id && a.AssignedStaffId == currentUserId, cancellationToken);
 
         if (appointment == null)
         {
             return NotFound(ApiResponse.FailureResult("Assigned appointment not found."));
         }
+
+        appointment.CustomerUser = await _context.Users.FirstOrDefaultAsync(u => u.Id == appointment.CustomerUserId, cancellationToken);
 
         if (appointment.Passcode != request.Otp.Trim())
         {

@@ -176,10 +176,21 @@ namespace Apenir.API.Controllers
 
             var appointments = await _context.Appointments
                 .Where(a => a.BranchId == branch.Id)
-                .Include(a => a.CustomerUser)
-                .Include(a => a.AssignedStaff)
                 .OrderByDescending(a => a.CreatedAt)
                 .ToListAsync(cancellationToken);
+
+            var customerIds = appointments.Select(a => a.CustomerUserId).Distinct().ToList();
+            var staffIds = appointments.Where(a => a.AssignedStaffId != null).Select(a => a.AssignedStaffId!).Distinct().ToList();
+
+            var customers = await _context.Users.Where(u => customerIds.Contains(u.Id)).ToListAsync(cancellationToken);
+            var staff = await _context.Users.Where(u => staffIds.Contains(u.Id)).ToListAsync(cancellationToken);
+
+            foreach (var app in appointments)
+            {
+                app.CustomerUser = customers.FirstOrDefault(c => c.Id == app.CustomerUserId);
+                app.AssignedStaff = staff.FirstOrDefault(s => s.Id == app.AssignedStaffId);
+                app.Branch = branch;
+            }
 
             return Ok(ApiResponse<List<Appointment>>.SuccessResult(appointments, "Branch appointments retrieved successfully."));
         }
@@ -194,13 +205,14 @@ namespace Apenir.API.Controllers
         {
             var currentUserId = _currentUserService.UserId?.ToString();
             var branch = await _context.Branches
-                .Include(b => b.LabUser)
                 .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
 
             if (branch == null)
             {
                 return NotFound(ApiResponse.FailureResult("Branch not found."));
             }
+
+            branch.LabUser = await _context.Users.FirstOrDefaultAsync(u => u.Id == branch.LabUserId, cancellationToken);
 
             var appointments = await _context.Appointments
                 .Where(a => a.BranchId == branch.Id)
@@ -288,10 +300,22 @@ namespace Apenir.API.Controllers
 
             var appointments = await _context.Appointments
                 .Where(a => a.BranchId == targetBranchId && slotIds.Contains(a.AppointmentSlotId))
-                .Include(a => a.CustomerUser)
-                .Include(a => a.AssignedStaff)
-                .Include(a => a.AppointmentSlot)
                 .ToListAsync(cancellationToken);
+
+            var customerIds = appointments.Select(a => a.CustomerUserId).Distinct().ToList();
+            var staffIds = appointments.Where(a => a.AssignedStaffId != null).Select(a => a.AssignedStaffId!).Distinct().ToList();
+            var appSlotIds = appointments.Select(a => a.AppointmentSlotId).Distinct().ToList();
+
+            var customers = await _context.Users.Where(u => customerIds.Contains(u.Id)).ToListAsync(cancellationToken);
+            var staff = await _context.Users.Where(u => staffIds.Contains(u.Id)).ToListAsync(cancellationToken);
+            var appSlots = await _context.AppointmentSlots.Where(s => appSlotIds.Contains(s.Id)).ToListAsync(cancellationToken);
+
+            foreach (var app in appointments)
+            {
+                app.CustomerUser = customers.FirstOrDefault(c => c.Id == app.CustomerUserId);
+                app.AssignedStaff = staff.FirstOrDefault(s => s.Id == app.AssignedStaffId);
+                app.AppointmentSlot = appSlots.FirstOrDefault(s => s.Id == app.AppointmentSlotId);
+            }
 
             var totalBookings = appointments.Count;
             var assignedCount = appointments.Count(a => a.Status == AppointmentStatus.Assigned);
@@ -312,7 +336,7 @@ namespace Apenir.API.Controllers
 
             var response = new LabDashboardSummaryResponse
             {
-                TodayBookingsCount = appointments.Count(a => a.AppointmentSlot!.SlotDate == DateOnly.FromDateTime(DateTime.UtcNow)),
+                TodayBookingsCount = appointments.Count(a => a.AppointmentSlot != null && a.AppointmentSlot.SlotDate == DateOnly.FromDateTime(DateTime.UtcNow)),
                 Funnel = new LabDashboardFunnel
                 {
                     PendingCount = pendingCount,
@@ -366,10 +390,20 @@ namespace Apenir.API.Controllers
             var pending = await _context.Appointments
                 .Where(a => a.BranchId == branch.Id && a.AssignedStaffId == null && 
                             (a.Status == AppointmentStatus.Pending || a.Status == AppointmentStatus.Confirmed))
-                .Include(a => a.CustomerUser)
-                .Include(a => a.AppointmentSlot)
                 .OrderBy(a => a.CreatedAt)
                 .ToListAsync(cancellationToken);
+
+            var customerIds = pending.Select(a => a.CustomerUserId).Distinct().ToList();
+            var appSlotIds = pending.Select(a => a.AppointmentSlotId).Distinct().ToList();
+
+            var customers = await _context.Users.Where(u => customerIds.Contains(u.Id)).ToListAsync(cancellationToken);
+            var appSlots = await _context.AppointmentSlots.Where(s => appSlotIds.Contains(s.Id)).ToListAsync(cancellationToken);
+
+            foreach (var app in pending)
+            {
+                app.CustomerUser = customers.FirstOrDefault(c => c.Id == app.CustomerUserId);
+                app.AppointmentSlot = appSlots.FirstOrDefault(s => s.Id == app.AppointmentSlotId);
+            }
 
             return Ok(ApiResponse<List<Appointment>>.SuccessResult(pending, "Pending staff assignments retrieved successfully."));
         }
@@ -394,13 +428,14 @@ namespace Apenir.API.Controllers
 
             var currentUserId = _currentUserService.UserId?.ToString();
             var appointment = await _context.Appointments
-                .Include(a => a.Branch)
                 .FirstOrDefaultAsync(a => a.Id == id, cancellationToken);
 
             if (appointment == null)
             {
                 return NotFound(ApiResponse.FailureResult("Appointment not found."));
             }
+
+            appointment.Branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == appointment.BranchId, cancellationToken);
 
             if (appointment.Branch == null || appointment.Branch.LabUserId != currentUserId)
             {
@@ -441,8 +476,15 @@ namespace Apenir.API.Controllers
 
             var branchServices = await _context.BranchServices
                 .Where(bs => bs.BranchId == branch.Id)
-                .Include(bs => bs.Service)
                 .ToListAsync(cancellationToken);
+
+            var serviceIds = branchServices.Select(bs => bs.ServiceId).Distinct().ToList();
+            var services = await _context.Services.Where(s => serviceIds.Contains(s.Id)).ToListAsync(cancellationToken);
+
+            foreach (var bs in branchServices)
+            {
+                bs.Service = services.FirstOrDefault(s => s.Id == bs.ServiceId);
+            }
 
             var result = branchServices.Select(bs => new BranchServiceDto
             {
@@ -733,13 +775,16 @@ namespace Apenir.API.Controllers
             }
 
             var appointment = await _context.Appointments
-                .Include(a => a.CustomerUser)
                 .FirstOrDefaultAsync(a => a.Id == id, cancellationToken);
 
             if (appointment == null)
             {
                 return NotFound(ApiResponse.FailureResult("Appointment not found."));
             }
+
+            appointment.CustomerUser = await _context.Users.FirstOrDefaultAsync(u => u.Id == appointment.CustomerUserId, cancellationToken);
+
+
 
             var uploadDir = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "reports");
             if (!Directory.Exists(uploadDir))
