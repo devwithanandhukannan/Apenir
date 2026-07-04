@@ -667,7 +667,15 @@ namespace Apenir.API.BackgroundServices
                     bs.BranchId  == session.SelectedLabId &&
                     bs.ServiceId == session.SelectedTestId &&
                     bs.IsActive, cancellationToken);
-            decimal rate = branchService?.CustomPrice ?? basePrice;
+            if (branchService == null)
+            {
+                await SendTextMessage(to, "❌ Sorry, this test is no longer available at the selected lab branch.", httpClientFactory, configuration);
+                session.CurrentState = WhatsAppState.Start;
+                await SaveSessionAsync(session, context, cancellationToken);
+                await SendGreeting(to, httpClientFactory, configuration);
+                return;
+            }
+            decimal rate = branchService.CustomPrice ?? basePrice;
 
             var allBranches = await GetCachedBranchesAsync(context, cancellationToken);
             var lab         = allBranches.FirstOrDefault(b => b.Id == session.SelectedLabId);
@@ -796,7 +804,15 @@ namespace Apenir.API.BackgroundServices
                     bs.BranchId  == session.SelectedLabId &&
                     bs.ServiceId == session.SelectedTestId &&
                     bs.IsActive, cancellationToken);
-            decimal rate = branchService?.CustomPrice ?? basePrice;
+            if (branchService == null)
+            {
+                await SendTextMessage(to, "❌ Sorry, this test is no longer available at the selected lab branch.", httpClientFactory, configuration);
+                session.CurrentState = WhatsAppState.Start;
+                await SaveSessionAsync(session, context, cancellationToken);
+                await SendGreeting(to, httpClientFactory, configuration);
+                return;
+            }
+            decimal rate = branchService.CustomPrice ?? basePrice;
 
             var allBranches = await GetCachedBranchesAsync(context, cancellationToken);
             var lab         = allBranches.FirstOrDefault(b => b.Id == session.SelectedLabId);
@@ -1129,7 +1145,7 @@ namespace Apenir.API.BackgroundServices
                     bs.BranchId  == session.SelectedLabId &&
                     bs.ServiceId == session.SelectedTestId &&
                     bs.IsActive, cancellationToken);
-            decimal rate  = branchService?.CustomPrice ?? basePrice;
+            decimal rate  = (branchService != null ? (branchService.CustomPrice ?? basePrice) : basePrice);
             int     total = (int)rate + (session.MemberCount > 1
                 ? (int)Math.Round((session.MemberCount - 1) * rate * 0.8m)
                 : 0);

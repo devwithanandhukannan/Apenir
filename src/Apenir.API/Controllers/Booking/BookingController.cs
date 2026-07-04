@@ -84,7 +84,11 @@ public class BookingController : ControllerBase
         var basePrice = service.BasePrice;
         var branchService = await _context.BranchServices
             .FirstOrDefaultAsync(bs => bs.BranchId == branch.Id && bs.ServiceId == service.Id && bs.IsActive, cancellationToken);
-        decimal rate = branchService?.CustomPrice ?? basePrice;
+        if (branchService == null)
+        {
+            return BadRequest(ApiResponse.FailureResult("This service is not available at the selected branch."));
+        }
+        decimal rate = branchService.CustomPrice ?? basePrice;
 
         int total = (int)rate + (memberCount > 1
             ? (int)Math.Round((memberCount - 1) * rate * 0.8m)

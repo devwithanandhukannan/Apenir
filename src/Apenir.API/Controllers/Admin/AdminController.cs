@@ -180,7 +180,70 @@ namespace Apenir.API.Controllers.Admin
             await _context.SaveChangesAsync(cancellationToken);
             return Ok(ApiResponse.SuccessResult("Branch service commission updated successfully."));
         }
+
+        [HttpPut("branches/{branchId}/services/{serviceId}")]
+        [EndpointSummary("Admin override of a specific branch's service pricing, commission, or active status")]
+        [EndpointDescription("Allows administrators to customize the price, commission, or active status of a service for a specific branch.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> AdminOverrideBranchService(
+            [FromRoute] string branchId,
+            [FromRoute] string serviceId,
+            [FromBody] AdminOverrideBranchServiceRequest request,
+            CancellationToken cancellationToken)
+        {
+            if (request == null)
+            {
+                return BadRequest(ApiResponse.FailureResult("Request body is required."));
+            }
+
+            var branchExists = await _context.Branches.AnyAsync(b => b.Id == branchId, cancellationToken);
+            if (!branchExists)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            var branchService = await _context.BranchServices
+                .FirstOrDefaultAsync(bs => bs.BranchId == branchId && bs.ServiceId == serviceId, cancellationToken);
+
+            if (branchService == null)
+            {
+                var serviceExists = await _context.Services.AnyAsync(s => s.Id == serviceId, cancellationToken);
+                if (!serviceExists)
+                {
+                    return NotFound(ApiResponse.FailureResult("Master service not found."));
+                }
+
+                branchService = new BranchService
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    BranchId = branchId,
+                    ServiceId = serviceId,
+                    CustomPrice = request.CustomPrice,
+                    CustomCommissionPct = request.CustomCommissionPct,
+                    IsActive = request.IsActive
+                };
+                _context.BranchServices.Add(branchService);
+            }
+            else
+            {
+                branchService.CustomPrice = request.CustomPrice;
+                branchService.CustomCommissionPct = request.CustomCommissionPct;
+                branchService.IsActive = request.IsActive;
+                _context.BranchServices.Update(branchService);
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+            return Ok(ApiResponse.SuccessResult("Branch service override saved successfully by Admin."));
+        }
     }
+
+    public record AdminOverrideBranchServiceRequest(
+        decimal? CustomPrice,
+        decimal? CustomCommissionPct,
+        bool IsActive
+    );
 
     public record UpdateBranchCommissionRequest(
         decimal CommissionPct

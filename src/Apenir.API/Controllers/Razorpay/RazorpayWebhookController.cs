@@ -191,7 +191,11 @@ public class RazorpayWebhookController : ControllerBase
         var basePrice = service?.BasePrice ?? 0m;
         var branchService = await _context.BranchServices
             .FirstOrDefaultAsync(bs => bs.BranchId == labId && bs.ServiceId == testId && bs.IsActive, cancellationToken);
-        decimal rate = branchService?.CustomPrice ?? basePrice;
+        if (branchService == null)
+        {
+            throw new Exception("Service is not active or available at the selected branch.");
+        }
+        decimal rate = branchService.CustomPrice ?? basePrice;
 
         int total = (int)rate + (memberCount > 1
             ? (int)Math.Round((memberCount - 1) * rate * 0.8m)
