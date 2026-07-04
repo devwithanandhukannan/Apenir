@@ -495,6 +495,245 @@ namespace Apenir.API.Controllers.Admin
 
             return Ok(ApiResponse<PaginatedList<Payroll>>.SuccessResult(response, "PAYROLLS_RETRIEVED"));
         }
+
+        [HttpPost("customers")]
+        [EndpointSummary("Search and Filter Customers with Pagination")]
+        [EndpointDescription("Returns a paginated list of customers (UserRole = Customer) matching optional filters.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<PaginatedList<User>>))]
+        public async Task<IActionResult> GetCustomersList([FromBody] SearchCustomersRequest? request, CancellationToken cancellationToken)
+        {
+            var query = _context.Users.AsNoTracking().Where(u => u.Role == UserRole.Customer && !u.IsDeleted);
+
+            if (request != null)
+            {
+                if (!string.IsNullOrWhiteSpace(request.Name))
+                {
+                    var nameQuery = request.Name.Trim().ToLower();
+                    query = query.Where(u => u.Name != null && u.Name.ToLower().Contains(nameQuery));
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.Email))
+                {
+                    var emailQuery = request.Email.Trim().ToLower();
+                    query = query.Where(u => u.Email != null && u.Email.ToLower().Contains(emailQuery));
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.Status))
+                {
+                    var statusQuery = request.Status.Trim().ToLower();
+                    query = query.Where(u => u.Status != null && u.Status.ToLower() == statusQuery);
+                }
+            }
+
+            var totalRows = await query.CountAsync(cancellationToken);
+            var pageNumber = request?.PageNumber ?? 1;
+            var rowsPerPage = request?.RowsPerPage ?? 10;
+            if (pageNumber < 1) pageNumber = 1;
+            if (rowsPerPage < 1) rowsPerPage = 10;
+
+            var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
+
+            var customers = await query
+                .OrderByDescending(u => u.CreatedAt)
+                .Skip((pageNumber - 1) * rowsPerPage)
+                .Take(rowsPerPage)
+                .ToListAsync(cancellationToken);
+
+            var response = new PaginatedList<User>
+            {
+                Items = customers,
+                PageNumber = pageNumber,
+                PageSize = customers.Count,
+                RowsPerPage = rowsPerPage,
+                PageCount = pageCount,
+                TotalRows = totalRows
+            };
+
+            return Ok(ApiResponse<PaginatedList<User>>.SuccessResult(response, "CUSTOMERS_RETRIEVED"));
+        }
+
+        [HttpGet("customers/{customerId}")]
+        [EndpointSummary("Get Customer Details")]
+        [EndpointDescription("Returns profile info and demographical details of a customer.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<CustomerDetailsResponse>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetCustomerDetails([FromRoute] string customerId, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(customerId))
+            {
+                return BadRequest(ApiResponse.FailureResult("Customer ID is required."));
+            }
+
+            var user = await _context.Users.AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Id == customerId && u.Role == UserRole.Customer && !u.IsDeleted, cancellationToken);
+
+            if (user == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Customer not found."));
+            }
+
+            var profile = await _context.Customers.AsNoTracking()
+                .FirstOrDefaultAsync(c => c.UserId == customerId, cancellationToken);
+
+            var response = new CustomerDetailsResponse
+            {
+                User = user,
+                Profile = profile
+            };
+
+            return Ok(ApiResponse<CustomerDetailsResponse>.SuccessResult(response, "CUSTOMER_DETAILS_RETRIEVED"));
+        }
+
+        [HttpPost("customers/{customerId}/appointments")]
+        [EndpointSummary("Get Customer Appointments/Bookings")]
+        [EndpointDescription("Returns a paginated list of bookings for the specified customer, with optional status and date filters.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<PaginatedList<Appointment>>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetCustomerAppointments([FromRoute] string customerId, [FromBody] SearchCustomerAppointmentsRequest? request, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(customerId))
+            {
+                return BadRequest(ApiResponse.FailureResult("Customer ID is required."));
+            }
+
+            var customerExists = await _context.Users.AnyAsync(u => u.Id == customerId && u.Role == UserRole.Customer && !u.IsDeleted, cancellationToken);
+            if (!customerExists)
+            {
+                return NotFound(ApiResponse.FailureResult("Customer not found."));
+            }
+
+            var query = _context.Appointments.AsNoTracking()
+                .Where(a => a.CustomerUserId == customerId);
+
+            if (request != null)
+            {
+                if (!string.IsNullOrWhiteSpace(request.AppointmentNumber))
+                {
+                    var appNumQuery = request.AppointmentNumber.Trim().ToLower();
+                    query = query.Where(a => a.AppointmentNumber.ToLower().Contains(appNumQuery));
+                }
+
+                if (request.Status.HasValue)
+                {
+                    query = query.Where(a => a.Status == request.Status.Value);
+                }
+
+                if (request.StartDate.HasValue)
+                {
+                    query = query.Where(a => a.AppointmentSlot != null && a.AppointmentSlot.SlotDate >= request.StartDate.Value);
+                }
+
+                if (request.EndDate.HasValue)
+                {
+                    query = query.Where(a => a.AppointmentSlot != null && a.AppointmentSlot.SlotDate <= request.EndDate.Value);
+                }
+            }
+
+            var totalRows = await query.CountAsync(cancellationToken);
+            var pageNumber = request?.PageNumber ?? 1;
+            var rowsPerPage = request?.RowsPerPage ?? 10;
+            if (pageNumber < 1) pageNumber = 1;
+            if (rowsPerPage < 1) rowsPerPage = 10;
+
+            var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
+
+            var appointments = await query
+                .Include(a => a.Branch)
+                .Include(a => a.AppointmentSlot)
+                .Include(a => a.AssignedStaff)
+                .OrderByDescending(a => a.CreatedAt)
+                .Skip((pageNumber - 1) * rowsPerPage)
+                .Take(rowsPerPage)
+                .ToListAsync(cancellationToken);
+
+            var response = new PaginatedList<Appointment>
+            {
+                Items = appointments,
+                PageNumber = pageNumber,
+                PageSize = appointments.Count,
+                RowsPerPage = rowsPerPage,
+                PageCount = pageCount,
+                TotalRows = totalRows
+            };
+
+            return Ok(ApiResponse<PaginatedList<Appointment>>.SuccessResult(response, "CUSTOMER_APPOINTMENTS_RETRIEVED"));
+        }
+
+        [HttpPost("customers/{customerId}/payments")]
+        [EndpointSummary("Get Customer Payment Transactions")]
+        [EndpointDescription("Returns a paginated list of all payment transactions of the specified customer with the company.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<PaginatedList<Payment>>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetCustomerPayments([FromRoute] string customerId, [FromBody] SearchCustomerPaymentsRequest? request, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(customerId))
+            {
+                return BadRequest(ApiResponse.FailureResult("Customer ID is required."));
+            }
+
+            var customerExists = await _context.Users.AnyAsync(u => u.Id == customerId && u.Role == UserRole.Customer && !u.IsDeleted, cancellationToken);
+            if (!customerExists)
+            {
+                return NotFound(ApiResponse.FailureResult("Customer not found."));
+            }
+
+            var query = _context.Payments.AsNoTracking()
+                .Where(p => p.Appointment != null && p.Appointment.CustomerUserId == customerId);
+
+            if (request != null)
+            {
+                if (request.Status.HasValue)
+                {
+                    query = query.Where(p => p.Status == request.Status.Value);
+                }
+
+                if (request.PaymentMethod.HasValue)
+                {
+                    query = query.Where(p => p.PaymentMethod == request.PaymentMethod.Value);
+                }
+
+                if (request.StartDate.HasValue)
+                {
+                    query = query.Where(p => p.CreatedAt >= request.StartDate.Value);
+                }
+
+                if (request.EndDate.HasValue)
+                {
+                    query = query.Where(p => p.CreatedAt <= request.EndDate.Value);
+                }
+            }
+
+            var totalRows = await query.CountAsync(cancellationToken);
+            var pageNumber = request?.PageNumber ?? 1;
+            var rowsPerPage = request?.RowsPerPage ?? 10;
+            if (pageNumber < 1) pageNumber = 1;
+            if (rowsPerPage < 1) rowsPerPage = 10;
+
+            var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
+
+            var payments = await query
+                .Include(p => p.Appointment)
+                    .ThenInclude(a => a!.Branch)
+                .OrderByDescending(p => p.CreatedAt)
+                .Skip((pageNumber - 1) * rowsPerPage)
+                .Take(rowsPerPage)
+                .ToListAsync(cancellationToken);
+
+            var response = new PaginatedList<Payment>
+            {
+                Items = payments,
+                PageNumber = pageNumber,
+                PageSize = payments.Count,
+                RowsPerPage = rowsPerPage,
+                PageCount = pageCount,
+                TotalRows = totalRows
+            };
+
+            return Ok(ApiResponse<PaginatedList<Payment>>.SuccessResult(response, "CUSTOMER_PAYMENTS_RETRIEVED"));
+        }
     }
 
     public record InviteLabRequest(
@@ -514,6 +753,38 @@ namespace Apenir.API.Controllers.Admin
         string? Email,
         string? Status
     );
+
+    public record SearchCustomersRequest(
+        string? Name,
+        string? Email,
+        string? Status,
+        int PageNumber = 1,
+        int RowsPerPage = 10
+    );
+
+    public record SearchCustomerAppointmentsRequest(
+        string? AppointmentNumber,
+        AppointmentStatus? Status,
+        DateOnly? StartDate,
+        DateOnly? EndDate,
+        int PageNumber = 1,
+        int RowsPerPage = 10
+    );
+
+    public record SearchCustomerPaymentsRequest(
+        PaymentStatus? Status,
+        PaymentMethod? PaymentMethod,
+        DateTime? StartDate,
+        DateTime? EndDate,
+        int PageNumber = 1,
+        int RowsPerPage = 10
+    );
+
+    public class CustomerDetailsResponse
+    {
+        public User User { get; set; } = null!;
+        public Customer? Profile { get; set; }
+    }
 
     public record SearchPaymentsRequest(
         PaymentStatus? Status,
