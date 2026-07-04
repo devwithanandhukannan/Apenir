@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Authorization;
@@ -30,11 +31,11 @@ namespace Apenir.API.Controllers.Admin
             _currentUserService = currentUserService;
         }
 
-        [HttpPost("branches")]
-        [EndpointSummary("Search and Filter Lab Branches")]
-        [EndpointDescription("Returns a list of lab branches matching optional name, district, city, and status filter criteria.")]
+        [HttpPost("labs")]
+        [EndpointSummary("Search and Filter Labs")]
+        [EndpointDescription("Returns a list of labs matching optional name, district, city, and status filter criteria.")]
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<Branch>>))]
-        public async Task<IActionResult> GetBranches([FromBody] SearchBranchesRequest? request, CancellationToken cancellationToken)
+        public async Task<IActionResult> SearchLabs([FromBody] SearchLabsRequest? request, CancellationToken cancellationToken)
         {
             var query = _context.Branches.AsNoTracking();
 
@@ -65,8 +66,244 @@ namespace Apenir.API.Controllers.Admin
                 }
             }
 
-            var branches = await query.ToListAsync(cancellationToken);
-            return Ok(ApiResponse<List<Branch>>.SuccessResult(branches, "BRANCHES_RETRIEVED"));
+            var labs = await query.ToListAsync(cancellationToken);
+            return Ok(ApiResponse<List<Branch>>.SuccessResult(labs, "LABS_RETRIEVED"));
+        }
+
+        [HttpPost("labs/{labId}/staff")]
+        [EndpointSummary("Search and Filter Staff associated with a lab")]
+        [EndpointDescription("Returns a paginated list of staff members (users with role Staff) assigned to the specified lab, with optional filters.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<PaginatedList<User>>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetLabStaff([FromRoute] string labId, [FromBody] SearchLabStaffRequest? request, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(labId))
+            {
+                return BadRequest(ApiResponse.FailureResult("Lab ID is required."));
+            }
+
+            var labExists = await _context.Branches.AnyAsync(b => b.Id == labId, cancellationToken);
+            if (!labExists)
+            {
+                return NotFound(ApiResponse.FailureResult("Lab not found."));
+            }
+
+            var staffIdsQuery = _context.Appointments
+                .Where(a => a.BranchId == labId && a.AssignedStaffId != null)
+                .Select(a => a.AssignedStaffId)
+                .Distinct();
+
+            var query = _context.Users.AsNoTracking()
+                .Where(u => staffIdsQuery.Contains(u.Id) && !u.IsDeleted);
+
+            if (request != null)
+            {
+                if (!string.IsNullOrWhiteSpace(request.Name))
+                {
+                    var nameQuery = request.Name.Trim().ToLower();
+                    query = query.Where(u => u.Name != null && u.Name.ToLower().Contains(nameQuery));
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.Email))
+                {
+                    var emailQuery = request.Email.Trim().ToLower();
+                    query = query.Where(u => u.Email != null && u.Email.ToLower().Contains(emailQuery));
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.Phone))
+                {
+                    var phoneQuery = request.Phone.Trim().ToLower();
+                    query = query.Where(u => u.Phone != null && u.Phone.ToLower().Contains(phoneQuery));
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.Status))
+                {
+                    var statusQuery = request.Status.Trim().ToLower();
+                    query = query.Where(u => u.Status != null && u.Status.ToLower() == statusQuery);
+                }
+            }
+
+            var totalRows = await query.CountAsync(cancellationToken);
+            var pageNumber = request?.PageNumber ?? 1;
+            var rowsPerPage = request?.RowsPerPage ?? 10;
+            if (pageNumber < 1) pageNumber = 1;
+            if (rowsPerPage < 1) rowsPerPage = 10;
+
+            var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
+
+            var staffList = await query
+                .OrderBy(u => u.Name)
+                .Skip((pageNumber - 1) * rowsPerPage)
+                .Take(rowsPerPage)
+                .ToListAsync(cancellationToken);
+
+            var response = new PaginatedList<User>
+            {
+                Items = staffList,
+                PageNumber = pageNumber,
+                PageSize = staffList.Count,
+                RowsPerPage = rowsPerPage,
+                PageCount = pageCount,
+                TotalRows = totalRows
+            };
+
+            return Ok(ApiResponse<PaginatedList<User>>.SuccessResult(response, "Lab staff retrieved successfully."));
+        }
+
+        [HttpPost("labs/{labId}/appointments")]
+        [EndpointSummary("Search and Filter Appointments for a lab")]
+        [EndpointDescription("Returns a paginated list of all appointments scheduled for the specified lab, with optional filters.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<PaginatedList<Appointment>>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetLabAppointments([FromRoute] string labId, [FromBody] SearchLabAppointmentsRequest? request, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(labId))
+            {
+                return BadRequest(ApiResponse.FailureResult("Lab ID is required."));
+            }
+
+            var labExists = await _context.Branches.AnyAsync(b => b.Id == labId, cancellationToken);
+            if (!labExists)
+            {
+                return NotFound(ApiResponse.FailureResult("Lab not found."));
+            }
+
+            var query = _context.Appointments.AsNoTracking()
+                .Where(a => a.BranchId == labId);
+
+            if (request != null)
+            {
+                if (!string.IsNullOrWhiteSpace(request.AppointmentNumber))
+                {
+                    var appNumQuery = request.AppointmentNumber.Trim().ToLower();
+                    query = query.Where(a => a.AppointmentNumber.ToLower().Contains(appNumQuery));
+                }
+
+                if (request.Status.HasValue)
+                {
+                    query = query.Where(a => a.Status == request.Status.Value);
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.CustomerName))
+                {
+                    var custNameQuery = request.CustomerName.Trim().ToLower();
+                    query = query.Where(a => a.CustomerUser != null && a.CustomerUser.Name != null && a.CustomerUser.Name.ToLower().Contains(custNameQuery));
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.StaffName))
+                {
+                    var staffNameQuery = request.StaffName.Trim().ToLower();
+                    query = query.Where(a => a.AssignedStaff != null && a.AssignedStaff.Name != null && a.AssignedStaff.Name.ToLower().Contains(staffNameQuery));
+                }
+
+                if (request.StartDate.HasValue)
+                {
+                    query = query.Where(a => a.AppointmentSlot != null && a.AppointmentSlot.SlotDate >= request.StartDate.Value);
+                }
+
+                if (request.EndDate.HasValue)
+                {
+                    query = query.Where(a => a.AppointmentSlot != null && a.AppointmentSlot.SlotDate <= request.EndDate.Value);
+                }
+            }
+
+            var totalRows = await query.CountAsync(cancellationToken);
+            var pageNumber = request?.PageNumber ?? 1;
+            var rowsPerPage = request?.RowsPerPage ?? 10;
+            if (pageNumber < 1) pageNumber = 1;
+            if (rowsPerPage < 1) rowsPerPage = 10;
+
+            var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
+
+            var appointmentsList = await query
+                .Include(a => a.CustomerUser)
+                .Include(a => a.AssignedStaff)
+                .Include(a => a.AppointmentSlot)
+                .OrderByDescending(a => a.CreatedAt)
+                .Skip((pageNumber - 1) * rowsPerPage)
+                .Take(rowsPerPage)
+                .ToListAsync(cancellationToken);
+
+            var response = new PaginatedList<Appointment>
+            {
+                Items = appointmentsList,
+                PageNumber = pageNumber,
+                PageSize = appointmentsList.Count,
+                RowsPerPage = rowsPerPage,
+                PageCount = pageCount,
+                TotalRows = totalRows
+            };
+
+            return Ok(ApiResponse<PaginatedList<Appointment>>.SuccessResult(response, "Lab appointments retrieved successfully."));
+        }
+
+
+        [HttpGet("labs/{labId}/details")]
+        [EndpointSummary("Get lab details, staff and metrics")]
+        [EndpointDescription("Returns lab details, primary contact user info, list of associated staff, and general statistics like total revenue and appointment count.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<LabDetailsResponse>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetLabDetails([FromRoute] string labId, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(labId))
+            {
+                return BadRequest(ApiResponse.FailureResult("Lab ID is required."));
+            }
+
+            var lab = await _context.Branches
+                .Include(b => b.LabUser)
+                .FirstOrDefaultAsync(b => b.Id == labId, cancellationToken);
+
+            if (lab == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Lab not found."));
+            }
+
+            var appointments = await _context.Appointments
+                .Where(a => a.BranchId == labId)
+                .ToListAsync(cancellationToken);
+
+            var totalAppointments = appointments.Count;
+            var completedAppointments = appointments.Count(a => a.Status == AppointmentStatus.Completed);
+            var pendingAppointments = appointments.Count(a => a.Status == AppointmentStatus.Pending);
+            var totalRevenue = appointments.Sum(a => a.TotalAmount);
+            var totalLabPayout = appointments.Sum(a => a.LabPayout);
+
+            var staff = await _context.Appointments
+                .Where(a => a.BranchId == labId && a.AssignedStaffId != null)
+                .Select(a => a.AssignedStaff!)
+                .Where(s => !s.IsDeleted)
+                .Distinct()
+                .ToListAsync(cancellationToken);
+
+            var servicesCount = await _context.BranchServices
+                .CountAsync(bs => bs.BranchId == labId && bs.IsActive, cancellationToken);
+
+            var activeSlotsCount = await _context.AppointmentSlots
+                .CountAsync(s => s.BranchId == labId && s.IsAvailable, cancellationToken);
+
+            var response = new LabDetailsResponse
+            {
+                Lab = lab,
+                ContactPerson = lab.LabUser,
+                Staff = staff,
+                Stats = new LabStats
+                {
+                    TotalAppointments = totalAppointments,
+                    CompletedAppointments = completedAppointments,
+                    PendingAppointments = pendingAppointments,
+                    TotalRevenue = totalRevenue,
+                    TotalLabPayout = totalLabPayout,
+                    TotalStaffCount = staff.Count,
+                    TotalServicesCount = servicesCount,
+                    ActiveSlotsCount = activeSlotsCount
+                }
+            };
+
+            return Ok(ApiResponse<LabDetailsResponse>.SuccessResult(response, "Lab details retrieved successfully."));
         }
 
         [HttpPost("users/customers")]
@@ -124,6 +361,140 @@ namespace Apenir.API.Controllers.Admin
             var users = await query.ToListAsync(cancellationToken);
             return Ok(ApiResponse<List<User>>.SuccessResult(users, "USERS_RETRIEVED"));
         }
+
+        [HttpPost("finance/payments")]
+        [EndpointSummary("Search and Filter Customer Payments")]
+        [EndpointDescription("Returns a paginated list of customer payments to the company, with optional filters.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<PaginatedList<Payment>>))]
+        public async Task<IActionResult> GetPayments([FromBody] SearchPaymentsRequest? request, CancellationToken cancellationToken)
+        {
+            var query = _context.Payments.AsNoTracking();
+
+            if (request != null)
+            {
+                if (request.Status.HasValue)
+                {
+                    query = query.Where(p => p.Status == request.Status.Value);
+                }
+
+                if (request.PaymentMethod.HasValue)
+                {
+                    query = query.Where(p => p.PaymentMethod == request.PaymentMethod.Value);
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.CustomerName))
+                {
+                    var nameQuery = request.CustomerName.Trim().ToLower();
+                    query = query.Where(p => p.Appointment != null && p.Appointment.CustomerUser != null && p.Appointment.CustomerUser.Name != null && p.Appointment.CustomerUser.Name.ToLower().Contains(nameQuery));
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.LabName))
+                {
+                    var labQuery = request.LabName.Trim().ToLower();
+                    query = query.Where(p => p.Appointment != null && p.Appointment.Branch != null && p.Appointment.Branch.Name != null && p.Appointment.Branch.Name.ToLower().Contains(labQuery));
+                }
+
+                if (request.StartDate.HasValue)
+                {
+                    query = query.Where(p => p.CreatedAt >= request.StartDate.Value);
+                }
+
+                if (request.EndDate.HasValue)
+                {
+                    query = query.Where(p => p.CreatedAt <= request.EndDate.Value);
+                }
+            }
+
+            var totalRows = await query.CountAsync(cancellationToken);
+            var pageNumber = request?.PageNumber ?? 1;
+            var rowsPerPage = request?.RowsPerPage ?? 10;
+            if (pageNumber < 1) pageNumber = 1;
+            if (rowsPerPage < 1) rowsPerPage = 10;
+
+            var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
+
+            var payments = await query
+                .Include(p => p.Appointment)
+                    .ThenInclude(a => a!.CustomerUser)
+                .Include(p => p.Appointment)
+                    .ThenInclude(a => a!.Branch)
+                .OrderByDescending(p => p.CreatedAt)
+                .Skip((pageNumber - 1) * rowsPerPage)
+                .Take(rowsPerPage)
+                .ToListAsync(cancellationToken);
+
+            var response = new PaginatedList<Payment>
+            {
+                Items = payments,
+                PageNumber = pageNumber,
+                PageSize = payments.Count,
+                RowsPerPage = rowsPerPage,
+                PageCount = pageCount,
+                TotalRows = totalRows
+            };
+
+            return Ok(ApiResponse<PaginatedList<Payment>>.SuccessResult(response, "PAYMENTS_RETRIEVED"));
+        }
+
+        [HttpPost("finance/payrolls")]
+        [EndpointSummary("Search and Filter Lab Payrolls/Payouts")]
+        [EndpointDescription("Returns a paginated list of payouts/payrolls from company to lab, with optional filters.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<PaginatedList<Payroll>>))]
+        public async Task<IActionResult> GetPayrolls([FromBody] SearchPayrollsRequest? request, CancellationToken cancellationToken)
+        {
+            var query = _context.Payrolls.AsNoTracking();
+
+            if (request != null)
+            {
+                if (request.Status.HasValue)
+                {
+                    query = query.Where(pr => pr.Status == request.Status.Value);
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.LabName))
+                {
+                    var labQuery = request.LabName.Trim().ToLower();
+                    query = query.Where(pr => pr.Branch != null && pr.Branch.Name != null && pr.Branch.Name.ToLower().Contains(labQuery));
+                }
+
+                if (request.StartDate.HasValue)
+                {
+                    query = query.Where(pr => pr.PeriodStart >= request.StartDate.Value);
+                }
+
+                if (request.EndDate.HasValue)
+                {
+                    query = query.Where(pr => pr.PeriodEnd <= request.EndDate.Value);
+                }
+            }
+
+            var totalRows = await query.CountAsync(cancellationToken);
+            var pageNumber = request?.PageNumber ?? 1;
+            var rowsPerPage = request?.RowsPerPage ?? 10;
+            if (pageNumber < 1) pageNumber = 1;
+            if (rowsPerPage < 1) rowsPerPage = 10;
+
+            var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
+
+            var payrolls = await query
+                .Include(pr => pr.Branch)
+                .OrderByDescending(pr => pr.CreatedAt)
+                .Skip((pageNumber - 1) * rowsPerPage)
+                .Take(rowsPerPage)
+                .ToListAsync(cancellationToken);
+
+            var response = new PaginatedList<Payroll>
+            {
+                Items = payrolls,
+                PageNumber = pageNumber,
+                PageSize = payrolls.Count,
+                RowsPerPage = rowsPerPage,
+                PageCount = pageCount,
+                TotalRows = totalRows
+            };
+
+            return Ok(ApiResponse<PaginatedList<Payroll>>.SuccessResult(response, "PAYROLLS_RETRIEVED"));
+        }
     }
 
     public record InviteLabRequest(
@@ -131,7 +502,7 @@ namespace Apenir.API.Controllers.Admin
         string LabName
     );
 
-    public record SearchBranchesRequest(
+    public record SearchLabsRequest(
         string? Name,
         string? District,
         string? City,
@@ -143,4 +514,75 @@ namespace Apenir.API.Controllers.Admin
         string? Email,
         string? Status
     );
+
+    public record SearchPaymentsRequest(
+        PaymentStatus? Status,
+        PaymentMethod? PaymentMethod,
+        string? CustomerName,
+        string? LabName,
+        DateTime? StartDate,
+        DateTime? EndDate,
+        int PageNumber = 1,
+        int RowsPerPage = 10
+    );
+
+    public record SearchPayrollsRequest(
+        PayrollStatus? Status,
+        string? LabName,
+        DateOnly? StartDate,
+        DateOnly? EndDate,
+        int PageNumber = 1,
+        int RowsPerPage = 10
+    );
+
+    public record SearchLabStaffRequest(
+        string? Name,
+        string? Email,
+        string? Phone,
+        string? Status,
+        int PageNumber = 1,
+        int RowsPerPage = 10
+    );
+
+    public record SearchLabAppointmentsRequest(
+        string? AppointmentNumber,
+        AppointmentStatus? Status,
+        string? CustomerName,
+        string? StaffName,
+        DateOnly? StartDate,
+        DateOnly? EndDate,
+        int PageNumber = 1,
+        int RowsPerPage = 10
+    );
+
+    public class PaginatedList<T>
+    {
+        public List<T> Items { get; set; } = new();
+        public int PageNumber { get; set; }
+        public int PageSize { get; set; }
+        public int RowsPerPage { get; set; }
+        public int PageCount { get; set; }
+        public int TotalRows { get; set; }
+    }
+
+    public class LabDetailsResponse
+    {
+        public Branch Lab { get; set; } = null!;
+        public User? ContactPerson { get; set; }
+        public List<User> Staff { get; set; } = new();
+        public LabStats Stats { get; set; } = new();
+    }
+
+    public class LabStats
+    {
+        public int TotalAppointments { get; set; }
+        public int CompletedAppointments { get; set; }
+        public int PendingAppointments { get; set; }
+        public decimal TotalRevenue { get; set; }
+        public decimal TotalLabPayout { get; set; }
+        public int TotalStaffCount { get; set; }
+        public int TotalServicesCount { get; set; }
+        public int ActiveSlotsCount { get; set; }
+    }
+
 }
