@@ -326,7 +326,7 @@ namespace Apenir.API.BackgroundServices
                 case WhatsAppState.Confirm:
                     if (lower == "done" || lower == "pay")
                     {
-                        await SimulatePayment(to, session, context, httpClientFactory, configuration, cancellationToken);
+                        await VerifyPayment(to, session, context, httpClientFactory, configuration, cancellationToken);
                     }
                     else
                     {
@@ -975,8 +975,7 @@ namespace Apenir.API.BackgroundServices
             };
             await SendWhatsAppMessage(waPayload, httpClientFactory, configuration);
         }
-
-        private async Task SimulatePayment(
+        private async Task VerifyPayment(
             string to,
             WhatsAppSession session,
             IApplicationDbContext context,
@@ -984,180 +983,44 @@ namespace Apenir.API.BackgroundServices
             IConfiguration configuration,
             CancellationToken cancellationToken)
         {
-            var slot = await context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == session.SelectedSlot, cancellationToken);
-            if (slot == null || !slot.IsAvailable || slot.BookedCount + session.MemberCount > slot.MaxCapacity)
-            {
-                await SendTextMessage(to, "❌ Sorry, the slot is no longer available. Please select another slot.", httpClientFactory, configuration);
-                session.CurrentState = WhatsAppState.ChoosingSlot;
-                await SaveSessionAsync(session, context, cancellationToken);
-                if (!string.IsNullOrEmpty(session.SelectedLabId) && !string.IsNullOrEmpty(session.SelectedLabName))
-                {
-                    await SendSlotList(to, session.SelectedLabId, session.SelectedLabName, context, httpClientFactory, configuration, cancellationToken);
-                }
-                return;
-            }
-
-            session.CurrentState = WhatsAppState.Done;
-            await SaveSessionAsync(session, context, cancellationToken);
-
-            var allServices = await GetCachedServicesAsync(context, cancellationToken);
-            var service     = allServices.FirstOrDefault(s => s.Id == session.SelectedTestId);
-            var basePrice   = service?.BasePrice ?? 0m;
-
-            var branchService = await context.BranchServices
-                .FirstOrDefaultAsync(bs =>
-                    bs.BranchId  == session.SelectedLabId &&
-                    bs.ServiceId == session.SelectedTestId &&
-                    bs.IsActive, cancellationToken);
-            if (branchService == null)
-            {
-                await SendTextMessage(to, "❌ Sorry, this test is no longer available at the selected lab branch.", httpClientFactory, configuration);
-                session.CurrentState = WhatsAppState.Start;
-                await SaveSessionAsync(session, context, cancellationToken);
-                await SendGreeting(to, httpClientFactory, configuration);
-                return;
-            }
-            decimal rate = branchService.CustomPrice ?? basePrice;
-
-            var allBranches = await GetCachedBranchesAsync(context, cancellationToken);
-            var lab         = allBranches.FirstOrDefault(b => b.Id == session.SelectedLabId);
-            var labName     = lab?.Name ?? session.SelectedLabName ?? "Lab";
-
-            int total = (int)rate + (session.MemberCount > 1
-                ? (int)Math.Round((session.MemberCount - 1) * rate * 0.8m)
-                : 0);
-
-            string slotDisplay = "Confirmed Slot";
-            slotDisplay = $"{slot.SlotDate:dddd, MMM dd yyyy} @ {FormatTime(slot.StartTime)}";
-            slot.BookedCount += session.MemberCount;
-            if (slot.BookedCount >= slot.MaxCapacity)
-                slot.IsAvailable = false;
-            context.AppointmentSlots.Update(slot);
-
             var user = await context.Users.FirstOrDefaultAsync(u => u.Phone == to, cancellationToken);
-            if (user == null)
+            if (user != null && !string.IsNullOrEmpty(session.SelectedSlot))
             {
-                user = new User
+                var appt = await context.Appointments
+                    .FirstOrDefaultAsync(a => a.CustomerUserId == user.Id && a.AppointmentSlotId == session.SelectedSlot && a.Status == AppointmentStatus.Confirmed, cancellationToken);
+
+                if (appt != null)
                 {
-                    Id       = Guid.NewGuid().ToString(),
-                    Name     = "WhatsApp User",
-                    Phone    = to,
-                    Role     = UserRole.Customer,
-                    IsActive = true
-                };
-                context.Users.Add(user);
-                await context.SaveChangesAsync(cancellationToken);
-            }
-            var customerName = string.IsNullOrWhiteSpace(user.Name) ? "Patient" : user.Name;
-
-            var bookingId = $"BK-{DateTime.UtcNow:yyyyMMdd}-{new Random().Next(1000, 9999)}";
-
-            var appointment = new Appointment
-            {
-                Id                 = Guid.NewGuid().ToString(),
-                AppointmentNumber  = bookingId,
-                CustomerUserId     = user.Id,
-                BranchId           = session.SelectedLabId ?? string.Empty,
-                AppointmentSlotId  = session.SelectedSlot  ?? string.Empty,
-                LocationLatitude   = (decimal)(session.Latitude ?? 0.0),
-                LocationLongitude  = (decimal)(session.Longitude ?? 0.0),
-                LocationAddress    = $"{session.BuildingDetails}, Floor {session.Floor}, Landmark: {session.Landmark}",
-                Landmark           = session.Landmark,
-                BuildingDetails    = session.BuildingDetails,
-                Floor              = session.Floor,
-                Passcode           = new Random().Next(1000, 9999).ToString(),
-                Status             = AppointmentStatus.Confirmed,
-                TotalAmount        = total,
-                PlatformCommission = total * (((branchService != null && branchService.CustomCommissionPct.HasValue) ? branchService.CustomCommissionPct.Value : (service != null ? service.PlatformCommissionPct : 15.00m)) / 100m),
-                LabPayout  = total * (1m - ((branchService != null && branchService.CustomCommissionPct.HasValue) ? branchService.CustomCommissionPct.Value : (service != null ? service.PlatformCommissionPct : 15.00m)) / 100m),
-                CreatedAt   = DateTime.UtcNow,
-                MemberCount = session.MemberCount
-            };
-            context.Appointments.Add(appointment);
-
-            for (int i = 0; i < session.MemberCount; i++)
-            {
-                var member = new AppointmentMember
-                {
-                    Id            = Guid.NewGuid().ToString(),
-                    AppointmentId = appointment.Id,
-                    MemberName    = i == 0 ? customerName : $"Member {i + 1}",
-                    Age           = 0,
-                    Gender        = Gender.Other,
-                    Relationship  = i == 0 ? "Self" : "Family Member"
-                };
-                context.AppointmentMembers.Add(member);
-            }
-
-            var payment = new Payment
-            {
-                Id                 = Guid.NewGuid().ToString(),
-                AppointmentId      = appointment.Id,
-                RazorpayOrderId    = $"order_WA_{bookingId.Replace("-", "")}",
-                RazorpayPaymentId  = $"pay_WA_{bookingId.Replace("-", "")}",
-                Status             = PaymentStatus.Paid,
-                PaymentMethod      = PaymentMethod.UPI,
-                PaidAt             = DateTime.UtcNow,
-                CreatedAt          = DateTime.UtcNow
-            };
-            context.Payments.Add(payment);
-
-            await context.SaveChangesAsync(cancellationToken);
-
-            // Notify Lab Owner if registered
-            if (lab != null && !string.IsNullOrEmpty(lab.NotificationPhone))
-            {
-                var labNotification = $"🔔 *New Diagnostic Request!*\n\n" +
-                                      $"Booking ID: *{bookingId}*\n" +
-                                      $"Test: {service?.Name}\n" +
-                                      $"Slot: {slotDisplay}\n" +
-                                      $"Members: {session.MemberCount}\n" +
-                                      $"Place: {appointment.LocationAddress}\n" +
-                                      $"Customer Phone: +{to}";
-
-                await SendTextMessage(lab.NotificationPhone, labNotification, httpClientFactory, configuration);
-            }
-
-            var confirmMsg =
-                $"✅ *Booking Confirmed!*\n\n" +
-                $"🆔 Booking ID: *{bookingId}*\n" +
-                $"🩸 Service: {service?.Name ?? "Diagnostic Test"}\n" +
-                $"🏥 Lab: {labName}\n" +
-                $"📅 Date & Time: {slotDisplay}\n" +
-                $"👥 Persons: {session.MemberCount}\n" +
-                $"💰 Amount Paid: ₹{total}\n" +
-                $"🔑 Passcode/OTP: *{appointment.Passcode}*\n\n" +
-                $"🧪 *Instructions:*\n" +
-                $"• Fast for 8-10 hours prior to sample collection.\n" +
-                $"• Show the phlebotomist your Passcode (*{appointment.Passcode}*).\n" +
-                $"• Report PDF will be sent to your WhatsApp on completion.\n\n" +
-                $"Thank you for choosing LabCare! 🙏";
-
-            var payload = new
-            {
-                messaging_product = "whatsapp",
-                to,
-                type = "interactive",
-                interactive = new
-                {
-                    type   = "button",
-                    body   = new { text = confirmMsg },
-                    footer = new { text = "LabCare · Trusted Diagnostics" },
-                    action = new
+                    session.CurrentState = WhatsAppState.Done;
+                    await SaveSessionAsync(session, context, cancellationToken);
+                    
+                    var payload = new
                     {
-                        buttons = new[]
+                        messaging_product = "whatsapp",
+                        to,
+                        type = "interactive",
+                        interactive = new
                         {
-                            new { type = "reply", reply = new { id = "menu_book",     title = "📅 Book another" } },
-                            new { type = "reply", reply = new { id = "menu_bookings", title = "📋 My bookings"  } },
-                            new { type = "reply", reply = new { id = "menu_help",     title = "🏠 Main menu"    } },
+                            type   = "button",
+                            body   = new { text = $"✅ We have already received your payment! Your booking ID is *{appt.AppointmentNumber}*." },
+                            footer = new { text = "LabCare · Trusted Diagnostics" },
+                            action = new
+                            {
+                                buttons = new[]
+                                {
+                                    new { type = "reply", reply = new { id = "menu_book",     title = "📅 Book another" } },
+                                    new { type = "reply", reply = new { id = "menu_bookings", title = "📋 My bookings" } }
+                                }
+                            }
                         }
-                    }
+                    };
+                    await SendWhatsAppMessage(payload, httpClientFactory, configuration);
+                    return;
                 }
-            };
+            }
 
-            await SendWhatsAppMessage(payload, httpClientFactory, configuration);
+            await SendTextMessage(to, "⏳ We haven't received your payment confirmation yet. If you have already paid, please wait a moment for it to process. If your payment failed, please try paying again via the Razorpay link.", httpClientFactory, configuration);
         }
-
         private async Task SendViewBookings(
             string to,
             IApplicationDbContext context,
