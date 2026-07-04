@@ -26,6 +26,7 @@ namespace Apenir.API.BackgroundServices
         private readonly ILogger<WhatsAppWebhookProcessor> _logger;
         private readonly IMemoryCache _cache;
 
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _userLocks = new();
         private static readonly TimeSpan CacheDuration = TimeSpan.FromMinutes(5);
         private const string CacheKeyServices  = "wa_active_services";
         private const string CacheKeyBranches  = "wa_active_branches";
@@ -136,68 +137,92 @@ namespace Apenir.API.BackgroundServices
                             var from    = message.GetProperty("from").GetString()!;
                             var msgType = message.GetProperty("type").GetString();
 
+                            if (message.TryGetProperty("id", out var msgIdProp))
+                            {
+                                var msgId = msgIdProp.GetString();
+                                if (!string.IsNullOrEmpty(msgId))
+                                {
+                                    var cacheKey = $"msg_{msgId}";
+                                    if (_cache.TryGetValue(cacheKey, out _))
+                                    {
+                                        _logger.LogInformation("⏭️ Skipping duplicate message ID: {MsgId}", msgId);
+                                        continue;
+                                    }
+                                    _cache.Set(cacheKey, true, TimeSpan.FromHours(1));
+                                }
+                            }
+
                             _logger.LogInformation("📩 Background processing message from: {From} | Type: {MsgType}", from, msgType);
 
-                            // Auto-register customer
-                            var user = await context.Users.FirstOrDefaultAsync(u => u.Phone == from, cancellationToken);
-                            if (user == null)
+                            var userLock = _userLocks.GetOrAdd(from, _ => new SemaphoreSlim(1, 1));
+                            await userLock.WaitAsync(cancellationToken);
+                            try
                             {
-                                user = new User
+                                // Auto-register customer
+                                var user = await context.Users.FirstOrDefaultAsync(u => u.Phone == from, cancellationToken);
+                                if (user == null)
                                 {
-                                    Id    = Guid.NewGuid().ToString(),
-                                    Phone = from,
-                                    Name  = "WhatsApp User",
-                                    Role  = UserRole.Customer,
-                                    IsActive = true,
-                                    IsDeleted = false
-                                };
-                                context.Users.Add(user);
+                                    user = new User
+                                    {
+                                        Id    = Guid.NewGuid().ToString(),
+                                        Phone = from,
+                                        Name  = "WhatsApp User",
+                                        Role  = UserRole.Customer,
+                                        IsActive = true,
+                                        IsDeleted = false
+                                    };
+                                    context.Users.Add(user);
 
-                                var customer = new Customer
-                                {
-                                    Id     = Guid.NewGuid().ToString(),
-                                    UserId = user.Id,
-                                    Phone  = from,
-                                    Name   = "WhatsApp User"
-                                };
-                                context.Customers.Add(customer);
-                                await context.SaveChangesAsync(cancellationToken);
-                            }
-
-                            if (msgType == "text")
-                            {
-                                var text = message.GetProperty("text").GetProperty("body").GetString()!;
-                                await ProcessTextMessage(from, text, context, httpClientFactory, configuration, cancellationToken);
-                            }
-                            else if (msgType == "location")
-                            {
-                                var lat = message.GetProperty("location").GetProperty("latitude").GetDouble();
-                                var lng = message.GetProperty("location").GetProperty("longitude").GetDouble();
-                                await ProcessLocationMessage(from, lat, lng, context, httpClientFactory, configuration, cancellationToken);
-                            }
-                            else if (msgType == "interactive")
-                            {
-                                var interactive     = message.GetProperty("interactive");
-                                var interactiveType = interactive.GetProperty("type").GetString();
-
-                                string? replyId    = null;
-                                string? replyTitle = null;
-
-                                if (interactiveType == "button_reply")
-                                {
-                                    replyId    = interactive.GetProperty("button_reply").GetProperty("id").GetString();
-                                    replyTitle = interactive.GetProperty("button_reply").GetProperty("title").GetString();
-                                }
-                                if (interactiveType == "list_reply")
-                                {
-                                    replyId    = interactive.GetProperty("list_reply").GetProperty("id").GetString();
-                                    replyTitle = interactive.GetProperty("list_reply").GetProperty("title").GetString();
+                                    var customer = new Customer
+                                    {
+                                        Id     = Guid.NewGuid().ToString(),
+                                        UserId = user.Id,
+                                        Phone  = from,
+                                        Name   = "WhatsApp User"
+                                    };
+                                    context.Customers.Add(customer);
+                                    await context.SaveChangesAsync(cancellationToken);
                                 }
 
-                                if (replyId != null)
+                                if (msgType == "text")
                                 {
-                                    await ProcessInteractiveReply(from, replyId, replyTitle ?? "", context, httpClientFactory, configuration, cancellationToken);
+                                    var text = message.GetProperty("text").GetProperty("body").GetString()!;
+                                    await ProcessTextMessage(from, text, context, httpClientFactory, configuration, cancellationToken);
                                 }
+                                else if (msgType == "location")
+                                {
+                                    var lat = message.GetProperty("location").GetProperty("latitude").GetDouble();
+                                    var lng = message.GetProperty("location").GetProperty("longitude").GetDouble();
+                                    await ProcessLocationMessage(from, lat, lng, context, httpClientFactory, configuration, cancellationToken);
+                                }
+                                else if (msgType == "interactive")
+                                {
+                                    var interactive     = message.GetProperty("interactive");
+                                    var interactiveType = interactive.GetProperty("type").GetString();
+
+                                    string? replyId    = null;
+                                    string? replyTitle = null;
+
+                                    if (interactiveType == "button_reply")
+                                    {
+                                        replyId    = interactive.GetProperty("button_reply").GetProperty("id").GetString();
+                                        replyTitle = interactive.GetProperty("button_reply").GetProperty("title").GetString();
+                                    }
+                                    if (interactiveType == "list_reply")
+                                    {
+                                        replyId    = interactive.GetProperty("list_reply").GetProperty("id").GetString();
+                                        replyTitle = interactive.GetProperty("list_reply").GetProperty("title").GetString();
+                                    }
+
+                                    if (replyId != null)
+                                    {
+                                        await ProcessInteractiveReply(from, replyId, replyTitle ?? "", context, httpClientFactory, configuration, cancellationToken);
+                                    }
+                                }
+                            }
+                            finally
+                            {
+                                userLock.Release();
                             }
                         }
                     }
