@@ -314,7 +314,7 @@ namespace Apenir.Application.Features.AdminAuth.Commands
     }
 
     // --- 7. Forgot Password ---
-    public record ForgotPasswordCommand(ForgotPasswordRequest Request) : IRequest<ApiResponse>;
+    public record ForgotPasswordCommand(ForgotPasswordRequest Request, string FrontendUrl) : IRequest<ApiResponse>;
 
     public class ForgotPasswordCommandHandler : IRequestHandler<ForgotPasswordCommand, ApiResponse>
     {
@@ -341,21 +341,75 @@ namespace Apenir.Application.Features.AdminAuth.Commands
             admin.ResetPasswordTokenExpiry = DateTime.UtcNow.AddMinutes(15);
             await _adminRepository.UpdateAsync(admin, cancellationToken);
 
-            var emailSubject = "Apenir - Admin Password Reset Request";
+            var frontendUrl = command.FrontendUrl;
+            var resetUrl = $"{frontendUrl.TrimEnd('/')}/reset-password?token={token}&email={Uri.EscapeDataString(admin.Email!)}";
+
+            var emailSubject = "Reset Your Apenir Admin Password";
             var emailBody = $@"
-                <div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;'>
-                    <h2 style='color: #4f46e5;'>Password Reset Request</h2>
-                    <p>Hello,</p>
-                    <p>We received a request to reset your password for the Apenir Admin portal.</p>
-                    <p>Please use the following token to complete your password reset:</p>
-                    <div style='text-align: center; margin: 30px 0; background-color: #f1f5f9; padding: 15px; border-radius: 6px; font-size: 20px; font-weight: bold; letter-spacing: 2px;'>
-                        {token}
-                    </div>
-                    <p style='color: #ef4444; font-weight: bold;'>Important: This reset token is only valid for 15 minutes.</p>
-                    <p>If you did not request a password reset, please ignore this email or contact support if you suspect unauthorized access.</p>
-                    <hr style='border: 0; border-top: 1px solid #cbd5e1; margin: 20px 0;' />
-                    <p style='font-size: 12px; color: #64748b;'>This is an automated email. Please do not reply directly.</p>
-                </div>";
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>Reset Your Password</title>
+</head>
+<body style='margin: 0; padding: 0; background-color: #0f172a; font-family: -apple-system, BlinkMacSystemFont, ""Segoe UI"", Roboto, Helvetica, Arial, sans-serif;'>
+    <table cellpadding='0' cellspacing='0' width='100%' style='background-color: #0f172a; min-height: 100vh; padding: 40px 20px;'>
+        <tr>
+            <td align='center' valign='top'>
+                <table cellpadding='0' cellspacing='0' width='100%' style='max-width: 550px; background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 24px; padding: 40px; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4); text-align: left;'>
+                    <tr>
+                        <td align='center' style='padding-bottom: 20px;'>
+                            <h1 style='margin: 0; font-size: 28px; font-weight: 800; background: linear-gradient(to right, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-family: system-ui;'>Apenir Admin</h1>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style='color: #f8fafc; font-size: 16px; line-height: 1.6; padding-bottom: 20px;'>
+                            Hello <strong>{admin.Name}</strong>,
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style='color: #cbd5e1; font-size: 15px; line-height: 1.6; padding-bottom: 24px;'>
+                            We received a request to reset the password for your administrator account. Please click the button below to choose a new password:
+                        </td>
+                    </tr>
+                    <tr>
+                        <td align='center' style='padding-bottom: 30px;'>
+                            <a href='{resetUrl}' style='display: inline-block; background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); color: #ffffff; text-decoration: none; padding: 14px 30px; font-size: 15px; font-weight: 600; border-radius: 12px; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);'>Reset Password</a>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style='color: #cbd5e1; font-size: 14px; line-height: 1.6; padding-bottom: 20px;'>
+                            If the button doesn't work, copy and paste this link in your browser:
+                            <br/>
+                            <a href='{resetUrl}' style='color: #38bdf8; text-decoration: none; word-break: break-all; font-size: 13px;'>{resetUrl}</a>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style='color: #94a3b8; font-size: 13px; line-height: 1.6; border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 20px; padding-bottom: 20px;'>
+                            Or, if your app prompts for a raw reset token, use this:
+                            <br/>
+                            <div style='margin-top: 10px; text-align: center; background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(255, 255, 255, 0.05); padding: 12px; border-radius: 8px; font-size: 18px; font-weight: bold; letter-spacing: 2px; color: #38bdf8;'>
+                                {token}
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style='color: #ef4444; font-size: 13px; font-weight: 600; line-height: 1.6; padding-bottom: 20px;'>
+                            ⚠️ This link and token are only valid for 15 minutes.
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style='color: #64748b; font-size: 12px; line-height: 1.6;'>
+                            If you didn't request a password reset, you can safely ignore this email.
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>";
 
             await _emailService.SendEmailAsync(admin.Email!, emailSubject, emailBody);
             

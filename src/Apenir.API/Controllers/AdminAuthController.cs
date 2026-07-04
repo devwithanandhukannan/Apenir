@@ -61,7 +61,9 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
         public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequest request, CancellationToken cancellationToken)
         {
-            var result = await _mediator.Send(new ForgotPasswordCommand(request), cancellationToken);
+            var config = HttpContext.RequestServices.GetService(typeof(Microsoft.Extensions.Configuration.IConfiguration)) as Microsoft.Extensions.Configuration.IConfiguration;
+            var frontendUrl = config?["FrontendUrl"] ?? "https://admin.anandhu-kannan.in";
+            var result = await _mediator.Send(new ForgotPasswordCommand(request, frontendUrl), cancellationToken);
             return Ok(result);
         }
 
