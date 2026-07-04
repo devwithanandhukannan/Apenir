@@ -12,6 +12,11 @@ using Apenir.Application;
 using Apenir.Infrastructure;
 using Apenir.Infrastructure.Services;
 using Apenir.API.BackgroundServices;
+using Apenir.Core.Interfaces;
+using Apenir.Application.Common.Interfaces;
+using Apenir.Core.Enums;
+using Apenir.Core.Entities;
+using System.Linq;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -112,6 +117,39 @@ app.MapGet("/", () => Results.Ok(new { Status = "Apenir API is running", Environ
 
 app.MapControllers();
 
+using (var scope = app.Services.CreateScope())
+{
+    var context = scope.ServiceProvider.GetRequiredService<IApplicationDbContext>();
+    var passwordHasher = scope.ServiceProvider.GetRequiredService<IPasswordHasher>();
+    var config = scope.ServiceProvider.GetRequiredService<IConfiguration>();
 
+    var hasAdmin = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.AnyAsync(
+        context.Users.Where(u => u.Role == UserRole.SuperAdmin));
+
+    if (!hasAdmin)
+    {
+        var defaultEmail = config["AdminSettings:DefaultEmail"] ?? "admin@gmail.com";
+        var defaultPass = config["AdminSettings:DefaultPassword"] ?? "admin@123";
+        var defaultName = config["AdminSettings:DefaultFullName"] ?? "Super Admin";
+
+        var adminUser = new User
+        {
+            Id = Guid.NewGuid().ToString(),
+            Name = defaultName,
+            Email = defaultEmail,
+            PasswordHash = passwordHasher.Hash(defaultPass),
+            Role = UserRole.SuperAdmin,
+            IsActive = true,
+            IsDeleted = false,
+            Status = "Active",
+            CreatedAt = DateTime.UtcNow,
+            Permissions = new List<string>()
+        };
+
+        context.Users.Add(adminUser);
+        await context.SaveChangesAsync();
+        Console.WriteLine($"[DB INITIALIZATION] Default Admin user created: Email={defaultEmail}");
+    }
+}
 
 app.Run();
