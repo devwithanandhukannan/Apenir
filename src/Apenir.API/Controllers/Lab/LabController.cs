@@ -520,13 +520,6 @@ namespace Apenir.API.Controllers
                 return BadRequest(ApiResponse.FailureResult("Email and Name are required."));
             }
 
-            var lowercaseEmail = request.Email.Trim().ToLower();
-            var exists = await _context.Users.AnyAsync(u => u.Email != null && u.Email.ToLower() == lowercaseEmail && !u.IsDeleted, cancellationToken);
-            if (exists)
-            {
-                return BadRequest(ApiResponse.FailureResult("A user with this email already exists."));
-            }
-
             var currentUserId = _currentUserService.UserId?.ToString();
             var ownerBranch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
             if (ownerBranch == null)
@@ -534,18 +527,41 @@ namespace Apenir.API.Controllers
                 return BadRequest(ApiResponse.FailureResult("Logged-in user does not manage a lab branch."));
             }
 
-            var user = new User
+            var lowercaseEmail = request.Email.Trim().ToLower();
+            
+            // Check if user already exists
+            var existingUser = await _context.Users.FirstOrDefaultAsync(u => u.Email != null && u.Email.ToLower() == lowercaseEmail && !u.IsDeleted, cancellationToken);
+            
+            User user;
+
+            if (existingUser != null)
             {
-                Id = Guid.NewGuid().ToString(),
-                Name = request.Name.Trim(),
-                Email = request.Email.Trim(),
-                Role = UserRole.Staff,
-                IsActive = true,
-                IsDeleted = false,
-                Status = "notverified",
-                CreatedAt = DateTime.UtcNow,
-                Permissions = new List<string>()
-            };
+                if (existingUser.Status != "notverified")
+                {
+                    return BadRequest(ApiResponse.FailureResult("A user with this email already exists."));
+                }
+                
+                user = existingUser;
+                user.Name = request.Name.Trim();
+                user.CreatedAt = DateTime.UtcNow;
+                _context.Users.Update(user);
+            }
+            else
+            {
+                user = new User
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Name = request.Name.Trim(),
+                    Email = request.Email.Trim(),
+                    Role = UserRole.Staff,
+                    IsActive = true,
+                    IsDeleted = false,
+                    Status = "notverified",
+                    CreatedAt = DateTime.UtcNow,
+                    Permissions = new List<string>()
+                };
+                _context.Users.Add(user);
+            }
 
             var token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
             var invite = new StaffInvite
@@ -560,7 +576,6 @@ namespace Apenir.API.Controllers
                 IsUsed = false
             };
 
-            _context.Users.Add(user);
             _context.StaffInvites.Add(invite);
             await _context.SaveChangesAsync(cancellationToken);
 

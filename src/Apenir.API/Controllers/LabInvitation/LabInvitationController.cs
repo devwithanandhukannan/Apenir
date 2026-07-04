@@ -64,49 +64,91 @@ namespace Apenir.API.Controllers
             var lowercaseEmail = request.Email.Trim().ToLower();
 
             // Check if user already exists
-            var userExists = await _context.Users.AnyAsync(u => u.Email != null && u.Email.ToLower() == lowercaseEmail && !u.IsDeleted, cancellationToken);
-            if (userExists)
+            var existingUser = await _context.Users.FirstOrDefaultAsync(u => u.Email != null && u.Email.ToLower() == lowercaseEmail && !u.IsDeleted, cancellationToken);
+            
+            User user;
+            Branch branch;
+
+            if (existingUser != null)
             {
-                return BadRequest(ApiResponse.FailureResult("A user with this email already exists."));
+                if (existingUser.Status != "invited")
+                {
+                    return BadRequest(ApiResponse.FailureResult("A user with this email already exists."));
+                }
+                
+                user = existingUser;
+                user.Name = request.LabName;
+                user.CreatedAt = DateTime.UtcNow;
+                _context.Users.Update(user);
+
+                var existingBranch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == user.Id, cancellationToken);
+                if (existingBranch != null)
+                {
+                    branch = existingBranch;
+                    branch.Name = request.LabName;
+                    branch.CreatedAt = DateTime.UtcNow;
+                    _context.Branches.Update(branch);
+                }
+                else
+                {
+                    branch = new Branch
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        LabUserId = user.Id,
+                        Name = request.LabName,
+                        District = "Pending",
+                        City = "Pending",
+                        Pincode = "Pending",
+                        Phone = "Pending",
+                        Latitude = 0m,
+                        Longitude = 0m,
+                        IsActive = true,
+                        Status = "invited",
+                        CreatedBy = _currentUserService.UserId?.ToString() ?? "system",
+                        CreatedAt = DateTime.UtcNow
+                    };
+                    _context.Branches.Add(branch);
+                }
             }
-
-            // Create User and Branch shells in 'invited' status if they don't exist
-            var userId = Guid.NewGuid().ToString();
-            var branchId = Guid.NewGuid().ToString();
-            var adminId = _currentUserService.UserId?.ToString() ?? "system";
-
-            var user = new User
+            else
             {
-                Id = userId,
-                Name = request.LabName,
-                Email = request.Email.Trim(),
-                Role = UserRole.Lab,
-                IsActive = true,
-                IsDeleted = false,
-                Status = "invited",
-                CreatedAt = DateTime.UtcNow,
-                Permissions = new List<string>()
-            };
+                var userId = Guid.NewGuid().ToString();
+                var branchId = Guid.NewGuid().ToString();
+                var adminId = _currentUserService.UserId?.ToString() ?? "system";
 
-            var branch = new Branch
-            {
-                Id = branchId,
-                LabUserId = userId,
-                Name = request.LabName,
-                District = "Pending",
-                City = "Pending",
-                Pincode = "Pending",
-                Phone = "Pending",
-                Latitude = 0m,
-                Longitude = 0m,
-                IsActive = true,
-                Status = "invited",
-                CreatedBy = adminId,
-                CreatedAt = DateTime.UtcNow
-            };
+                user = new User
+                {
+                    Id = userId,
+                    Name = request.LabName,
+                    Email = request.Email.Trim(),
+                    Role = UserRole.Lab,
+                    IsActive = true,
+                    IsDeleted = false,
+                    Status = "invited",
+                    CreatedAt = DateTime.UtcNow,
+                    Permissions = new List<string>()
+                };
 
-            _context.Users.Add(user);
-            _context.Branches.Add(branch);
+                branch = new Branch
+                {
+                    Id = branchId,
+                    LabUserId = userId,
+                    Name = request.LabName,
+                    District = "Pending",
+                    City = "Pending",
+                    Pincode = "Pending",
+                    Phone = "Pending",
+                    Latitude = 0m,
+                    Longitude = 0m,
+                    IsActive = true,
+                    Status = "invited",
+                    CreatedBy = adminId,
+                    CreatedAt = DateTime.UtcNow
+                };
+
+                _context.Users.Add(user);
+                _context.Branches.Add(branch);
+            }
 
             // Generate secure unique token
             var token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
