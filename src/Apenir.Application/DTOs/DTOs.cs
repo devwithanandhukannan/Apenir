@@ -19,6 +19,8 @@ namespace Apenir.Application.DTOs
         public int ExpiresIn { get; set; }
         public string AdminId { get; set; } = string.Empty;
         public string Email { get; set; } = string.Empty;
+        public string? BranchId { get; set; }
+        public string? LabId { get; set; }
     }
 
     public class RefreshTokenRequest

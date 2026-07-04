@@ -110,13 +110,26 @@ namespace Apenir.API.Controllers
             // Set secure cookie
             CookieHelper.SetRefreshTokenCookie(HttpContext, refreshTokenString, "/api/auth/refresh");
 
+            // Retrieve associated Branch details
+            Branch? userBranch = null;
+            if (user.Role == UserRole.Lab)
+            {
+                userBranch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == user.Id, cancellationToken);
+            }
+            else if (user.Role == UserRole.Staff && !string.IsNullOrEmpty(user.LabId))
+            {
+                userBranch = await _context.Branches.FirstOrDefaultAsync(b => b.LabId == user.LabId, cancellationToken);
+            }
+
             var response = new LoginResponse
             {
                 AccessToken = accessToken,
                 RefreshToken = string.Empty, // Hide from response body
                 ExpiresIn = _jwtSettings.AccessTokenExpiryMinutes * 60,
                 AdminId = user.Id,
-                Email = user.Email ?? string.Empty
+                Email = user.Email ?? string.Empty,
+                BranchId = userBranch?.Id,
+                LabId = userBranch?.LabId
             };
 
             return Ok(ApiResponse<LoginResponse>.SuccessResult(response, "Login successful"));
