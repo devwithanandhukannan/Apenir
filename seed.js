@@ -1,10 +1,10 @@
 // ============================================================
 //  Apenir – Full Database Seed Script
 //  Run with:
-//    mongosh "mongodb+srv://workbridgeanandhu:P%40ssword1@cluster0.dseaj.mongodb.net/ApenirDb" seed.js
+//    mongosh "mongodb+srv://workbridgeanandhu:P%40ssword1@cluster0.dseaj.mongodb.net/TaskManagerDb" seed.js
 // ============================================================
 
-const db = db.getSiblingDB("ApenirDb");
+const db = db.getSiblingDB("TaskManagerDb");
 
 // ── Helpers ─────────────────────────────────────────────────
 function uuid() { return UUID().toString().replace(/^UUID\("/, "").replace(/"\)$/, ""); }

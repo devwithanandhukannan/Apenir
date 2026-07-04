@@ -288,6 +288,7 @@ namespace Apenir.API.Controllers
             }
 
             var targetBranchId = branch.Id;
+            await GenerateSlotsForNext7Days(targetBranchId, _context, cancellationToken);
 
             // Default date range: today to next 7 days
             var start = startDate ?? DateOnly.FromDateTime(DateTime.UtcNow);
@@ -1001,6 +1002,66 @@ namespace Apenir.API.Controllers
             }
 
             return Ok(ApiResponse<string>.SuccessResult(relativeUrl, "Report uploaded and delivered to WhatsApp successfully."));
+        }
+
+        private async Task GenerateSlotsForNext7Days(string branchId, IApplicationDbContext context, CancellationToken cancellationToken)
+        {
+            var today = DateOnly.FromDateTime(DateTime.UtcNow);
+            var configs = await context.BranchSlotConfigurations
+                .Where(c => c.BranchId == branchId)
+                .ToListAsync(cancellationToken);
+
+            if (!configs.Any()) return;
+
+            var existingSlots = await context.AppointmentSlots
+                .Where(s => s.BranchId == branchId && s.SlotDate >= today)
+                .ToListAsync(cancellationToken);
+
+            var newSlots = new List<AppointmentSlot>();
+
+            for (int i = 0; i < 7; i++)
+            {
+                var date = today.AddDays(i);
+                var dayOfWeek = date.DayOfWeek;
+                DayText dayEnum = dayOfWeek switch
+                {
+                    DayOfWeek.Monday => DayText.Mon,
+                    DayOfWeek.Tuesday => DayText.Tue,
+                    DayOfWeek.Wednesday => DayText.Wed,
+                    DayOfWeek.Thursday => DayText.Thu,
+                    DayOfWeek.Friday => DayText.Fri,
+                    DayOfWeek.Saturday => DayText.Sat,
+                    DayOfWeek.Sunday => DayText.Sun,
+                    _ => DayText.Mon
+                };
+
+                var configsForDay = configs.Where(c => c.DayText == dayEnum).ToList();
+
+                foreach (var config in configsForDay)
+                {
+                    var exists = existingSlots.Any(s => s.SlotDate == date && s.StartTime == config.StartTime);
+                    if (!exists)
+                    {
+                        newSlots.Add(new AppointmentSlot
+                        {
+                            Id = Guid.NewGuid().ToString(),
+                            BranchId = branchId,
+                            SlotDate = date,
+                            StartTime = config.StartTime,
+                            EndTime = config.EndTime,
+                            MaxCapacity = config.MaxCapacity,
+                            BookedCount = 0,
+                            IsAvailable = !config.IsLeave
+                        });
+                    }
+                }
+            }
+
+            if (newSlots.Any())
+            {
+                context.AppointmentSlots.AddRange(newSlots);
+                await context.SaveChangesAsync(cancellationToken);
+            }
         }
     }
 
