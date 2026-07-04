@@ -734,6 +734,340 @@ namespace Apenir.API.Controllers.Admin
 
             return Ok(ApiResponse<PaginatedList<Payment>>.SuccessResult(response, "CUSTOMER_PAYMENTS_RETRIEVED"));
         }
+
+        [HttpPost("finance/transactions")]
+        [EndpointSummary("List all financial transactions (Inbound/Outbound)")]
+        [EndpointDescription("Returns a paginated list of unified financial transactions (customer-to-company payments or company-to-lab payouts) with filtering.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<PaginatedList<FinanceTransactionDto>>))]
+        public async Task<IActionResult> GetTransactions([FromBody] SearchFinanceTransactionsRequest? request, CancellationToken cancellationToken)
+        {
+            var pageNumber = request?.PageNumber ?? 1;
+            var rowsPerPage = request?.RowsPerPage ?? 10;
+            if (pageNumber < 1) pageNumber = 1;
+            if (rowsPerPage < 1) rowsPerPage = 10;
+
+            var transactionType = request?.Type ?? TransactionType.Inbound;
+
+            if (transactionType == TransactionType.Inbound)
+            {
+                var query = _context.Payments.AsNoTracking().AsQueryable();
+
+                if (request != null)
+                {
+                    if (request.PaymentStatus.HasValue)
+                    {
+                        query = query.Where(p => p.Status == request.PaymentStatus.Value);
+                    }
+                    if (request.PaymentMethod.HasValue)
+                    {
+                        query = query.Where(p => p.PaymentMethod == request.PaymentMethod.Value);
+                    }
+                    if (!string.IsNullOrWhiteSpace(request.CustomerName))
+                    {
+                        var nameQuery = request.CustomerName.Trim().ToLower();
+                        query = query.Where(p => p.Appointment != null && p.Appointment.CustomerUser != null && p.Appointment.CustomerUser.Name != null && p.Appointment.CustomerUser.Name.ToLower().Contains(nameQuery));
+                    }
+                    if (!string.IsNullOrWhiteSpace(request.LabName))
+                    {
+                        var labQuery = request.LabName.Trim().ToLower();
+                        query = query.Where(p => p.Appointment != null && p.Appointment.Branch != null && p.Appointment.Branch.Name != null && p.Appointment.Branch.Name.ToLower().Contains(labQuery));
+                    }
+                    if (request.StartDate.HasValue)
+                    {
+                        query = query.Where(p => p.CreatedAt >= request.StartDate.Value);
+                    }
+                    if (request.EndDate.HasValue)
+                    {
+                        query = query.Where(p => p.CreatedAt <= request.EndDate.Value);
+                    }
+                }
+
+                var totalRows = await query.CountAsync(cancellationToken);
+                var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
+
+                var payments = await query
+                    .Include(p => p.Appointment)
+                        .ThenInclude(a => a!.CustomerUser)
+                    .Include(p => p.Appointment)
+                        .ThenInclude(a => a!.Branch)
+                    .OrderByDescending(p => p.CreatedAt)
+                    .Skip((pageNumber - 1) * rowsPerPage)
+                    .Take(rowsPerPage)
+                    .ToListAsync(cancellationToken);
+
+                var list = payments.Select(p => new FinanceTransactionDto
+                {
+                    Id = p.Id,
+                    ReferenceNumber = p.Appointment?.AppointmentNumber ?? p.RazorpayOrderId,
+                    Type = TransactionType.Inbound,
+                    GrossAmount = p.Appointment?.TotalAmount ?? 0,
+                    PlatformCommission = p.Appointment?.PlatformCommission ?? 0,
+                    NetAmount = p.Appointment?.TotalAmount ?? 0,
+                    Status = p.Status.ToString(),
+                    EntityName = p.Appointment?.CustomerUser?.Name ?? "Unknown Customer",
+                    TransactionDate = p.PaidAt ?? p.CreatedAt,
+                    PaymentMethod = p.PaymentMethod?.ToString() ?? "Unknown"
+                }).ToList();
+
+                var response = new PaginatedList<FinanceTransactionDto>
+                {
+                    Items = list,
+                    PageNumber = pageNumber,
+                    PageSize = list.Count,
+                    RowsPerPage = rowsPerPage,
+                    PageCount = pageCount,
+                    TotalRows = totalRows
+                };
+
+                return Ok(ApiResponse<PaginatedList<FinanceTransactionDto>>.SuccessResult(response, "TRANSACTIONS_RETRIEVED"));
+            }
+            else
+            {
+                var query = _context.Payrolls.AsNoTracking().AsQueryable();
+
+                if (request != null)
+                {
+                    if (request.PayrollStatus.HasValue)
+                    {
+                        query = query.Where(pr => pr.Status == request.PayrollStatus.Value);
+                    }
+                    if (!string.IsNullOrWhiteSpace(request.LabName))
+                    {
+                        var labQuery = request.LabName.Trim().ToLower();
+                        query = query.Where(pr => pr.Branch != null && pr.Branch.Name != null && pr.Branch.Name.ToLower().Contains(labQuery));
+                    }
+                    if (request.StartDate.HasValue)
+                    {
+                        var dateOnlyStart = DateOnly.FromDateTime(request.StartDate.Value);
+                        query = query.Where(pr => pr.PeriodStart >= dateOnlyStart);
+                    }
+                    if (request.EndDate.HasValue)
+                    {
+                        var dateOnlyEnd = DateOnly.FromDateTime(request.EndDate.Value);
+                        query = query.Where(pr => pr.PeriodEnd <= dateOnlyEnd);
+                    }
+                }
+
+                var totalRows = await query.CountAsync(cancellationToken);
+                var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
+
+                var payrolls = await query
+                    .Include(pr => pr.Branch)
+                    .OrderByDescending(pr => pr.CreatedAt)
+                    .Skip((pageNumber - 1) * rowsPerPage)
+                    .Take(rowsPerPage)
+                    .ToListAsync(cancellationToken);
+
+                var list = payrolls.Select(pr => new FinanceTransactionDto
+                {
+                    Id = pr.Id,
+                    ReferenceNumber = $"PAY-{pr.Id[..8].ToUpper()}",
+                    Type = TransactionType.Outbound,
+                    GrossAmount = pr.GrossAmount,
+                    PlatformCommission = pr.PlatformCommission,
+                    NetAmount = pr.NetPayout,
+                    Status = pr.Status.ToString(),
+                    EntityName = pr.Branch?.Name ?? "Unknown Lab",
+                    TransactionDate = pr.SettledAt ?? pr.CreatedAt,
+                    PaymentMethod = "Bank Transfer"
+                }).ToList();
+
+                var response = new PaginatedList<FinanceTransactionDto>
+                {
+                    Items = list,
+                    PageNumber = pageNumber,
+                    PageSize = list.Count,
+                    RowsPerPage = rowsPerPage,
+                    PageCount = pageCount,
+                    TotalRows = totalRows
+                };
+
+                return Ok(ApiResponse<PaginatedList<FinanceTransactionDto>>.SuccessResult(response, "TRANSACTIONS_RETRIEVED"));
+            }
+        }
+
+        [HttpGet("finance/transactions/{id}")]
+        [EndpointSummary("Get Financial Transaction Details")]
+        [EndpointDescription("Returns detailed metadata of a specific inbound payment or outbound payout transaction.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<FinanceTransactionDetailResponse>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetTransactionDetail([FromRoute] string id, [FromQuery] TransactionType type, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(id))
+            {
+                return BadRequest(ApiResponse.FailureResult("Transaction ID is required."));
+            }
+
+            if (type == TransactionType.Inbound)
+            {
+                var payment = await _context.Payments.AsNoTracking()
+                    .Include(p => p.Appointment)
+                        .ThenInclude(a => a!.CustomerUser)
+                    .Include(p => p.Appointment)
+                        .ThenInclude(a => a!.Branch)
+                    .FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
+
+                if (payment == null)
+                {
+                    return NotFound(ApiResponse.FailureResult("Payment transaction not found."));
+                }
+
+                var response = new FinanceTransactionDetailResponse
+                {
+                    Id = payment.Id,
+                    ReferenceNumber = payment.Appointment?.AppointmentNumber ?? payment.RazorpayOrderId,
+                    Type = TransactionType.Inbound,
+                    GrossAmount = payment.Appointment?.TotalAmount ?? 0,
+                    PlatformCommission = payment.Appointment?.PlatformCommission ?? 0,
+                    NetAmount = payment.Appointment?.TotalAmount ?? 0,
+                    Status = payment.Status.ToString(),
+                    TransactionDate = payment.PaidAt ?? payment.CreatedAt,
+                    PaymentMethod = payment.PaymentMethod?.ToString() ?? "Unknown",
+                    RazorpayOrderId = payment.RazorpayOrderId,
+                    RazorpayPaymentId = payment.RazorpayPaymentId,
+                    CustomerName = payment.Appointment?.CustomerUser?.Name,
+                    CustomerPhone = payment.Appointment?.CustomerUser?.Phone,
+                    LabName = payment.Appointment?.Branch?.Name,
+                    AppointmentStatus = payment.Appointment?.Status.ToString()
+                };
+
+                return Ok(ApiResponse<FinanceTransactionDetailResponse>.SuccessResult(response, "TRANSACTION_DETAIL_RETRIEVED"));
+            }
+            else
+            {
+                var payroll = await _context.Payrolls.AsNoTracking()
+                    .Include(pr => pr.Branch)
+                        .ThenInclude(b => b!.LabUser)
+                    .FirstOrDefaultAsync(pr => pr.Id == id, cancellationToken);
+
+                if (payroll == null)
+                {
+                    return NotFound(ApiResponse.FailureResult("Payout transaction not found."));
+                }
+
+                var response = new FinanceTransactionDetailResponse
+                {
+                    Id = payroll.Id,
+                    ReferenceNumber = $"PAY-{payroll.Id[..8].ToUpper()}",
+                    Type = TransactionType.Outbound,
+                    GrossAmount = payroll.GrossAmount,
+                    PlatformCommission = payroll.PlatformCommission,
+                    NetAmount = payroll.NetPayout,
+                    Status = payroll.Status.ToString(),
+                    TransactionDate = payroll.SettledAt ?? payroll.CreatedAt,
+                    PaymentMethod = "Bank Transfer",
+                    RazorpayTransferId = payroll.RazorpayTransferId,
+                    PeriodStart = payroll.PeriodStart,
+                    PeriodEnd = payroll.PeriodEnd,
+                    LabName = payroll.Branch?.Name,
+                    LabContactPerson = payroll.Branch?.LabUser?.Name,
+                    LabContactPhone = payroll.Branch?.LabUser?.Phone
+                };
+
+                return Ok(ApiResponse<FinanceTransactionDetailResponse>.SuccessResult(response, "TRANSACTION_DETAIL_RETRIEVED"));
+            }
+        }
+
+        [HttpGet("finance/insights")]
+        [EndpointSummary("Get Financial Analytics and KPIs")]
+        [EndpointDescription("Returns summarized KPI card values, monthly trends, and payment method share analytics.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<FinanceInsightsResponse>))]
+        public async Task<IActionResult> GetFinanceInsights(CancellationToken cancellationToken)
+        {
+            var totalInbound = await _context.Payments.AsNoTracking()
+                .Where(p => p.Status == PaymentStatus.Paid)
+                .Include(p => p.Appointment)
+                .SumAsync(p => p.Appointment != null ? p.Appointment.TotalAmount : 0, cancellationToken);
+
+            var totalOutbound = await _context.Payrolls.AsNoTracking()
+                .Where(pr => pr.Status == PayrollStatus.Settled)
+                .SumAsync(pr => pr.NetPayout, cancellationToken);
+
+            var totalProfit = await _context.Payments.AsNoTracking()
+                .Where(p => p.Status == PaymentStatus.Paid)
+                .Include(p => p.Appointment)
+                .SumAsync(p => p.Appointment != null ? p.Appointment.PlatformCommission : 0, cancellationToken);
+
+            var totalTransactions = await _context.Payments.AsNoTracking()
+                .CountAsync(p => p.Status == PaymentStatus.Paid, cancellationToken);
+
+            var pendingPayouts = await _context.Payrolls.AsNoTracking()
+                .Where(pr => pr.Status == PayrollStatus.Pending)
+                .SumAsync(pr => pr.NetPayout, cancellationToken);
+
+            var lastSixMonths = DateTime.UtcNow.AddMonths(-6);
+            var paymentsLastSixMonths = await _context.Payments.AsNoTracking()
+                .Where(p => p.Status == PaymentStatus.Paid && p.CreatedAt >= lastSixMonths)
+                .Include(p => p.Appointment)
+                .ToListAsync(cancellationToken);
+
+            var payrollsLastSixMonths = await _context.Payrolls.AsNoTracking()
+                .Where(pr => pr.Status == PayrollStatus.Settled && pr.CreatedAt >= lastSixMonths)
+                .ToListAsync(cancellationToken);
+
+            var monthlyTrendsList = new List<MonthlyTrendDto>();
+            for (int i = 5; i >= 0; i--)
+            {
+                var monthDate = DateTime.UtcNow.AddMonths(-i);
+                var monthName = monthDate.ToString("MMMM yyyy");
+
+                var monthPayments = paymentsLastSixMonths
+                    .Where(p => p.CreatedAt.Month == monthDate.Month && p.CreatedAt.Year == monthDate.Year)
+                    .ToList();
+
+                var monthPayrolls = payrollsLastSixMonths
+                    .Where(pr => pr.CreatedAt.Month == monthDate.Month && pr.CreatedAt.Year == monthDate.Year)
+                    .ToList();
+
+                var inboundVal = monthPayments.Sum(p => p.Appointment?.TotalAmount ?? 0);
+                var outboundVal = monthPayrolls.Sum(pr => pr.NetPayout);
+                var profitVal = monthPayments.Sum(p => p.Appointment?.PlatformCommission ?? 0);
+
+                monthlyTrendsList.Add(new MonthlyTrendDto
+                {
+                    Month = monthName,
+                    Inbound = inboundVal,
+                    Outbound = outboundVal,
+                    Profit = profitVal
+                });
+            }
+
+            var paymentsByMethod = await _context.Payments.AsNoTracking()
+                .Where(p => p.Status == PaymentStatus.Paid)
+                .Include(p => p.Appointment)
+                .ToListAsync(cancellationToken);
+
+            var totalInboundForShare = paymentsByMethod.Sum(p => p.Appointment?.TotalAmount ?? 0);
+
+            var methodStats = paymentsByMethod
+                .GroupBy(p => p.PaymentMethod ?? PaymentMethod.UPI)
+                .Select(g => new PaymentMethodShare
+                {
+                    Method = g.Key.ToString(),
+                    Amount = g.Sum(p => p.Appointment?.TotalAmount ?? 0),
+                    Percentage = totalInboundForShare > 0 
+                        ? Math.Round((double)(g.Sum(p => p.Appointment?.TotalAmount ?? 0) / totalInboundForShare) * 100, 2)
+                        : 0
+                })
+                .ToList();
+
+            var response = new FinanceInsightsResponse
+            {
+                Kpis = new FinanceKpis
+                {
+                    TotalInbound = totalInbound,
+                    TotalOutbound = totalOutbound,
+                    TotalProfit = totalProfit,
+                    TotalTransactions = totalTransactions,
+                    PendingPayouts = pendingPayouts
+                },
+                MonthlyTrends = monthlyTrendsList,
+                PaymentMethodStats = methodStats
+            };
+
+            return Ok(ApiResponse<FinanceInsightsResponse>.SuccessResult(response, "FINANCIAL_INSIGHTS_RETRIEVED"));
+        }
     }
 
     public record InviteLabRequest(
@@ -784,6 +1118,92 @@ namespace Apenir.API.Controllers.Admin
     {
         public User User { get; set; } = null!;
         public Customer? Profile { get; set; }
+    }
+
+    public record SearchFinanceTransactionsRequest(
+        TransactionType? Type,
+        PaymentStatus? PaymentStatus,
+        PaymentMethod? PaymentMethod,
+        PayrollStatus? PayrollStatus,
+        string? CustomerName,
+        string? LabName,
+        DateTime? StartDate,
+        DateTime? EndDate,
+        int PageNumber = 1,
+        int RowsPerPage = 10
+    );
+
+    public class FinanceTransactionDto
+    {
+        public string Id { get; set; } = string.Empty;
+        public string ReferenceNumber { get; set; } = string.Empty;
+        public TransactionType Type { get; set; }
+        public decimal GrossAmount { get; set; }
+        public decimal PlatformCommission { get; set; }
+        public decimal NetAmount { get; set; }
+        public string Status { get; set; } = string.Empty;
+        public string EntityName { get; set; } = string.Empty;
+        public DateTime TransactionDate { get; set; }
+        public string PaymentMethod { get; set; } = string.Empty;
+    }
+
+    public class FinanceTransactionDetailResponse
+    {
+        public string Id { get; set; } = string.Empty;
+        public string ReferenceNumber { get; set; } = string.Empty;
+        public TransactionType Type { get; set; }
+        public decimal GrossAmount { get; set; }
+        public decimal PlatformCommission { get; set; }
+        public decimal NetAmount { get; set; }
+        public string Status { get; set; } = string.Empty;
+        public DateTime TransactionDate { get; set; }
+        public string PaymentMethod { get; set; } = string.Empty;
+
+        // Inbound details
+        public string? RazorpayOrderId { get; set; }
+        public string? RazorpayPaymentId { get; set; }
+        public string? CustomerName { get; set; }
+        public string? CustomerPhone { get; set; }
+        public string? LabName { get; set; }
+        public string? AppointmentStatus { get; set; }
+
+        // Outbound details
+        public string? RazorpayTransferId { get; set; }
+        public DateOnly? PeriodStart { get; set; }
+        public DateOnly? PeriodEnd { get; set; }
+        public string? LabContactPerson { get; set; }
+        public string? LabContactPhone { get; set; }
+    }
+
+    public class FinanceInsightsResponse
+    {
+        public FinanceKpis Kpis { get; set; } = new();
+        public List<MonthlyTrendDto> MonthlyTrends { get; set; } = new();
+        public List<PaymentMethodShare> PaymentMethodStats { get; set; } = new();
+    }
+
+    public class FinanceKpis
+    {
+        public decimal TotalInbound { get; set; }
+        public decimal TotalOutbound { get; set; }
+        public decimal TotalProfit { get; set; }
+        public int TotalTransactions { get; set; }
+        public decimal PendingPayouts { get; set; }
+    }
+
+    public class MonthlyTrendDto
+    {
+        public string Month { get; set; } = string.Empty;
+        public decimal Inbound { get; set; }
+        public decimal Outbound { get; set; }
+        public decimal Profit { get; set; }
+    }
+
+    public class PaymentMethodShare
+    {
+        public string Method { get; set; } = string.Empty;
+        public decimal Amount { get; set; }
+        public double Percentage { get; set; }
     }
 
     public record SearchPaymentsRequest(
