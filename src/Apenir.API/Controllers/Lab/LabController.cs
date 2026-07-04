@@ -123,60 +123,76 @@ namespace Apenir.API.Controllers
         }
 
         [HttpGet("branches/{branchId}/staff")]
+        [HttpGet("staff")]
         [Authorize]
         [EndpointSummary("Get all staff associated with a branch")]
-        [EndpointDescription("Returns a list of staff members (users with role Staff) who have been assigned to appointments in the specified branch.")]
+        [EndpointDescription("Returns a list of all staff members (users with role Staff) registered under the branch.")]
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<User>>))]
         [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
-        public async Task<IActionResult> GetBranchStaff([FromRoute] string branchId, CancellationToken cancellationToken)
+        public async Task<IActionResult> GetBranchStaff([FromRoute] string? branchId, CancellationToken cancellationToken)
         {
-            if (string.IsNullOrWhiteSpace(branchId))
+            var currentUserId = _currentUserService.UserId?.ToString();
+            Branch? branch = null;
+
+            if (!string.IsNullOrWhiteSpace(branchId))
             {
-                return BadRequest(ApiResponse.FailureResult("Branch ID is required."));
+                branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
+                if (branch != null && branch.LabUserId != currentUserId)
+                {
+                    return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                }
+            }
+            else
+            {
+                branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
             }
 
-            var branchExists = await _context.Branches.AnyAsync(b => b.Id == branchId, cancellationToken);
-            if (!branchExists)
+            if (branch == null)
             {
                 return NotFound(ApiResponse.FailureResult("Branch not found."));
             }
 
-            var staffIds = await _context.Appointments
-                .Where(a => a.BranchId == branchId && a.AssignedStaffId != null)
-                .Select(a => a.AssignedStaffId!)
-                .Distinct()
-                .ToListAsync(cancellationToken);
-
             var staff = await _context.Users
-                .Where(u => staffIds.Contains(u.Id) && !u.IsDeleted)
+                .Where(u => u.Role == UserRole.Staff && u.LabId == branch.LabId && !u.IsDeleted)
                 .ToListAsync(cancellationToken);
 
             return Ok(ApiResponse<List<User>>.SuccessResult(staff, "Branch staff retrieved successfully."));
         }
 
         [HttpGet("branches/{branchId}/appointments")]
+        [HttpGet("appointments")]
         [Authorize]
         [EndpointSummary("Get all appointments for a branch")]
         [EndpointDescription("Returns a list of all appointments scheduled for the specified branch, including customer and assigned staff details.")]
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<Appointment>>))]
         [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
-        public async Task<IActionResult> GetBranchAppointments([FromRoute] string branchId, CancellationToken cancellationToken)
+        public async Task<IActionResult> GetBranchAppointments([FromRoute] string? branchId, CancellationToken cancellationToken)
         {
-            if (string.IsNullOrWhiteSpace(branchId))
+            var currentUserId = _currentUserService.UserId?.ToString();
+            Branch? branch = null;
+
+            if (!string.IsNullOrWhiteSpace(branchId))
             {
-                return BadRequest(ApiResponse.FailureResult("Branch ID is required."));
+                branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
+                if (branch != null && branch.LabUserId != currentUserId)
+                {
+                    return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                }
+            }
+            else
+            {
+                branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
             }
 
-            var branchExists = await _context.Branches.AnyAsync(b => b.Id == branchId, cancellationToken);
-            if (!branchExists)
+            if (branch == null)
             {
                 return NotFound(ApiResponse.FailureResult("Branch not found."));
             }
 
             var appointments = await _context.Appointments
-                .Where(a => a.BranchId == branchId)
+                .Where(a => a.BranchId == branch.Id)
                 .Include(a => a.CustomerUser)
                 .Include(a => a.AssignedStaff)
                 .OrderByDescending(a => a.CreatedAt)
@@ -186,22 +202,35 @@ namespace Apenir.API.Controllers
         }
 
         [HttpGet("branches/{branchId}/details")]
+        [HttpGet("details")]
         [Authorize]
         [EndpointSummary("Get branch details and metrics")]
         [EndpointDescription("Returns branch details, lab user info, and general statistics like total revenue and appointment count.")]
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<BranchDetailsResponse>))]
         [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
-        public async Task<IActionResult> GetBranchDetails([FromRoute] string branchId, CancellationToken cancellationToken)
+        public async Task<IActionResult> GetBranchDetails([FromRoute] string? branchId, CancellationToken cancellationToken)
         {
-            if (string.IsNullOrWhiteSpace(branchId))
-            {
-                return BadRequest(ApiResponse.FailureResult("Branch ID is required."));
-            }
+            var currentUserId = _currentUserService.UserId?.ToString();
+            Branch? branch = null;
 
-            var branch = await _context.Branches
-                .Include(b => b.LabUser)
-                .FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(branchId))
+            {
+                branch = await _context.Branches
+                    .Include(b => b.LabUser)
+                    .FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
+
+                if (branch != null && branch.LabUserId != currentUserId)
+                {
+                    return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                }
+            }
+            else
+            {
+                branch = await _context.Branches
+                    .Include(b => b.LabUser)
+                    .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            }
 
             if (branch == null)
             {
@@ -209,7 +238,7 @@ namespace Apenir.API.Controllers
             }
 
             var appointments = await _context.Appointments
-                .Where(a => a.BranchId == branchId)
+                .Where(a => a.BranchId == branch.Id)
                 .ToListAsync(cancellationToken);
 
             var totalAppointments = appointments.Count;
@@ -218,17 +247,14 @@ namespace Apenir.API.Controllers
             var totalRevenue = appointments.Where(a => a.Status != AppointmentStatus.Cancelled).Sum(a => a.TotalAmount);
             var totalLabPayout = appointments.Where(a => a.Status != AppointmentStatus.Cancelled).Sum(a => a.LabPayout);
 
-            var staffCount = appointments
-                .Where(a => a.AssignedStaffId != null)
-                .Select(a => a.AssignedStaffId)
-                .Distinct()
-                .Count();
+            var staffCount = await _context.Users
+                .CountAsync(u => u.Role == UserRole.Staff && u.LabId == branch.LabId && !u.IsDeleted, cancellationToken);
 
             var servicesCount = await _context.BranchServices
-                .CountAsync(bs => bs.BranchId == branchId && bs.IsActive, cancellationToken);
+                .CountAsync(bs => bs.BranchId == branch.Id && bs.IsActive, cancellationToken);
 
             var activeSlotsCount = await _context.AppointmentSlots
-                .CountAsync(s => s.BranchId == branchId && s.IsAvailable, cancellationToken);
+                .CountAsync(s => s.BranchId == branch.Id && s.IsAvailable, cancellationToken);
 
             var response = new BranchDetailsResponse
             {
@@ -258,33 +284,45 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
         public async Task<IActionResult> GetDashboardSummary(
-            [FromQuery] string branchId,
+            [FromQuery] string? branchId,
             [FromQuery] DateOnly? startDate,
             [FromQuery] DateOnly? endDate,
             CancellationToken cancellationToken)
         {
-            if (string.IsNullOrWhiteSpace(branchId))
+            var currentUserId = _currentUserService.UserId?.ToString();
+            Branch? branch = null;
+
+            if (!string.IsNullOrWhiteSpace(branchId))
             {
-                return BadRequest(ApiResponse.FailureResult("Branch ID is required."));
+                branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
+                if (branch != null && branch.LabUserId != currentUserId)
+                {
+                    return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                }
+            }
+            else
+            {
+                branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
             }
 
-            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
             if (branch == null)
             {
                 return NotFound(ApiResponse.FailureResult("Branch not found."));
             }
+
+            var targetBranchId = branch.Id;
 
             // Default date range: today to next 7 days
             var start = startDate ?? DateOnly.FromDateTime(DateTime.UtcNow);
             var end = endDate ?? start.AddDays(7);
 
             var slotIds = await _context.AppointmentSlots
-                .Where(s => s.BranchId == branchId && s.SlotDate >= start && s.SlotDate <= end)
+                .Where(s => s.BranchId == targetBranchId && s.SlotDate >= start && s.SlotDate <= end)
                 .Select(s => s.Id)
                 .ToListAsync(cancellationToken);
 
             var appointments = await _context.Appointments
-                .Where(a => a.BranchId == branchId && slotIds.Contains(a.AppointmentSlotId))
+                .Where(a => a.BranchId == targetBranchId && slotIds.Contains(a.AppointmentSlotId))
                 .Include(a => a.CustomerUser)
                 .Include(a => a.AssignedStaff)
                 .Include(a => a.AppointmentSlot)
@@ -302,7 +340,7 @@ namespace Apenir.API.Controllers
             var netPayout = appointments.Where(a => a.Status != AppointmentStatus.Cancelled).Sum(a => a.LabPayout);
 
             var slots = await _context.AppointmentSlots
-                .Where(s => s.BranchId == branchId && s.SlotDate >= start && s.SlotDate <= end)
+                .Where(s => s.BranchId == targetBranchId && s.SlotDate >= start && s.SlotDate <= end)
                 .OrderBy(s => s.SlotDate)
                 .ThenBy(s => s.StartTime)
                 .ToListAsync(cancellationToken);
@@ -337,15 +375,31 @@ namespace Apenir.API.Controllers
         [EndpointDescription("Returns appointments for a branch where AssignedStaffId is null and status is Pending or Confirmed.")]
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<Appointment>>))]
         [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
-        public async Task<IActionResult> GetPendingAssignments([FromQuery] string branchId, CancellationToken cancellationToken)
+        public async Task<IActionResult> GetPendingAssignments([FromQuery] string? branchId, CancellationToken cancellationToken)
         {
-            if (string.IsNullOrWhiteSpace(branchId))
+            var currentUserId = _currentUserService.UserId?.ToString();
+            Branch? branch = null;
+
+            if (!string.IsNullOrWhiteSpace(branchId))
             {
-                return BadRequest(ApiResponse.FailureResult("Branch ID is required."));
+                branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
+                if (branch != null && branch.LabUserId != currentUserId)
+                {
+                    return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                }
+            }
+            else
+            {
+                branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            }
+
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
             }
 
             var pending = await _context.Appointments
-                .Where(a => a.BranchId == branchId && a.AssignedStaffId == null && 
+                .Where(a => a.BranchId == branch.Id && a.AssignedStaffId == null && 
                             (a.Status == AppointmentStatus.Pending || a.Status == AppointmentStatus.Confirmed))
                 .Include(a => a.CustomerUser)
                 .Include(a => a.AppointmentSlot)
@@ -405,27 +459,38 @@ namespace Apenir.API.Controllers
         }
 
         [HttpGet("branches/{branchId}/services")]
+        [HttpGet("services")]
         [Authorize]
         [EndpointSummary("Get all diagnostic services active or available for a branch")]
         [EndpointDescription("Returns all branch-specific services merged with the master service metadata.")]
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<BranchServiceDto>>))]
         [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
-        public async Task<IActionResult> GetBranchServices([FromRoute] string branchId, CancellationToken cancellationToken)
+        public async Task<IActionResult> GetBranchServices([FromRoute] string? branchId, CancellationToken cancellationToken)
         {
-            if (string.IsNullOrWhiteSpace(branchId))
+            var currentUserId = _currentUserService.UserId?.ToString();
+            Branch? branch = null;
+
+            if (!string.IsNullOrWhiteSpace(branchId))
             {
-                return BadRequest(ApiResponse.FailureResult("Branch ID is required."));
+                branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
+                if (branch != null && branch.LabUserId != currentUserId)
+                {
+                    return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                }
+            }
+            else
+            {
+                branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
             }
 
-            var branchExists = await _context.Branches.AnyAsync(b => b.Id == branchId, cancellationToken);
-            if (!branchExists)
+            if (branch == null)
             {
                 return NotFound(ApiResponse.FailureResult("Branch not found."));
             }
 
             var branchServices = await _context.BranchServices
-                .Where(bs => bs.BranchId == branchId)
+                .Where(bs => bs.BranchId == branch.Id)
                 .Include(bs => bs.Service)
                 .ToListAsync(cancellationToken);
 
@@ -446,6 +511,7 @@ namespace Apenir.API.Controllers
         }
 
         [HttpPut("branches/{branchId}/services/{serviceId}")]
+        [HttpPut("services/{serviceId}")]
         [Authorize]
         [EndpointSummary("Update custom pricing and active status for a branch service")]
         [EndpointDescription("Overrides pricing or toggles the status of a specific service for the branch.")]
@@ -454,7 +520,7 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
         public async Task<IActionResult> UpdateBranchService(
-            [FromRoute] string branchId,
+            [FromRoute] string? branchId,
             [FromRoute] string serviceId,
             [FromBody] UpdateBranchServiceRequest request,
             CancellationToken cancellationToken)
@@ -465,19 +531,28 @@ namespace Apenir.API.Controllers
             }
 
             var currentUserId = _currentUserService.UserId?.ToString();
-            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
+            Branch? branch = null;
+
+            if (!string.IsNullOrWhiteSpace(branchId))
+            {
+                branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
+                if (branch != null && branch.LabUserId != currentUserId)
+                {
+                    return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                }
+            }
+            else
+            {
+                branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            }
+
             if (branch == null)
             {
                 return NotFound(ApiResponse.FailureResult("Branch not found."));
             }
 
-            if (branch.LabUserId != currentUserId)
-            {
-                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch configuration."));
-            }
-
             var branchService = await _context.BranchServices
-                .FirstOrDefaultAsync(bs => bs.BranchId == branchId && bs.ServiceId == serviceId, cancellationToken);
+                .FirstOrDefaultAsync(bs => bs.BranchId == branch.Id && bs.ServiceId == serviceId, cancellationToken);
 
             if (branchService == null)
             {
@@ -491,7 +566,7 @@ namespace Apenir.API.Controllers
                 branchService = new BranchService
                 {
                     Id = Guid.NewGuid().ToString(),
-                    BranchId = branchId,
+                    BranchId = branch.Id,
                     ServiceId = serviceId,
                     CustomPrice = request.CustomPrice,
                     IsActive = request.IsActive
@@ -689,6 +764,12 @@ namespace Apenir.API.Controllers
             if (user == null)
             {
                 return BadRequest(ApiResponse.FailureResult("User shell not found."));
+            }
+
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == invite.BranchId, cancellationToken);
+            if (branch != null)
+            {
+                user.LabId = branch.LabId;
             }
 
             user.PasswordHash = _passwordHasher.Hash(request.Password);
