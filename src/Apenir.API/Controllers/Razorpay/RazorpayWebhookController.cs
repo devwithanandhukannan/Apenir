@@ -23,6 +23,7 @@ namespace Apenir.API.Controllers;
 [AllowAnonymous]
 public class RazorpayWebhookController : ControllerBase
 {
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _paymentLocks = new();
     private readonly IApplicationDbContext _context;
     private readonly IConfiguration _configuration;
     private readonly IWhatsAppService _whatsAppService;
@@ -141,8 +142,13 @@ public class RazorpayWebhookController : ControllerBase
         string building, string landmark, string floor, decimal latitude, decimal longitude,
         string paymentId, string orderId, CancellationToken cancellationToken)
     {
-        // 1. Fetch related data
-        var service = await _context.Services.FirstOrDefaultAsync(s => s.Id == testId, cancellationToken);
+        var lockObj = _paymentLocks.GetOrAdd(paymentId, _ => new SemaphoreSlim(1, 1));
+        await lockObj.WaitAsync(cancellationToken);
+
+        try
+        {
+            // 1. Fetch related data
+            var service = await _context.Services.FirstOrDefaultAsync(s => s.Id == testId, cancellationToken);
         var lab = await _context.Branches.FirstOrDefaultAsync(b => b.Id == labId, cancellationToken);
         var slot = await _context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == slotId, cancellationToken);
 
@@ -313,6 +319,11 @@ public class RazorpayWebhookController : ControllerBase
             $"Thank you for choosing LabCare! 🙏";
 
         await _whatsAppService.SendTextMessageAsync(to, confirmMsg);
+        }
+        finally
+        {
+            lockObj.Release();
+        }
     }
 
     private bool VerifySignature(string rawBody, string signature, string secret)

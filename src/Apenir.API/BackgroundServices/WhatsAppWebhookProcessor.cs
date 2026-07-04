@@ -486,6 +486,42 @@ namespace Apenir.API.BackgroundServices
                     }
                     break;
 
+                case WhatsAppState.MemberCount:
+                    if (replyId.StartsWith("member_count_"))
+                    {
+                        var countStr = replyId.Replace("member_count_", "");
+                        if (int.TryParse(countStr, out int count))
+                        {
+                            var maxAllowed = 6;
+                            if (!string.IsNullOrEmpty(session.SelectedSlot))
+                            {
+                                var slotObj = await context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == session.SelectedSlot, cancellationToken);
+                                if (slotObj != null)
+                                {
+                                    maxAllowed = slotObj.MaxCapacity - slotObj.BookedCount;
+                                }
+                            }
+
+                            if (count <= maxAllowed && count > 0)
+                            {
+                                session.MemberCount  = count;
+                                session.CurrentState = WhatsAppState.Confirm;
+                                await SaveSessionAsync(session, context, cancellationToken);
+
+                                var summary = await BuildBookingSummaryAsync(session, context, cancellationToken);
+                                await SendTextMessage(to, $"📍 Address details registered!\n\n{summary}\n", httpClientFactory, configuration);
+                                await SendPaymentRequest(to, session, context, httpClientFactory, configuration, cancellationToken);
+                                await SendTextMessage(to, "👉 Once you complete the payment, reply with *DONE* or *PAY* to get your booking confirmation.", httpClientFactory, configuration);
+                            }
+                            else
+                            {
+                                await SendTextMessage(to, $"❌ Sorry, only *{maxAllowed}* spot(s) are available for this slot. Please select a valid number.", httpClientFactory, configuration);
+                                await SendPersonCountPrompt(to, session, context, httpClientFactory, configuration, cancellationToken);
+                            }
+                        }
+                    }
+                    break;
+
                 default:
                     session.CurrentState = WhatsAppState.Start;
                     await SaveSessionAsync(session, context, cancellationToken);
@@ -773,12 +809,38 @@ namespace Apenir.API.BackgroundServices
                 }
             }
 
-            await SendTextMessage(to,
-                "👥 *How many people need the blood test?*\n\n" +
-                $"This slot has *{maxAllowed}* spot(s) available.\n" +
-                $"Reply with a number (1–{maxAllowed}).\n" +
-                $"e.g. reply *2* for 2 family members.",
-                httpClientFactory, configuration);
+            var rows = new System.Collections.Generic.List<object>();
+            for(int i = 1; i <= maxAllowed; i++)
+            {
+                rows.Add(new {
+                    id = $"member_count_{i}",
+                    title = $"{i} Person{(i > 1 ? "s" : "")}",
+                    description = $"Book for {i} person{(i > 1 ? "s" : "")}"
+                });
+            }
+
+            var payload = new
+            {
+                messaging_product = "whatsapp",
+                to,
+                type = "interactive",
+                interactive = new
+                {
+                    type = "list",
+                    header = new { type = "text", text = "Number of Persons" },
+                    body = new { text = $"👥 *How many people need the blood test?*\n\nThis slot has *{maxAllowed}* spot(s) available.\nChoose the number of people." },
+                    footer = new { text = "Select an option below" },
+                    action = new
+                    {
+                        button = "Select persons",
+                        sections = new[]
+                        {
+                            new { title = "Number of Persons", rows = rows.ToArray() }
+                        }
+                    }
+                }
+            };
+            await SendWhatsAppMessage(payload, httpClientFactory, configuration);
         }
 
         private async Task SendLocationRequest(string to, IHttpClientFactory httpClientFactory, IConfiguration configuration)
