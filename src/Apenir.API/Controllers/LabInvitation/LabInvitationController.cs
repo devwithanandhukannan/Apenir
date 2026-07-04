@@ -236,6 +236,26 @@ namespace Apenir.API.Controllers
             return Ok(ApiResponse.SuccessResult("Lab invited and email sent successfully."));
         }
 
+        [HttpGet("test-smtp")]
+        [AllowAnonymous]
+        public async Task<IActionResult> TestSmtp([FromQuery] string to)
+        {
+            if (string.IsNullOrWhiteSpace(to))
+            {
+                return BadRequest("Query parameter 'to' is required.");
+            }
+
+            try
+            {
+                await _emailService.SendEmailAsync(to, "Apenir SMTP Verification Test", "<h1>This is a verified test email from Apenir.</h1>");
+                return Ok(new { success = true, message = $"Email sent successfully to {to}" });
+            }
+            catch (Exception ex)
+            {
+                return StatusCode(500, new { success = false, message = "Failed to send email.", error = ex.Message, stackTrace = ex.StackTrace });
+            }
+        }
+
         [HttpGet("verify")]
         [AllowAnonymous]
         [Produces("text/html")]
