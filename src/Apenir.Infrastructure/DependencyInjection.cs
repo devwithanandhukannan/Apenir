@@ -43,6 +43,7 @@ namespace Apenir.Infrastructure
             services.Configure<MongoSettings>(configuration.GetSection("MongoSettings"));
             services.Configure<JwtSettings>(configuration.GetSection("JwtSettings"));
             services.Configure<AdminSettings>(configuration.GetSection("AdminSettings"));
+            services.Configure<SmtpSettings>(configuration.GetSection("SmtpSettings"));
 
             // Register Repositories
             services.AddScoped<IAdminRepository, AdminRepository>();
@@ -52,6 +53,7 @@ namespace Apenir.Infrastructure
             services.AddScoped<IPasswordHasher, BCryptPasswordHasher>();
             services.AddScoped<IJwtTokenService, JwtTokenService>();
             services.AddScoped<ICurrentUserService, CurrentUserService>();
+            services.AddScoped<IEmailService, EmailService>();
 
             // Register Seeder
             services.AddScoped<IDatabaseSeeder, DatabaseSeeder>();

@@ -34,6 +34,12 @@ public class User
 
     public bool IsDeleted { get; set; } = false;
 
+    [StringLength(50)]
+    public string? Status { get; set; }
+
+    [StringLength(6)]
+    public string? LabId { get; set; }
+
     public List<string> Permissions { get; set; } = new();
 
     public DateTime? LastLoginAt { get; set; }

@@ -23,6 +23,7 @@ public class AppDbContext : DbContext, IApplicationDbContext
     public DbSet<OtpCode> OtpCodes => Set<OtpCode>();
     public DbSet<WhatsAppSession> WhatsAppSessions => Set<WhatsAppSession>();
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
+    public DbSet<BranchInvite> BranchInvites => Set<BranchInvite>();
 
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options)
     {
@@ -48,6 +49,7 @@ public class AppDbContext : DbContext, IApplicationDbContext
         modelBuilder.Entity<OtpCode>().ToCollection("otp_codes");
         modelBuilder.Entity<WhatsAppSession>().ToCollection("whatsapp_sessions");
         modelBuilder.Entity<RefreshToken>().ToCollection("refresh_tokens");
+        modelBuilder.Entity<BranchInvite>().ToCollection("branch_invites");
 
         modelBuilder.Entity<User>().HasIndex(u => u.Email).IsUnique();
         modelBuilder.Entity<User>().HasIndex(u => u.Phone).IsUnique();

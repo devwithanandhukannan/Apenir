@@ -45,6 +45,12 @@ public class Branch
     [Required]
     public bool IsActive { get; set; } = true;
 
+    [StringLength(50)]
+    public string? Status { get; set; }
+
+    [StringLength(6)]
+    public string? LabId { get; set; }
+
     [Required]
     [StringLength(36)]
     public string CreatedBy { get; set; } = string.Empty;
