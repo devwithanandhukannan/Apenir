@@ -131,19 +131,63 @@ namespace Apenir.API.Controllers
 
             var emailSubject = $"Welcome to Apenir - Complete Registration for {request.LabName}";
             var emailBody = $@"
-                <div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;'>
-                    <h2 style='color: #4f46e5;'>Apenir Lab Partner Invitation</h2>
-                    <p>Hello,</p>
-                    <p>You have been invited to join the Apenir Medical Lab Booking platform as a lab partner for <strong>{request.LabName}</strong>.</p>
-                    <p>Please click the button below to complete your registration, set up your password, and enter your branch location details:</p>
-                    <div style='text-align: center; margin: 30px 0;'>
-                        <a href='{verifyUrl}' style='background-color: #4f46e5; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: bold; display: inline-block;'>Complete Registration</a>
-                    </div>
-                    <p style='color: #ef4444; font-weight: bold;'>Important: This invitation link is only valid for 15 minutes.</p>
-                    <p>If you did not request this invitation, please ignore this email or contact our support team.</p>
-                    <hr style='border: 0; border-top: 1px solid #cbd5e1; margin: 20px 0;' />
-                    <p style='font-size: 12px; color: #64748b;'>This is an automated email. Please do not reply directly.</p>
-                </div>";
+<!DOCTYPE html>
+<html lang='en'>
+<head>
+    <meta charset='UTF-8'>
+    <meta name='viewport' content='width=device-width, initial-scale=1.0'>
+    <title>Apenir Lab Partner Invitation</title>
+</head>
+<body style='margin: 0; padding: 0; background-color: #0f172a; font-family: -apple-system, BlinkMacSystemFont, ""Segoe UI"", Roboto, Helvetica, Arial, sans-serif;'>
+    <table cellpadding='0' cellspacing='0' width='100%' style='background-color: #0f172a; min-height: 100vh; padding: 40px 20px;'>
+        <tr>
+            <td align='center' valign='top'>
+                <table cellpadding='0' cellspacing='0' width='100%' style='max-width: 550px; background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 24px; padding: 40px; box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4); text-align: left;'>
+                    <tr>
+                        <td align='center' style='padding-bottom: 20px;'>
+                            <h1 style='margin: 0; font-size: 28px; font-weight: 800; background: linear-gradient(to right, #38bdf8, #818cf8); -webkit-background-clip: text; -webkit-text-fill-color: transparent; font-family: system-ui;'>Apenir Lab Partner</h1>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style='color: #f8fafc; font-size: 16px; line-height: 1.6; padding-bottom: 20px;'>
+                            Hello Partner,
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style='color: #cbd5e1; font-size: 15px; line-height: 1.6; padding-bottom: 24px;'>
+                            You have been invited to join the Apenir Medical Lab Booking platform as a lab partner for <strong>{request.LabName}</strong>.
+                            <br/><br/>
+                            Please click the button below to complete your registration, set up your password, and enter your branch location details:
+                        </td>
+                    </tr>
+                    <tr>
+                        <td align='center' style='padding-bottom: 30px;'>
+                            <a href='{verifyUrl}' style='display: inline-block; background: linear-gradient(135deg, #6366f1 0%, #4f46e5 100%); color: #ffffff; text-decoration: none; padding: 14px 30px; font-size: 15px; font-weight: 600; border-radius: 12px; box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);'>Complete Registration</a>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style='color: #cbd5e1; font-size: 14px; line-height: 1.6; padding-bottom: 20px;'>
+                            If the button doesn't work, copy and paste this link in your browser:
+                            <br/>
+                            <a href='{verifyUrl}' style='color: #38bdf8; text-decoration: none; word-break: break-all; font-size: 13px;'>{verifyUrl}</a>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style='color: #ef4444; font-size: 13px; font-weight: 600; line-height: 1.6; padding-bottom: 20px;'>
+                            ⚠️ This invitation link is only valid for 15 minutes.
+                        </td>
+                    </tr>
+                    <tr>
+                        <td style='color: #64748b; font-size: 12px; line-height: 1.6;'>
+                            If you did not request this invitation, you can safely ignore this email.
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>";
 
             await _emailService.SendEmailAsync(request.Email.Trim(), emailSubject, emailBody);
 
