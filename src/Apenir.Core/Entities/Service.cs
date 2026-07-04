@@ -31,6 +31,9 @@ public class Service
     [Required]
     public bool IsActive { get; set; } = true;
 
+    [StringLength(36)]
+    public string? CreatedByBranchId { get; set; }
+
     [Required]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }

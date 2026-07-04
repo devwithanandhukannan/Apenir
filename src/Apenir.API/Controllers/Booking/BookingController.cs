@@ -114,8 +114,8 @@ public class BookingController : ControllerBase
             Passcode = new Random().Next(1000, 9999).ToString(),
             Status = AppointmentStatus.Confirmed,
             TotalAmount = total,
-            PlatformCommission = total * (service.PlatformCommissionPct / 100m),
-            LabPayout = total * (1m - service.PlatformCommissionPct / 100m),
+            PlatformCommission = total * (((branchService != null && branchService.CustomCommissionPct.HasValue) ? branchService.CustomCommissionPct.Value : service.PlatformCommissionPct) / 100m),
+            LabPayout = total * (1m - ((branchService != null && branchService.CustomCommissionPct.HasValue) ? branchService.CustomCommissionPct.Value : service.PlatformCommissionPct) / 100m),
             CreatedAt = DateTime.UtcNow,
             MemberCount = memberCount
         };

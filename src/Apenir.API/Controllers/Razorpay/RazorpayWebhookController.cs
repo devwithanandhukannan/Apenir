@@ -223,12 +223,8 @@ public class RazorpayWebhookController : ControllerBase
             Passcode = new Random().Next(1000, 9999).ToString(),
             Status = AppointmentStatus.Confirmed,
             TotalAmount = total,
-            PlatformCommission = service != null
-                ? total * (service.PlatformCommissionPct / 100m)
-                : total * 0.15m,
-            LabPayout = service != null
-                ? total * (1m - service.PlatformCommissionPct / 100m)
-                : total * 0.85m,
+            PlatformCommission = total * (((branchService != null && branchService.CustomCommissionPct.HasValue) ? branchService.CustomCommissionPct.Value : (service != null ? service.PlatformCommissionPct : 15.00m)) / 100m),
+            LabPayout = total * (1m - ((branchService != null && branchService.CustomCommissionPct.HasValue) ? branchService.CustomCommissionPct.Value : (service != null ? service.PlatformCommissionPct : 15.00m)) / 100m),
             CreatedAt = DateTime.UtcNow,
             MemberCount = memberCount
         };

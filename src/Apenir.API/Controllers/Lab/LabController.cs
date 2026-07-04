@@ -474,29 +474,28 @@ namespace Apenir.API.Controllers
                 return NotFound(ApiResponse.FailureResult("Branch not found."));
             }
 
+            var allServices = await _context.Services
+                .Where(s => s.IsActive && (s.CreatedByBranchId == null || s.CreatedByBranchId == branch.Id))
+                .ToListAsync(cancellationToken);
+
             var branchServices = await _context.BranchServices
                 .Where(bs => bs.BranchId == branch.Id)
                 .ToListAsync(cancellationToken);
 
-            var serviceIds = branchServices.Select(bs => bs.ServiceId).Distinct().ToList();
-            var services = await _context.Services.Where(s => serviceIds.Contains(s.Id)).ToListAsync(cancellationToken);
-
-            foreach (var bs in branchServices)
-            {
-                bs.Service = services.FirstOrDefault(s => s.Id == bs.ServiceId);
-            }
-
-            var result = branchServices.Select(bs => new BranchServiceDto
-            {
-                BranchServiceId = bs.Id,
-                ServiceId = bs.ServiceId,
-                Name = bs.Service?.Name ?? string.Empty,
-                Category = bs.Service?.Category ?? string.Empty,
-                Description = bs.Service?.Description ?? string.Empty,
-                BasePrice = bs.Service?.BasePrice ?? 0,
-                CustomPrice = bs.CustomPrice,
-                CustomCommissionPct = bs.CustomCommissionPct,
-                IsActive = bs.IsActive
+            var result = allServices.Select(s => {
+                var overrideBs = branchServices.FirstOrDefault(bs => bs.ServiceId == s.Id);
+                return new BranchServiceDto
+                {
+                    BranchServiceId = overrideBs?.Id ?? string.Empty,
+                    ServiceId = s.Id,
+                    Name = s.Name,
+                    Category = s.Category,
+                    Description = s.Description ?? string.Empty,
+                    BasePrice = s.BasePrice,
+                    CustomPrice = overrideBs?.CustomPrice,
+                    CustomCommissionPct = overrideBs?.CustomCommissionPct,
+                    IsActive = overrideBs?.IsActive ?? false
+                };
             }).ToList();
 
             return Ok(ApiResponse<List<BranchServiceDto>>.SuccessResult(result, "Branch services retrieved successfully."));
@@ -558,6 +557,190 @@ namespace Apenir.API.Controllers
 
             await _context.SaveChangesAsync(cancellationToken);
             return Ok(ApiResponse.SuccessResult("Branch service updated successfully."));
+        }
+
+        [HttpPost("services")]
+        [Authorize]
+        [EndpointSummary("Create a new private service for the logged-in branch")]
+        [EndpointDescription("Creates a service record owned by this branch, then automatically adds a branch service override entry.")]
+        public async Task<IActionResult> CreateBranchCustomService(
+            [FromBody] CreateBranchCustomServiceRequest request,
+            CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Category))
+            {
+                return BadRequest(ApiResponse.FailureResult("Name and Category are required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            // Create the Master Service record
+            var service = new Service
+            {
+                Id = Guid.NewGuid().ToString(),
+                Name = request.Name.Trim(),
+                Category = request.Category.Trim(),
+                Description = request.Description?.Trim(),
+                BasePrice = request.BasePrice,
+                PlatformCommissionPct = 15.00m, // Follow admin policy data by default
+                IsActive = true,
+                CreatedByBranchId = branch.Id,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            // Create the BranchService override link
+            var branchService = new BranchService
+            {
+                Id = Guid.NewGuid().ToString(),
+                BranchId = branch.Id,
+                ServiceId = service.Id,
+                CustomPrice = request.CustomPrice, // If provided, overrides base price, otherwise remains null (follow admin base price)
+                CustomCommissionPct = null, // Follow admin commission by default
+                IsActive = true
+            };
+
+            _context.Services.Add(service);
+            _context.BranchServices.Add(branchService);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            var dto = new BranchServiceDto
+            {
+                BranchServiceId = branchService.Id,
+                ServiceId = service.Id,
+                Name = service.Name,
+                Category = service.Category,
+                Description = service.Description ?? string.Empty,
+                BasePrice = service.BasePrice,
+                CustomPrice = branchService.CustomPrice,
+                CustomCommissionPct = branchService.CustomCommissionPct,
+                IsActive = branchService.IsActive
+            };
+
+            return Ok(ApiResponse<BranchServiceDto>.SuccessResult(dto, "Custom service created successfully."));
+        }
+
+        [HttpGet("slots/configurations")]
+        [Authorize]
+        [EndpointSummary("Get all slot configurations for the logged-in branch")]
+        public async Task<IActionResult> GetSlotConfigurations(CancellationToken cancellationToken)
+        {
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            var configs = await _context.BranchSlotConfigurations
+                .Where(c => c.BranchId == branch.Id)
+                .ToListAsync(cancellationToken);
+
+            return Ok(ApiResponse<List<BranchSlotConfiguration>>.SuccessResult(configs, "Slot configurations retrieved successfully."));
+        }
+
+        [HttpPost("slots/configurations")]
+        [Authorize]
+        [EndpointSummary("Create a slot configuration for the logged-in branch")]
+        public async Task<IActionResult> CreateSlotConfiguration([FromBody] CreateSlotConfigurationRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null) return BadRequest(ApiResponse.FailureResult("Request body is required."));
+            if (!TimeOnly.TryParse(request.StartTime, out var startTime) || !TimeOnly.TryParse(request.EndTime, out var endTime))
+            {
+                return BadRequest(ApiResponse.FailureResult("Invalid start or end time format. Use HH:mm format."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            var config = new BranchSlotConfiguration
+            {
+                Id = Guid.NewGuid().ToString(),
+                BranchId = branch.Id,
+                DayText = request.DayText,
+                StartTime = startTime,
+                EndTime = endTime,
+                MaxCapacity = request.MaxCapacity,
+                IsLeave = request.IsLeave
+            };
+
+            _context.BranchSlotConfigurations.Add(config);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse<BranchSlotConfiguration>.SuccessResult(config, "Slot configuration created successfully."));
+        }
+
+        [HttpPut("slots/configurations/{id}")]
+        [Authorize]
+        [EndpointSummary("Update an existing slot configuration")]
+        public async Task<IActionResult> UpdateSlotConfiguration([FromRoute] string id, [FromBody] UpdateSlotConfigurationRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null) return BadRequest(ApiResponse.FailureResult("Request body is required."));
+            if (!TimeOnly.TryParse(request.StartTime, out var startTime) || !TimeOnly.TryParse(request.EndTime, out var endTime))
+            {
+                return BadRequest(ApiResponse.FailureResult("Invalid start or end time format. Use HH:mm format."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            var config = await _context.BranchSlotConfigurations
+                .FirstOrDefaultAsync(c => c.Id == id && c.BranchId == branch.Id, cancellationToken);
+
+            if (config == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Slot configuration not found."));
+            }
+
+            config.DayText = request.DayText;
+            config.StartTime = startTime;
+            config.EndTime = endTime;
+            config.MaxCapacity = request.MaxCapacity;
+            config.IsLeave = request.IsLeave;
+
+            _context.BranchSlotConfigurations.Update(config);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Slot configuration updated successfully."));
+        }
+
+        [HttpDelete("slots/configurations/{id}")]
+        [Authorize]
+        [EndpointSummary("Delete a slot configuration")]
+        public async Task<IActionResult> DeleteSlotConfiguration([FromRoute] string id, CancellationToken cancellationToken)
+        {
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            var config = await _context.BranchSlotConfigurations
+                .FirstOrDefaultAsync(c => c.Id == id && c.BranchId == branch.Id, cancellationToken);
+
+            if (config == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Slot configuration not found."));
+            }
+
+            _context.BranchSlotConfigurations.Remove(config);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Slot configuration deleted successfully."));
         }
 
         [HttpPost("staff/invite")]
@@ -877,6 +1060,33 @@ namespace Apenir.API.Controllers
     {
         public decimal? CustomPrice { get; set; }
         public bool IsActive { get; set; }
+    }
+
+    public class CreateBranchCustomServiceRequest
+    {
+        public string Name { get; set; } = string.Empty;
+        public string Category { get; set; } = string.Empty;
+        public string? Description { get; set; }
+        public decimal BasePrice { get; set; }
+        public decimal? CustomPrice { get; set; }
+    }
+
+    public class CreateSlotConfigurationRequest
+    {
+        public DayText DayText { get; set; }
+        public string StartTime { get; set; } = string.Empty;
+        public string EndTime { get; set; } = string.Empty;
+        public int MaxCapacity { get; set; } = 1;
+        public bool IsLeave { get; set; }
+    }
+
+    public class UpdateSlotConfigurationRequest
+    {
+        public DayText DayText { get; set; }
+        public string StartTime { get; set; } = string.Empty;
+        public string EndTime { get; set; } = string.Empty;
+        public int MaxCapacity { get; set; }
+        public bool IsLeave { get; set; }
     }
 
     public class BranchDetailsResponse
