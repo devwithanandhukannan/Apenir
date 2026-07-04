@@ -273,6 +273,41 @@ namespace Apenir.API.BackgroundServices
                 case WhatsAppState.MemberCount:
                     if (int.TryParse(text.Trim(), out int count) && count >= 1 && count <= 6)
                     {
+                        var slot = await context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == session.SelectedSlot, cancellationToken);
+                        if (slot == null)
+                        {
+                            await SendTextMessage(to, "❌ Error: The selected slot could not be found. Please select a slot again.", httpClientFactory, configuration);
+                            session.CurrentState = WhatsAppState.ChoosingSlot;
+                            await SaveSessionAsync(session, context, cancellationToken);
+                            if (!string.IsNullOrEmpty(session.SelectedLabId) && !string.IsNullOrEmpty(session.SelectedLabName))
+                            {
+                                await SendSlotList(to, session.SelectedLabId, session.SelectedLabName, context, httpClientFactory, configuration, cancellationToken);
+                            }
+                            break;
+                        }
+
+                        int availCapacity = slot.MaxCapacity - slot.BookedCount;
+                        if (availCapacity < 0) availCapacity = 0;
+
+                        if (count > availCapacity)
+                        {
+                            if (availCapacity == 0)
+                            {
+                                await SendTextMessage(to, "❌ Sorry, this slot has just filled up and has *0* spots left. Please select another slot.", httpClientFactory, configuration);
+                                session.CurrentState = WhatsAppState.ChoosingSlot;
+                                await SaveSessionAsync(session, context, cancellationToken);
+                                if (!string.IsNullOrEmpty(session.SelectedLabId) && !string.IsNullOrEmpty(session.SelectedLabName))
+                                {
+                                    await SendSlotList(to, session.SelectedLabId, session.SelectedLabName, context, httpClientFactory, configuration, cancellationToken);
+                                }
+                            }
+                            else
+                            {
+                                await SendTextMessage(to, $"❌ Sorry, only *{availCapacity}* spot(s) are available for this slot. Please enter a number between 1 and {availCapacity}, or type another number.", httpClientFactory, configuration);
+                            }
+                            break;
+                        }
+
                         session.MemberCount  = count;
                         session.CurrentState = WhatsAppState.Confirm;
                         await SaveSessionAsync(session, context, cancellationToken);
@@ -446,7 +481,7 @@ namespace Apenir.API.BackgroundServices
                             session.SelectedSlot = slot.Id;
                             session.CurrentState = WhatsAppState.MemberCount;
                             await SaveSessionAsync(session, context, cancellationToken);
-                            await SendPersonCountPrompt(to, httpClientFactory, configuration);
+                            await SendPersonCountPrompt(to, session, context, httpClientFactory, configuration, cancellationToken);
                         }
                     }
                     break;
@@ -716,12 +751,33 @@ namespace Apenir.API.BackgroundServices
             await SendWhatsAppMessage(payload, httpClientFactory, configuration);
         }
 
-        private async Task SendPersonCountPrompt(string to, IHttpClientFactory httpClientFactory, IConfiguration configuration)
+        private async Task SendPersonCountPrompt(
+            string to,
+            WhatsAppSession session,
+            IApplicationDbContext context,
+            IHttpClientFactory httpClientFactory,
+            IConfiguration configuration,
+            CancellationToken cancellationToken)
         {
+            var maxAllowed = 6;
+            if (!string.IsNullOrEmpty(session.SelectedSlot))
+            {
+                var slot = await context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == session.SelectedSlot, cancellationToken);
+                if (slot != null)
+                {
+                    var avail = slot.MaxCapacity - slot.BookedCount;
+                    if (avail < maxAllowed)
+                    {
+                        maxAllowed = avail > 0 ? avail : 1;
+                    }
+                }
+            }
+
             await SendTextMessage(to,
                 "👥 *How many people need the blood test?*\n\n" +
-                "Reply with a number (1–6).\n" +
-                "e.g. reply *2* for 2 family members.",
+                $"This slot has *{maxAllowed}* spot(s) available.\n" +
+                $"Reply with a number (1–{maxAllowed}).\n" +
+                $"e.g. reply *2* for 2 family members.",
                 httpClientFactory, configuration);
         }
 
