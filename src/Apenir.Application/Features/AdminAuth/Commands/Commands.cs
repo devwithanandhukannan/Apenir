@@ -319,10 +319,12 @@ namespace Apenir.Application.Features.AdminAuth.Commands
     public class ForgotPasswordCommandHandler : IRequestHandler<ForgotPasswordCommand, ApiResponse>
     {
         private readonly IAdminRepository _adminRepository;
+        private readonly IEmailService _emailService;
 
-        public ForgotPasswordCommandHandler(IAdminRepository adminRepository)
+        public ForgotPasswordCommandHandler(IAdminRepository adminRepository, IEmailService emailService)
         {
             _adminRepository = adminRepository;
+            _emailService = emailService;
         }
 
         public async Task<ApiResponse> Handle(ForgotPasswordCommand command, CancellationToken cancellationToken)
@@ -334,9 +336,28 @@ namespace Apenir.Application.Features.AdminAuth.Commands
                 return ApiResponse.SuccessResult("If the email matches an active account, a password reset link will be sent.");
             }
 
-            // In a real application, you would generate a reset token, store it, and send an email.
-            // Since this is a placeholder/mock implementation, we will log/stub it.
-            Console.WriteLine($"[Forgot Password Request] Reset email requested for {command.Request.Email}");
+            var token = Guid.NewGuid().ToString("N");
+            admin.ResetPasswordToken = token;
+            admin.ResetPasswordTokenExpiry = DateTime.UtcNow.AddMinutes(15);
+            await _adminRepository.UpdateAsync(admin, cancellationToken);
+
+            var emailSubject = "Apenir - Admin Password Reset Request";
+            var emailBody = $@"
+                <div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 8px;'>
+                    <h2 style='color: #4f46e5;'>Password Reset Request</h2>
+                    <p>Hello,</p>
+                    <p>We received a request to reset your password for the Apenir Admin portal.</p>
+                    <p>Please use the following token to complete your password reset:</p>
+                    <div style='text-align: center; margin: 30px 0; background-color: #f1f5f9; padding: 15px; border-radius: 6px; font-size: 20px; font-weight: bold; letter-spacing: 2px;'>
+                        {token}
+                    </div>
+                    <p style='color: #ef4444; font-weight: bold;'>Important: This reset token is only valid for 15 minutes.</p>
+                    <p>If you did not request a password reset, please ignore this email or contact support if you suspect unauthorized access.</p>
+                    <hr style='border: 0; border-top: 1px solid #cbd5e1; margin: 20px 0;' />
+                    <p style='font-size: 12px; color: #64748b;'>This is an automated email. Please do not reply directly.</p>
+                </div>";
+
+            await _emailService.SendEmailAsync(admin.Email!, emailSubject, emailBody);
             
             return ApiResponse.SuccessResult("If the email matches an active account, a password reset link will be sent.");
         }
@@ -364,13 +385,16 @@ namespace Apenir.Application.Features.AdminAuth.Commands
                 return ApiResponse.FailureResult("Invalid request parameters.");
             }
 
-            // Simple token verification logic for demo (we check for a specific hardcoded token for testability, e.g., "RESET_TEST_TOKEN")
-            if (string.IsNullOrWhiteSpace(command.Request.Token))
+            if (string.IsNullOrWhiteSpace(command.Request.Token) || 
+                admin.ResetPasswordToken != command.Request.Token || 
+                admin.ResetPasswordTokenExpiry < DateTime.UtcNow)
             {
-                return ApiResponse.FailureResult("Invalid token.");
+                return ApiResponse.FailureResult("Invalid or expired reset token.");
             }
 
             admin.PasswordHash = _passwordHasher.Hash(command.Request.NewPassword);
+            admin.ResetPasswordToken = null;
+            admin.ResetPasswordTokenExpiry = null;
             admin.UpdatedAt = DateTime.UtcNow;
             await _adminRepository.UpdateAsync(admin, cancellationToken);
 
