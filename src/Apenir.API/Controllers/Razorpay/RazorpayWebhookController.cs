@@ -152,6 +152,21 @@ public class RazorpayWebhookController : ControllerBase
         var lab = await _context.Branches.FirstOrDefaultAsync(b => b.Id == labId, cancellationToken);
         var slot = await _context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == slotId, cancellationToken);
 
+        // 2. Fetch or create Customer early to check for existing recent appointments
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.Phone == to, cancellationToken);
+        if (user != null)
+        {
+            var recentAppt = await _context.Appointments.FirstOrDefaultAsync(
+                a => a.CustomerUserId == user.Id && a.AppointmentSlotId == slotId && a.CreatedAt >= DateTime.UtcNow.AddMinutes(-30),
+                cancellationToken);
+
+            if (recentAppt != null)
+            {
+                _logger.LogInformation("ℹ️ Booking already exists (recently created via SimulatePayment) for User {UserId} and Slot {SlotId}. Skipping webhook.", user.Id, slotId);
+                return;
+            }
+        }
+
         if (slot == null || !slot.IsAvailable || slot.BookedCount + memberCount > slot.MaxCapacity)
         {
             _logger.LogWarning("⚠️ Slot not available: {SlotId}. Refusing webhook creation.", slotId);
@@ -168,8 +183,6 @@ public class RazorpayWebhookController : ControllerBase
             return;
         }
 
-        // 2. Fetch or create Customer
-        var user = await _context.Users.FirstOrDefaultAsync(u => u.Phone == to, cancellationToken);
         if (user == null)
         {
             user = new User
