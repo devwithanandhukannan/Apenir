@@ -1001,7 +1001,153 @@ namespace Apenir.API.Controllers
                 await _whatsAppService.SendDocumentMessageAsync(appointment.CustomerUser.Phone, absoluteUrl, filename);
             }
 
-            return Ok(ApiResponse<string>.SuccessResult(relativeUrl, "Report uploaded and delivered to WhatsApp successfully."));
+        return Ok(ApiResponse<string>.SuccessResult(relativeUrl, "Report uploaded and delivered to WhatsApp successfully."));
+        }
+
+        [HttpGet("appointments/{appointmentId}/members")]
+        [Authorize]
+        [EndpointSummary("Get all members added by staff for an appointment")]
+        public async Task<IActionResult> GetAppointmentMembers([FromRoute] string appointmentId, CancellationToken cancellationToken)
+        {
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var appointment = await _context.Appointments
+                .FirstOrDefaultAsync(a => a.Id == appointmentId, cancellationToken);
+
+            if (appointment == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Appointment not found."));
+            }
+
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == appointment.BranchId, cancellationToken);
+            if (branch == null || branch.LabUserId != currentUserId)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied."));
+            }
+
+            var members = await _context.AppointmentMembers
+                .Where(m => m.AppointmentId == appointmentId)
+                .ToListAsync(cancellationToken);
+
+            return Ok(ApiResponse<List<AppointmentMember>>.SuccessResult(members, "Appointment members retrieved successfully."));
+        }
+
+        [HttpPost("appointments/{appointmentId}/members/{memberId}/upload-report")]
+        [Authorize]
+        [EndpointSummary("Upload diagnostic report PDF for a specific member")]
+        public async Task<IActionResult> UploadMemberReport(
+            [FromRoute] string appointmentId, 
+            [FromRoute] string memberId, 
+            [FromForm] IFormFile report, 
+            CancellationToken cancellationToken)
+        {
+            if (report == null || report.Length == 0)
+            {
+                return BadRequest(ApiResponse.FailureResult("Report PDF file is required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var appointment = await _context.Appointments
+                .FirstOrDefaultAsync(a => a.Id == appointmentId, cancellationToken);
+
+            if (appointment == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Appointment not found."));
+            }
+
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == appointment.BranchId, cancellationToken);
+            if (branch == null || branch.LabUserId != currentUserId)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied."));
+            }
+
+            var member = await _context.AppointmentMembers
+                .FirstOrDefaultAsync(m => m.Id == memberId && m.AppointmentId == appointmentId, cancellationToken);
+
+            if (member == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Appointment member not found."));
+            }
+
+            appointment.CustomerUser = await _context.Users.FirstOrDefaultAsync(u => u.Id == appointment.CustomerUserId, cancellationToken);
+
+            var uploadDir = System.IO.Path.Combine(System.IO.Directory.GetCurrentDirectory(), "wwwroot", "reports");
+            if (!System.IO.Directory.Exists(uploadDir))
+            {
+                System.IO.Directory.CreateDirectory(uploadDir);
+            }
+
+            var safeMemberName = string.Join("_", member.MemberName.Split(System.IO.Path.GetInvalidFileNameChars()));
+            var filename = $"Report_{appointment.AppointmentNumber}_{safeMemberName}_{DateTime.UtcNow.Ticks}.pdf";
+            var filePath = System.IO.Path.Combine(uploadDir, filename);
+
+            using (var stream = new System.IO.FileStream(filePath, System.IO.FileMode.Create))
+            {
+                await report.CopyToAsync(stream, cancellationToken);
+            }
+
+            var relativeUrl = $"/reports/{filename}";
+
+            var existingReport = await _context.Reports
+                .FirstOrDefaultAsync(r => r.AppointmentId == appointmentId && r.MemberId == memberId, cancellationToken);
+
+            if (existingReport != null)
+            {
+                existingReport.FileUrl = relativeUrl;
+                existingReport.FileName = filename;
+                existingReport.UploadedBy = currentUserId ?? string.Empty;
+                existingReport.WhatsappSent = false;
+                _context.Reports.Update(existingReport);
+            }
+            else
+            {
+                var newReport = new Report
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    AppointmentId = appointmentId,
+                    MemberId = memberId,
+                    FileUrl = relativeUrl,
+                    FileName = filename,
+                    UploadedBy = currentUserId ?? string.Empty,
+                    WhatsappSent = false,
+                    CreatedAt = DateTime.UtcNow
+                };
+                _context.Reports.Add(newReport);
+            }
+
+            var allMembersCount = await _context.AppointmentMembers.CountAsync(m => m.AppointmentId == appointmentId, cancellationToken);
+            var reportsCount = await _context.Reports.CountAsync(r => r.AppointmentId == appointmentId, cancellationToken);
+            
+            var totalReports = existingReport == null ? reportsCount + 1 : reportsCount;
+
+            if (allMembersCount > 0 && totalReports >= appointment.MemberCount)
+            {
+                appointment.Status = AppointmentStatus.Completed;
+                appointment.UpdatedAt = DateTime.UtcNow;
+                _context.Appointments.Update(appointment);
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            var requestScheme = Request.Scheme;
+            var requestHost = Request.Host;
+            var absoluteUrl = $"{requestScheme}://{requestHost}{relativeUrl}";
+
+            if (appointment.CustomerUser != null && !string.IsNullOrEmpty(appointment.CustomerUser.Phone))
+            {
+                var message = $"📄 *Diagnostic Report Available*\n\nHere is the report for *{member.MemberName}*.";
+                await _whatsAppService.SendTextMessageAsync(appointment.CustomerUser.Phone, message);
+                await _whatsAppService.SendDocumentMessageAsync(appointment.CustomerUser.Phone, absoluteUrl, filename);
+                
+                var savedReport = await _context.Reports.FirstOrDefaultAsync(r => r.AppointmentId == appointmentId && r.MemberId == memberId, cancellationToken);
+                if (savedReport != null)
+                {
+                    savedReport.WhatsappSent = true;
+                    _context.Reports.Update(savedReport);
+                    await _context.SaveChangesAsync(cancellationToken);
+                }
+            }
+
+            return Ok(ApiResponse<string>.SuccessResult(relativeUrl, $"Report for {member.MemberName} uploaded and delivered to WhatsApp successfully."));
         }
 
         private async Task GenerateSlotsForNext7Days(string branchId, IApplicationDbContext context, CancellationToken cancellationToken)

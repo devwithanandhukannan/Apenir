@@ -193,7 +193,7 @@ public class StaffController : ControllerBase
         // Notify WhatsApp
         if (appointment.CustomerUser != null && !string.IsNullOrEmpty(appointment.CustomerUser.Phone))
         {
-            var waMessage = $"✅ *Passcode Verified!*\n\nDiagnostic samples have been collected successfully. We are transporting them to the lab.";
+            var waMessage = $"✅ *Passcode Verified!*\n\nDiagnostic samples for {appointment.MemberCount} member(s) have been collected successfully. We are transporting them to the lab.";
             await _whatsAppService.SendTextMessageAsync(appointment.CustomerUser.Phone, waMessage);
         }
 
@@ -219,6 +219,63 @@ public class StaffController : ControllerBase
         };
 
         return Ok(ApiResponse<OtpVerificationResult>.SuccessResult(result, "OTP passcode verified successfully."));
+    }
+
+    [HttpPost("appointments/{id}/members")]
+    [EndpointSummary("Add appointment member details")]
+    [EndpointDescription("Validates that exactly the booked number of members are provided and saves their details.")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+    [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+    [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+    public async Task<IActionResult> AddAppointmentMembers(
+        [FromRoute] string id,
+        [FromBody] AddAppointmentMembersRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request == null || request.Members == null || !request.Members.Any())
+        {
+            return BadRequest(ApiResponse.FailureResult("Member details are required."));
+        }
+
+        var currentUserId = _currentUserService.UserId?.ToString();
+        var appointment = await _context.Appointments
+            .FirstOrDefaultAsync(a => a.Id == id && a.AssignedStaffId == currentUserId, cancellationToken);
+
+        if (appointment == null)
+        {
+            return NotFound(ApiResponse.FailureResult("Assigned appointment not found."));
+        }
+
+        if (request.Members.Count != appointment.MemberCount)
+        {
+            return BadRequest(ApiResponse.FailureResult($"This appointment was booked for {appointment.MemberCount} member(s). You must provide details for exactly {appointment.MemberCount} member(s)."));
+        }
+
+        // Delete any existing members for this appointment to handle re-submissions cleanly
+        var existingMembers = await _context.AppointmentMembers
+            .Where(m => m.AppointmentId == id)
+            .ToListAsync(cancellationToken);
+            
+        if (existingMembers.Any())
+        {
+            _context.AppointmentMembers.RemoveRange(existingMembers);
+        }
+
+        var newMembers = request.Members.Select(m => new AppointmentMember
+        {
+            Id = Guid.NewGuid().ToString(),
+            AppointmentId = appointment.Id,
+            MemberName = m.Name,
+            Age = m.Age,
+            Gender = Enum.TryParse<Gender>(m.Gender, true, out var genderEnum) ? genderEnum : Gender.Other,
+            Relationship = m.Relationship ?? "Self",
+            AdditionalNotes = m.AdditionalNotes
+        }).ToList();
+
+        await _context.AppointmentMembers.AddRangeAsync(newMembers, cancellationToken);
+        await _context.SaveChangesAsync(cancellationToken);
+
+        return Ok(ApiResponse.SuccessResult("Member details saved successfully."));
     }
 }
 
@@ -265,4 +322,18 @@ public class CustomerProfileDto
     public string? Gender { get; set; }
     public string? Dob { get; set; }
     public string? Address { get; set; }
+}
+
+public class AddAppointmentMembersRequest
+{
+    public List<AppointmentMemberDto> Members { get; set; } = new();
+}
+
+public class AppointmentMemberDto
+{
+    public string Name { get; set; } = string.Empty;
+    public int Age { get; set; }
+    public string Gender { get; set; } = string.Empty;
+    public string? Relationship { get; set; }
+    public string? AdditionalNotes { get; set; }
 }
