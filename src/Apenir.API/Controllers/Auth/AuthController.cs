@@ -64,7 +64,7 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<RefreshTokenResponse>))]
         [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse<AuthResponse>))]
         [ProducesResponseType(StatusCodes.Status401Unauthorized, Type = typeof(ApiResponse<AuthResponse>))]
-        public async Task<IActionResult> RefreshToken([FromBody] RefreshTokenRequest request, CancellationToken cancellationToken)
+        public async Task<IActionResult> RefreshToken([FromBody(EmptyBodyBehavior = Microsoft.AspNetCore.Mvc.ModelBinding.EmptyBodyBehavior.Allow)] RefreshTokenRequest? request, CancellationToken cancellationToken)
         {
             string? refreshToken = request?.RefreshToken;
             var cookieToken = CookieHelper.GetRefreshTokenCookie(HttpContext);
@@ -95,7 +95,7 @@ namespace Apenir.API.Controllers
         [HttpPost("logout")]
         [EndpointSummary("Logout")]
         [EndpointDescription("Revokes the current refresh token.")]
-        public async Task<IActionResult> Logout([FromBody] RefreshTokenRequest request, CancellationToken cancellationToken)
+        public async Task<IActionResult> Logout([FromBody(EmptyBodyBehavior = Microsoft.AspNetCore.Mvc.ModelBinding.EmptyBodyBehavior.Allow)] RefreshTokenRequest? request, CancellationToken cancellationToken)
         {
             string? refreshToken = request?.RefreshToken;
             var cookieToken = CookieHelper.GetRefreshTokenCookie(HttpContext);
