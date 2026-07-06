@@ -28,6 +28,7 @@ public class User
     public UserRole Role { get; set; } = UserRole.Customer;
 
     [StringLength(255)]
+    [System.Text.Json.Serialization.JsonIgnore]
     public string? PasswordHash { get; set; }
 
     public bool? IsActive { get; set; } = true;

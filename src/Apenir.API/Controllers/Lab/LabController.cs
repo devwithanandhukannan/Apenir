@@ -237,7 +237,6 @@ namespace Apenir.API.Controllers
 
             var currentUserId = _currentUserService.UserId?.ToString();
             var appointment = await _context.Appointments
-                .Include(a => a.Branch)
                 .FirstOrDefaultAsync(a => a.Id == id, cancellationToken);
 
             if (appointment == null)
@@ -245,7 +244,10 @@ namespace Apenir.API.Controllers
                 return NotFound(ApiResponse.FailureResult("Appointment not found."));
             }
 
-            if (appointment.Branch == null || appointment.Branch.LabUserId != currentUserId)
+            var branch = await _context.Branches
+                .FirstOrDefaultAsync(b => b.Id == appointment.BranchId, cancellationToken);
+
+            if (branch == null || branch.LabUserId != currentUserId)
             {
                 return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch's appointments."));
             }
@@ -288,20 +290,30 @@ namespace Apenir.API.Controllers
 
             var branchServices = await _context.BranchServices
                 .Where(bs => bs.BranchId == branchId)
-                .Include(bs => bs.Service)
                 .ToListAsync(cancellationToken);
 
-            var result = branchServices.Select(bs => new BranchServiceDto
+            var serviceIds = branchServices.Select(bs => bs.ServiceId).Distinct().ToList();
+            var services = await _context.Services
+                .Where(s => serviceIds.Contains(s.Id))
+                .ToListAsync(cancellationToken);
+
+            var servicesDict = services.ToDictionary(s => s.Id);
+
+            var result = branchServices.Select(bs =>
             {
-                BranchServiceId = bs.Id,
-                ServiceId = bs.ServiceId,
-                Name = bs.Service?.Name ?? string.Empty,
-                Category = bs.Service?.Category ?? string.Empty,
-                Description = bs.Service?.Description ?? string.Empty,
-                BasePrice = bs.Service?.BasePrice ?? 0,
-                CustomPrice = bs.CustomPrice,
-                CustomCommissionPct = bs.CustomCommissionPct,
-                IsActive = bs.IsActive
+                servicesDict.TryGetValue(bs.ServiceId, out var svc);
+                return new BranchServiceDto
+                {
+                    BranchServiceId = bs.Id,
+                    ServiceId = bs.ServiceId,
+                    Name = svc?.Name ?? string.Empty,
+                    Category = svc?.Category ?? string.Empty,
+                    Description = svc?.Description ?? string.Empty,
+                    BasePrice = svc?.BasePrice ?? 0,
+                    CustomPrice = bs.CustomPrice,
+                    CustomCommissionPct = bs.CustomCommissionPct,
+                    IsActive = bs.IsActive
+                };
             }).ToList();
 
             return Ok(ApiResponse<List<BranchServiceDto>>.SuccessResult(result, "Branch services retrieved successfully."));
@@ -370,6 +382,274 @@ namespace Apenir.API.Controllers
             await _context.SaveChangesAsync(cancellationToken);
             return Ok(ApiResponse.SuccessResult("Branch service updated successfully."));
         }
+
+        [HttpGet("staff")]
+        [Authorize]
+        [EndpointSummary("Get all active staff/phlebotomists for the lab")]
+        [EndpointDescription("Returns a list of all active staff members registered under the lab owner's branch.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<User>>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetStaffList([FromQuery] string branchId, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(branchId))
+            {
+                return BadRequest(ApiResponse.FailureResult("Branch ID is required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
+
+            if (branch == null || branch.LabUserId != currentUserId)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+            }
+
+            var staff = await _context.Users.AsNoTracking()
+                .Where(u => u.Role == UserRole.Staff && u.LabId == branch.LabId && !u.IsDeleted && u.IsActive == true)
+                .Select(u => new User
+                {
+                    Id = u.Id,
+                    Name = u.Name,
+                    Email = u.Email,
+                    Phone = u.Phone,
+                    Status = u.Status,
+                    IsActive = u.IsActive
+                })
+                .ToListAsync(cancellationToken);
+
+            return Ok(ApiResponse<List<User>>.SuccessResult(staff, "Staff list retrieved successfully."));
+        }
+
+        [HttpPost("payment-batches/list")]
+        [Authorize]
+        [EndpointSummary("List payment batches for the lab")]
+        [EndpointDescription("Returns a paginated list of payment batches for the logged-in lab owner's branches.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<PaginatedList<LabBatchListDto>>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> ListPaymentBatches([FromBody] LabSearchBatchesRequest? request, CancellationToken cancellationToken)
+        {
+            var currentUserId = _currentUserService.UserId?.ToString();
+
+            var branches = await _context.Branches.AsNoTracking()
+                .Where(b => b.LabUserId == currentUserId)
+                .ToListAsync(cancellationToken);
+
+            var branchIds = branches.Select(b => b.Id).ToList();
+            if (branchIds.Count == 0)
+            {
+                var emptyResponse = new PaginatedList<LabBatchListDto>
+                {
+                    Items = new List<LabBatchListDto>(),
+                    PageNumber = 1,
+                    PageSize = 0,
+                    RowsPerPage = request?.RowsPerPage ?? 10,
+                    PageCount = 0,
+                    TotalRows = 0
+                };
+                return Ok(ApiResponse<PaginatedList<LabBatchListDto>>.SuccessResult(emptyResponse, "No branches found for this lab owner."));
+            }
+
+            var branchDict = branches.ToDictionary(b => b.Id, b => b.Name);
+
+            var query = _context.PaymentBatches.AsNoTracking()
+                .Where(pb => branchIds.Contains(pb.BranchId));
+
+            if (request != null)
+            {
+                if (request.Status.HasValue)
+                {
+                    query = query.Where(pb => pb.Status == request.Status.Value);
+                }
+
+                if (request.StartDate.HasValue)
+                {
+                    query = query.Where(pb => pb.CreatedAt >= request.StartDate.Value);
+                }
+
+                if (request.EndDate.HasValue)
+                {
+                    query = query.Where(pb => pb.CreatedAt <= request.EndDate.Value);
+                }
+            }
+
+            var totalRows = await query.CountAsync(cancellationToken);
+            var pageNumber = request?.PageNumber ?? 1;
+            var rowsPerPage = request?.RowsPerPage ?? 10;
+            if (pageNumber < 1) pageNumber = 1;
+            if (rowsPerPage < 1) rowsPerPage = 10;
+
+            var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
+
+            var batches = await query
+                .OrderByDescending(pb => pb.CreatedAt)
+                .Skip((pageNumber - 1) * rowsPerPage)
+                .Take(rowsPerPage)
+                .ToListAsync(cancellationToken);
+
+            var items = batches.Select(pb => new LabBatchListDto
+            {
+                Id = pb.Id,
+                BranchId = pb.BranchId,
+                BranchName = branchDict.TryGetValue(pb.BranchId, out var name) ? name : string.Empty,
+                PaymentCount = pb.PaymentCount,
+                TotalGrossAmount = pb.TotalGrossAmount,
+                TotalPlatformCommission = pb.TotalPlatformCommission,
+                TotalNetPayout = pb.TotalNetPayout,
+                Status = pb.Status,
+                CreatedAt = pb.CreatedAt,
+                ConfirmedAt = pb.ConfirmedAt,
+                Notes = pb.Notes
+            }).ToList();
+
+            var response = new PaginatedList<LabBatchListDto>
+            {
+                Items = items,
+                PageNumber = pageNumber,
+                PageSize = items.Count,
+                RowsPerPage = rowsPerPage,
+                PageCount = pageCount,
+                TotalRows = totalRows
+            };
+
+            return Ok(ApiResponse<PaginatedList<LabBatchListDto>>.SuccessResult(response, "Payment batches retrieved successfully."));
+        }
+
+        [HttpGet("payment-batches/{batchId}")]
+        [Authorize]
+        [EndpointSummary("Get payment batch details")]
+        [EndpointDescription("Returns detailed information about a payment batch including its payments and appointments.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<LabBatchDetailResponse>))]
+        [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetPaymentBatchDetails([FromRoute] string batchId, CancellationToken cancellationToken)
+        {
+            var batch = await _context.PaymentBatches.AsNoTracking()
+                .FirstOrDefaultAsync(pb => pb.Id == batchId, cancellationToken);
+
+            if (batch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Payment batch not found."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.Id == batch.BranchId, cancellationToken);
+
+            if (branch == null || branch.LabUserId != currentUserId)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this batch."));
+            }
+
+            // Flat queries — no .Include()
+            var payments = await _context.Payments.AsNoTracking()
+                .Where(p => batch.PaymentIds.Contains(p.Id))
+                .ToListAsync(cancellationToken);
+
+            var appointments = await _context.Appointments.AsNoTracking()
+                .Where(a => batch.AppointmentIds.Contains(a.Id))
+                .ToListAsync(cancellationToken);
+
+            var customerUserIds = appointments
+                .Select(a => a.CustomerUserId)
+                .Where(id => !string.IsNullOrEmpty(id))
+                .Distinct()
+                .ToList();
+
+            var customerUsers = await _context.Users.AsNoTracking()
+                .Where(u => customerUserIds.Contains(u.Id))
+                .ToListAsync(cancellationToken);
+
+            // Build lookup dictionaries for in-memory binding
+            var appointmentDict = appointments.ToDictionary(a => a.Id);
+            var customerDict = customerUsers.ToDictionary(u => u.Id);
+
+            var paymentItems = payments.Select(p =>
+            {
+                appointmentDict.TryGetValue(p.AppointmentId, out var appt);
+                var customerName = string.Empty;
+                if (appt != null && !string.IsNullOrEmpty(appt.CustomerUserId))
+                {
+                    customerDict.TryGetValue(appt.CustomerUserId, out var cust);
+                    customerName = cust?.Name ?? string.Empty;
+                }
+
+                return new LabBatchPaymentItemDto
+                {
+                    PaymentId = p.Id,
+                    AppointmentId = p.AppointmentId,
+                    AppointmentNumber = appt?.AppointmentNumber ?? string.Empty,
+                    CustomerName = customerName,
+                    TotalAmount = appt?.TotalAmount ?? 0,
+                    PlatformCommission = appt?.PlatformCommission ?? 0,
+                    LabPayout = appt?.LabPayout ?? 0,
+                    PaidAt = p.PaidAt,
+                    PaymentMethod = p.PaymentMethod
+                };
+            }).ToList();
+
+            var response = new LabBatchDetailResponse
+            {
+                Id = batch.Id,
+                BranchId = batch.BranchId,
+                BranchName = branch.Name,
+                PaymentCount = batch.PaymentCount,
+                TotalGrossAmount = batch.TotalGrossAmount,
+                TotalPlatformCommission = batch.TotalPlatformCommission,
+                TotalNetPayout = batch.TotalNetPayout,
+                Status = batch.Status,
+                CreatedAt = batch.CreatedAt,
+                ConfirmedAt = batch.ConfirmedAt,
+                ConfirmedByLabUser = batch.ConfirmedByLabUser,
+                Notes = batch.Notes,
+                Payments = paymentItems
+            };
+
+            return Ok(ApiResponse<LabBatchDetailResponse>.SuccessResult(response, "Payment batch details retrieved successfully."));
+        }
+
+        [HttpPost("payment-batches/{batchId}/confirm-receipt")]
+        [Authorize]
+        [EndpointSummary("Confirm batch payment receipt")]
+        [EndpointDescription("Lab owner confirms that the payout amount for this batch has been received. Changes batch status to Settled.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> ConfirmBatchReceipt([FromRoute] string batchId, CancellationToken cancellationToken)
+        {
+            var batch = await _context.PaymentBatches
+                .FirstOrDefaultAsync(pb => pb.Id == batchId, cancellationToken);
+
+            if (batch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Payment batch not found."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.Id == batch.BranchId, cancellationToken);
+
+            if (branch == null || branch.LabUserId != currentUserId)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this batch."));
+            }
+
+            if (batch.Status != PaymentBatchStatus.Initiated)
+            {
+                return BadRequest(ApiResponse.FailureResult("Only batches with 'Initiated' status can be confirmed."));
+            }
+
+            batch.Status = PaymentBatchStatus.Settled;
+            batch.ConfirmedByLabUser = currentUserId;
+            batch.ConfirmedAt = DateTime.UtcNow;
+
+            _context.PaymentBatches.Update(batch);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Batch payment receipt confirmed successfully."));
+        }
     }
 
     public class LabDashboardSummaryResponse
@@ -421,5 +701,57 @@ namespace Apenir.API.Controllers
         public bool IsActive { get; set; }
     }
 
+    public record LabSearchBatchesRequest(
+        PaymentBatchStatus? Status,
+        DateTime? StartDate,
+        DateTime? EndDate,
+        int PageNumber = 1,
+        int RowsPerPage = 10
+    );
+
+    public class LabBatchListDto
+    {
+        public string Id { get; set; } = string.Empty;
+        public string BranchId { get; set; } = string.Empty;
+        public string BranchName { get; set; } = string.Empty;
+        public int PaymentCount { get; set; }
+        public decimal TotalGrossAmount { get; set; }
+        public decimal TotalPlatformCommission { get; set; }
+        public decimal TotalNetPayout { get; set; }
+        public PaymentBatchStatus Status { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public DateTime? ConfirmedAt { get; set; }
+        public string? Notes { get; set; }
+    }
+
+    public class LabBatchDetailResponse
+    {
+        public string Id { get; set; } = string.Empty;
+        public string BranchId { get; set; } = string.Empty;
+        public string BranchName { get; set; } = string.Empty;
+        public int PaymentCount { get; set; }
+        public decimal TotalGrossAmount { get; set; }
+        public decimal TotalPlatformCommission { get; set; }
+        public decimal TotalNetPayout { get; set; }
+        public PaymentBatchStatus Status { get; set; }
+        public DateTime CreatedAt { get; set; }
+        public DateTime? ConfirmedAt { get; set; }
+        public string? ConfirmedByLabUser { get; set; }
+        public string? Notes { get; set; }
+        public List<LabBatchPaymentItemDto> Payments { get; set; } = new();
+    }
+
+    public class LabBatchPaymentItemDto
+    {
+        public string PaymentId { get; set; } = string.Empty;
+        public string AppointmentId { get; set; } = string.Empty;
+        public string AppointmentNumber { get; set; } = string.Empty;
+        public string CustomerName { get; set; } = string.Empty;
+        public decimal TotalAmount { get; set; }
+        public decimal PlatformCommission { get; set; }
+        public decimal LabPayout { get; set; }
+        public DateTime? PaidAt { get; set; }
+        public PaymentMethod? PaymentMethod { get; set; }
+    }
 
 }

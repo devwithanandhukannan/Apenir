@@ -83,19 +83,14 @@ namespace Apenir.API.Controllers.Admin
                 return BadRequest(ApiResponse.FailureResult("Lab ID is required."));
             }
 
-            var labExists = await _context.Branches.AnyAsync(b => b.Id == labId, cancellationToken);
-            if (!labExists)
+            var lab = await _context.Branches.FirstOrDefaultAsync(b => b.Id == labId, cancellationToken);
+            if (lab == null)
             {
                 return NotFound(ApiResponse.FailureResult("Lab not found."));
             }
 
-            var staffIdsQuery = _context.Appointments
-                .Where(a => a.BranchId == labId && a.AssignedStaffId != null)
-                .Select(a => a.AssignedStaffId)
-                .Distinct();
-
             var query = _context.Users.AsNoTracking()
-                .Where(u => staffIdsQuery.Contains(u.Id) && !u.IsDeleted);
+                .Where(u => u.Role == UserRole.Staff && u.LabId == lab.LabId && !u.IsDeleted);
 
             if (request != null)
             {
@@ -133,10 +128,19 @@ namespace Apenir.API.Controllers.Admin
             var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
 
             var staffList = await query
-                .OrderBy(u => u.Name)
-                .Skip((pageNumber - 1) * rowsPerPage)
-                .Take(rowsPerPage)
-                .ToListAsync(cancellationToken);
+             .OrderBy(u => u.Name)
+             .Skip((pageNumber - 1) * rowsPerPage)
+             .Take(rowsPerPage)
+             .Select(u => new User
+             {
+                 Id = u.Id,
+                 Name = u.Name,
+                 Email = u.Email,
+                 Phone = u.Phone,
+                 Status = u.Status
+             })
+     .ToListAsync(cancellationToken);
+
 
             var response = new PaginatedList<User>
             {
@@ -189,23 +193,39 @@ namespace Apenir.API.Controllers.Admin
                 if (!string.IsNullOrWhiteSpace(request.CustomerName))
                 {
                     var custNameQuery = request.CustomerName.Trim().ToLower();
-                    query = query.Where(a => a.CustomerUser != null && a.CustomerUser.Name != null && a.CustomerUser.Name.ToLower().Contains(custNameQuery));
+                    var customerIds = await _context.Users.AsNoTracking()
+                        .Where(u => u.Role == UserRole.Customer && u.Name != null && u.Name.ToLower().Contains(custNameQuery))
+                        .Select(u => u.Id)
+                        .ToListAsync(cancellationToken);
+
+                    query = query.Where(a => customerIds.Contains(a.CustomerUserId));
                 }
 
                 if (!string.IsNullOrWhiteSpace(request.StaffName))
                 {
                     var staffNameQuery = request.StaffName.Trim().ToLower();
-                    query = query.Where(a => a.AssignedStaff != null && a.AssignedStaff.Name != null && a.AssignedStaff.Name.ToLower().Contains(staffNameQuery));
+                    var staffIds = await _context.Users.AsNoTracking()
+                        .Where(u => u.Role == UserRole.Staff && u.Name != null && u.Name.ToLower().Contains(staffNameQuery))
+                        .Select(u => u.Id)
+                        .ToListAsync(cancellationToken);
+
+                    query = query.Where(a => a.AssignedStaffId != null && staffIds.Contains(a.AssignedStaffId));
                 }
 
-                if (request.StartDate.HasValue)
+                if (request.StartDate.HasValue || request.EndDate.HasValue)
                 {
-                    query = query.Where(a => a.AppointmentSlot != null && a.AppointmentSlot.SlotDate >= request.StartDate.Value);
-                }
+                    var slotsQuery = _context.AppointmentSlots.AsNoTracking().Where(s => s.BranchId == labId);
+                    if (request.StartDate.HasValue)
+                    {
+                        slotsQuery = slotsQuery.Where(s => s.SlotDate >= request.StartDate.Value);
+                    }
+                    if (request.EndDate.HasValue)
+                    {
+                        slotsQuery = slotsQuery.Where(s => s.SlotDate <= request.EndDate.Value);
+                    }
 
-                if (request.EndDate.HasValue)
-                {
-                    query = query.Where(a => a.AppointmentSlot != null && a.AppointmentSlot.SlotDate <= request.EndDate.Value);
+                    var slotIds = await slotsQuery.Select(s => s.Id).ToListAsync(cancellationToken);
+                    query = query.Where(a => slotIds.Contains(a.AppointmentSlotId));
                 }
             }
 
@@ -218,13 +238,45 @@ namespace Apenir.API.Controllers.Admin
             var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
 
             var appointmentsList = await query
-                .Include(a => a.CustomerUser)
-                .Include(a => a.AssignedStaff)
-                .Include(a => a.AppointmentSlot)
                 .OrderByDescending(a => a.CreatedAt)
                 .Skip((pageNumber - 1) * rowsPerPage)
                 .Take(rowsPerPage)
                 .ToListAsync(cancellationToken);
+
+            if (appointmentsList.Any())
+            {
+                var customerUserIds = appointmentsList.Select(a => a.CustomerUserId).Distinct().ToList();
+                var staffIds = appointmentsList.Where(a => a.AssignedStaffId != null).Select(a => a.AssignedStaffId!).Distinct().ToList();
+                var slotIds = appointmentsList.Select(a => a.AppointmentSlotId).Distinct().ToList();
+
+                var customers = await _context.Users.AsNoTracking().Where(u => customerUserIds.Contains(u.Id)).ToListAsync(cancellationToken);
+                var staffMembers = await _context.Users.AsNoTracking().Where(u => staffIds.Contains(u.Id)).ToListAsync(cancellationToken);
+                var slots = await _context.AppointmentSlots.AsNoTracking().Where(s => slotIds.Contains(s.Id)).ToListAsync(cancellationToken);
+
+                // Make sure password hashes are removed for security
+                foreach (var c in customers) c.PasswordHash = null;
+                foreach (var s in staffMembers) s.PasswordHash = null;
+
+                var customersDict = customers.ToDictionary(c => c.Id);
+                var staffDict = staffMembers.ToDictionary(s => s.Id);
+                var slotsDict = slots.ToDictionary(s => s.Id);
+
+                foreach (var a in appointmentsList)
+                {
+                    if (customersDict.TryGetValue(a.CustomerUserId, out var customer))
+                    {
+                        a.CustomerUser = customer;
+                    }
+                    if (a.AssignedStaffId != null && staffDict.TryGetValue(a.AssignedStaffId, out var staffMember))
+                    {
+                        a.AssignedStaff = staffMember;
+                    }
+                    if (slotsDict.TryGetValue(a.AppointmentSlotId, out var slot))
+                    {
+                        a.AppointmentSlot = slot;
+                    }
+                }
+            }
 
             var response = new PaginatedList<Appointment>
             {
@@ -254,12 +306,17 @@ namespace Apenir.API.Controllers.Admin
             }
 
             var lab = await _context.Branches
-                .Include(b => b.LabUser)
                 .FirstOrDefaultAsync(b => b.Id == labId, cancellationToken);
 
             if (lab == null)
             {
                 return NotFound(ApiResponse.FailureResult("Lab not found."));
+            }
+
+            if (!string.IsNullOrEmpty(lab.LabUserId))
+            {
+                lab.LabUser = await _context.Users
+                    .FirstOrDefaultAsync(u => u.Id == lab.LabUserId, cancellationToken);
             }
 
             var appointments = await _context.Appointments
@@ -272,12 +329,13 @@ namespace Apenir.API.Controllers.Admin
             var totalRevenue = appointments.Sum(a => a.TotalAmount);
             var totalLabPayout = appointments.Sum(a => a.LabPayout);
 
-            var staff = await _context.Appointments
-                .Where(a => a.BranchId == labId && a.AssignedStaffId != null)
-                .Select(a => a.AssignedStaff!)
-                .Where(s => !s.IsDeleted)
-                .Distinct()
-                .ToListAsync(cancellationToken);
+            var staff = new List<User>();
+            if (!string.IsNullOrEmpty(lab.LabId))
+            {
+                staff = await _context.Users
+                    .Where(u => u.Role == UserRole.Staff && u.LabId == lab.LabId && !u.IsDeleted)
+                    .ToListAsync(cancellationToken);
+            }
 
             var servicesCount = await _context.BranchServices
                 .CountAsync(bs => bs.BranchId == labId && bs.IsActive, cancellationToken);
@@ -285,9 +343,28 @@ namespace Apenir.API.Controllers.Admin
             var activeSlotsCount = await _context.AppointmentSlots
                 .CountAsync(s => s.BranchId == labId && s.IsAvailable, cancellationToken);
 
+            if (lab.LabUser != null)
+            {
+                lab.LabUser.PasswordHash = null;
+            }
+            foreach (var s in staff)
+            {
+                s.PasswordHash = null;
+            }
+
             var response = new LabDetailsResponse
             {
-                Lab = lab,
+                Name = lab.Name,
+                District = lab.District,
+                City = lab.City,
+                Pincode = lab.Pincode,
+                Latitude = lab.Latitude,
+                Longitude = lab.Longitude,
+                Phone = lab.Phone,
+                IsActive = lab.IsActive,
+                Status = lab.Status,
+                LabId = lab.LabId,
+                CreatedAt = lab.CreatedAt,
                 ContactPerson = lab.LabUser,
                 Staff = staff,
                 Stats = new LabStats
@@ -385,13 +462,33 @@ namespace Apenir.API.Controllers.Admin
                 if (!string.IsNullOrWhiteSpace(request.CustomerName))
                 {
                     var nameQuery = request.CustomerName.Trim().ToLower();
-                    query = query.Where(p => p.Appointment != null && p.Appointment.CustomerUser != null && p.Appointment.CustomerUser.Name != null && p.Appointment.CustomerUser.Name.ToLower().Contains(nameQuery));
+                    var customerIds = await _context.Users.AsNoTracking()
+                        .Where(u => u.Role == UserRole.Customer && u.Name != null && u.Name.ToLower().Contains(nameQuery))
+                        .Select(u => u.Id)
+                        .ToListAsync(cancellationToken);
+
+                    var appointmentIds = await _context.Appointments.AsNoTracking()
+                        .Where(a => customerIds.Contains(a.CustomerUserId))
+                        .Select(a => a.Id)
+                        .ToListAsync(cancellationToken);
+
+                    query = query.Where(p => appointmentIds.Contains(p.AppointmentId));
                 }
 
                 if (!string.IsNullOrWhiteSpace(request.LabName))
                 {
                     var labQuery = request.LabName.Trim().ToLower();
-                    query = query.Where(p => p.Appointment != null && p.Appointment.Branch != null && p.Appointment.Branch.Name != null && p.Appointment.Branch.Name.ToLower().Contains(labQuery));
+                    var branchIds = await _context.Branches.AsNoTracking()
+                        .Where(b => b.Name != null && b.Name.ToLower().Contains(labQuery))
+                        .Select(b => b.Id)
+                        .ToListAsync(cancellationToken);
+
+                    var appointmentIds = await _context.Appointments.AsNoTracking()
+                        .Where(a => branchIds.Contains(a.BranchId))
+                        .Select(a => a.Id)
+                        .ToListAsync(cancellationToken);
+
+                    query = query.Where(p => appointmentIds.Contains(p.AppointmentId));
                 }
 
                 if (request.StartDate.HasValue)
@@ -414,14 +511,58 @@ namespace Apenir.API.Controllers.Admin
             var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
 
             var payments = await query
-                .Include(p => p.Appointment)
-                    .ThenInclude(a => a!.CustomerUser)
-                .Include(p => p.Appointment)
-                    .ThenInclude(a => a!.Branch)
                 .OrderByDescending(p => p.CreatedAt)
                 .Skip((pageNumber - 1) * rowsPerPage)
                 .Take(rowsPerPage)
                 .ToListAsync(cancellationToken);
+
+            if (payments.Any())
+            {
+                var appointmentIds = payments.Select(p => p.AppointmentId).Distinct().ToList();
+                var appointments = await _context.Appointments.AsNoTracking()
+                    .Where(a => appointmentIds.Contains(a.Id))
+                    .ToListAsync(cancellationToken);
+
+                if (appointments.Any())
+                {
+                    var customerIds = appointments.Select(a => a.CustomerUserId).Distinct().ToList();
+                    var branchIds = appointments.Select(a => a.BranchId).Distinct().ToList();
+
+                    var customers = await _context.Users.AsNoTracking()
+                        .Where(u => customerIds.Contains(u.Id))
+                        .ToListAsync(cancellationToken);
+
+                    var branches = await _context.Branches.AsNoTracking()
+                        .Where(b => branchIds.Contains(b.Id))
+                        .ToListAsync(cancellationToken);
+
+                    foreach (var c in customers) c.PasswordHash = null;
+
+                    var appointmentsDict = appointments.ToDictionary(a => a.Id);
+                    var customersDict = customers.ToDictionary(c => c.Id);
+                    var branchesDict = branches.ToDictionary(b => b.Id);
+
+                    foreach (var a in appointments)
+                    {
+                        if (customersDict.TryGetValue(a.CustomerUserId, out var cust))
+                        {
+                            a.CustomerUser = cust;
+                        }
+                        if (branchesDict.TryGetValue(a.BranchId, out var br))
+                        {
+                            a.Branch = br;
+                        }
+                    }
+
+                    foreach (var p in payments)
+                    {
+                        if (appointmentsDict.TryGetValue(p.AppointmentId, out var appt))
+                        {
+                            p.Appointment = appt;
+                        }
+                    }
+                }
+            }
 
             var response = new PaginatedList<Payment>
             {
@@ -1246,19 +1387,22 @@ namespace Apenir.API.Controllers.Admin
         int RowsPerPage = 10
     );
 
-    public class PaginatedList<T>
-    {
-        public List<T> Items { get; set; } = new();
-        public int PageNumber { get; set; }
-        public int PageSize { get; set; }
-        public int RowsPerPage { get; set; }
-        public int PageCount { get; set; }
-        public int TotalRows { get; set; }
-    }
+
 
     public class LabDetailsResponse
     {
-        public Branch Lab { get; set; } = null!;
+        public string Name { get; set; } = string.Empty;
+        public string District { get; set; } = string.Empty;
+        public string City { get; set; } = string.Empty;
+        public string Pincode { get; set; } = string.Empty;
+        public decimal Latitude { get; set; }
+        public decimal Longitude { get; set; }
+        public string Phone { get; set; } = string.Empty;
+        public bool IsActive { get; set; }
+        public string? Status { get; set; }
+        public string? LabId { get; set; }
+        public DateTime CreatedAt { get; set; }
+
         public User? ContactPerson { get; set; }
         public List<User> Staff { get; set; } = new();
         public LabStats Stats { get; set; } = new();

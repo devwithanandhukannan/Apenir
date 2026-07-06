@@ -18,6 +18,7 @@ public class AppDbContext : DbContext, IApplicationDbContext
     public DbSet<AppointmentMember> AppointmentMembers => Set<AppointmentMember>();
     public DbSet<Report> Reports => Set<Report>();
     public DbSet<Payment> Payments => Set<Payment>();
+    public DbSet<PaymentBatch> PaymentBatches => Set<PaymentBatch>();
     public DbSet<Payroll> Payrolls => Set<Payroll>();
     public DbSet<StaffOrderLog> StaffOrderLogs => Set<StaffOrderLog>();
     public DbSet<OtpCode> OtpCodes => Set<OtpCode>();
@@ -44,6 +45,7 @@ public class AppDbContext : DbContext, IApplicationDbContext
         modelBuilder.Entity<AppointmentMember>().ToCollection("appointment_members");
         modelBuilder.Entity<Report>().ToCollection("reports");
         modelBuilder.Entity<Payment>().ToCollection("payments");
+        modelBuilder.Entity<PaymentBatch>().ToCollection("payment_batches");
         modelBuilder.Entity<Payroll>().ToCollection("payrolls");
         modelBuilder.Entity<StaffOrderLog>().ToCollection("staff_order_logs");
         modelBuilder.Entity<OtpCode>().ToCollection("otp_codes");

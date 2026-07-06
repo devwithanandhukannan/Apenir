@@ -16,6 +16,7 @@ public interface IApplicationDbContext
     DbSet<AppointmentMember> AppointmentMembers { get; }
     DbSet<Report> Reports { get; }
     DbSet<Payment> Payments { get; }
+    DbSet<PaymentBatch> PaymentBatches { get; }
     DbSet<Payroll> Payrolls { get; }
     DbSet<StaffOrderLog> StaffOrderLogs { get; }
     DbSet<OtpCode> OtpCodes { get; }
