@@ -125,32 +125,69 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
         public async Task<IActionResult> GetDashboardSummary(
-            [FromQuery] string branchId,
             [FromQuery] DateOnly? startDate,
             [FromQuery] DateOnly? endDate,
             CancellationToken cancellationToken)
         {
-            if (string.IsNullOrWhiteSpace(branchId))
-            {
-                return BadRequest(ApiResponse.FailureResult("Branch ID is required."));
-            }
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
 
-            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
             if (branch == null)
             {
-                return NotFound(ApiResponse.FailureResult("Branch not found."));
+                return NotFound(ApiResponse.FailureResult("Lab/branch configuration not found for this user."));
             }
+
+            var branchId = branch.Id;
 
             // Default date range: today to next 7 days
             var start = startDate ?? DateOnly.FromDateTime(DateTime.UtcNow);
             var end = endDate ?? start.AddDays(7);
 
-            var appointments = await _context.Appointments
-                .Where(a => a.BranchId == branchId && a.AppointmentSlot!.SlotDate >= start && a.AppointmentSlot!.SlotDate <= end)
-                .Include(a => a.CustomerUser)
-                .Include(a => a.AssignedStaff)
-                .Include(a => a.AppointmentSlot)
+            // Fetch the slots first to filter appointments by slot dates
+            var slots = await _context.AppointmentSlots.AsNoTracking()
+                .Where(s => s.BranchId == branchId && s.SlotDate >= start && s.SlotDate <= end)
+                .OrderBy(s => s.SlotDate)
+                .ThenBy(s => s.StartTime)
                 .ToListAsync(cancellationToken);
+
+            var slotIds = slots.Select(s => s.Id).ToList();
+
+            var appointments = await _context.Appointments.AsNoTracking()
+                .Where(a => a.BranchId == branchId && slotIds.Contains(a.AppointmentSlotId))
+                .ToListAsync(cancellationToken);
+
+            if (appointments.Any())
+            {
+                var customerUserIds = appointments.Select(a => a.CustomerUserId).Distinct().ToList();
+                var staffIds = appointments.Where(a => a.AssignedStaffId != null).Select(a => a.AssignedStaffId!).Distinct().ToList();
+
+                var customers = await _context.Users.AsNoTracking().Where(u => customerUserIds.Contains(u.Id)).ToListAsync(cancellationToken);
+                var staffMembers = await _context.Users.AsNoTracking().Where(u => staffIds.Contains(u.Id)).ToListAsync(cancellationToken);
+
+                foreach (var c in customers) c.PasswordHash = null;
+                foreach (var s in staffMembers) s.PasswordHash = null;
+
+                var customersDict = customers.ToDictionary(c => c.Id);
+                var staffDict = staffMembers.ToDictionary(s => s.Id);
+                var slotsDict = slots.ToDictionary(s => s.Id);
+
+                foreach (var a in appointments)
+                {
+                    if (customersDict.TryGetValue(a.CustomerUserId, out var customer))
+                    {
+                        a.CustomerUser = customer;
+                    }
+                    if (a.AssignedStaffId != null && staffDict.TryGetValue(a.AssignedStaffId, out var staffMember))
+                    {
+                        a.AssignedStaff = staffMember;
+                    }
+                    if (slotsDict.TryGetValue(a.AppointmentSlotId, out var slot))
+                    {
+                        a.AppointmentSlot = slot;
+                    }
+                }
+            }
 
             var totalBookings = appointments.Count;
             var assignedCount = appointments.Count(a => a.Status == AppointmentStatus.Assigned);
@@ -163,15 +200,60 @@ namespace Apenir.API.Controllers
             var grossRevenue = appointments.Where(a => a.Status != AppointmentStatus.Cancelled).Sum(a => a.TotalAmount);
             var netPayout = appointments.Where(a => a.Status != AppointmentStatus.Cancelled).Sum(a => a.LabPayout);
 
-            var slots = await _context.AppointmentSlots
-                .Where(s => s.BranchId == branchId && s.SlotDate >= start && s.SlotDate <= end)
-                .OrderBy(s => s.SlotDate)
-                .ThenBy(s => s.StartTime)
+            // Calculate extra statistics
+            var activeStaffList = await _context.Users.AsNoTracking()
+                .Where(u => u.Role == UserRole.Staff && u.LabId == branch.LabId && !u.IsDeleted)
                 .ToListAsync(cancellationToken);
+
+            var activeStaffCount = activeStaffList.Count(u => u.IsActive == true);
+
+            var staffWorkload = activeStaffList.Select(s => new StaffWorkloadDto
+            {
+                StaffId = s.Id,
+                StaffName = s.Name ?? "Unknown Staff",
+                ActiveAssignmentsCount = appointments.Count(a => a.AssignedStaffId == s.Id && (a.Status == AppointmentStatus.Assigned || a.Status == AppointmentStatus.Collected)),
+                CompletedAssignmentsCount = appointments.Count(a => a.AssignedStaffId == s.Id && a.Status == AppointmentStatus.Completed)
+            }).ToList();
+
+            var slotOccupancy = slots.Select(s => new SlotCapacityStatDto
+            {
+                SlotId = s.Id,
+                TimeWindow = $"{s.StartTime} - {s.EndTime} ({s.SlotDate:yyyy-MM-dd})",
+                TotalCapacity = s.MaxCapacity,
+                BookedCount = appointments.Count(a => a.AppointmentSlotId == s.Id),
+                OccupancyPercentage = s.MaxCapacity > 0 ? Math.Round((double)appointments.Count(a => a.AppointmentSlotId == s.Id) / s.MaxCapacity * 100, 2) : 0
+            }).ToList();
+
+            var appointmentIds = appointments.Select(a => a.Id).ToList();
+            var members = await _context.AppointmentMembers.AsNoTracking()
+                .Where(m => appointmentIds.Contains(m.AppointmentId))
+                .ToListAsync(cancellationToken);
+
+            var maleCount = members.Count(m => m.Gender == Gender.Male);
+            var femaleCount = members.Count(m => m.Gender == Gender.Female);
+            var otherCount = members.Count(m => m.Gender == Gender.Other);
+            var avgAge = members.Any() ? Math.Round(members.Average(m => m.Age), 1) : 0;
+
+            var extraStats = new LabDashboardExtraStats
+            {
+                AverageOrderValue = totalBookings > 0 ? Math.Round(grossRevenue / totalBookings, 2) : 0,
+                CompletionRate = totalBookings > 0 ? Math.Round((decimal)completedCount / totalBookings * 100, 2) : 0,
+                CancellationRate = totalBookings > 0 ? Math.Round((decimal)cancelledCount / totalBookings * 100, 2) : 0,
+                ActiveStaffCount = activeStaffCount,
+                StaffWorkload = staffWorkload,
+                SlotOccupancy = slotOccupancy,
+                PatientDemographics = new PatientDemographicsDto
+                {
+                    MaleCount = maleCount,
+                    FemaleCount = femaleCount,
+                    OtherCount = otherCount,
+                    AverageAge = (double)avgAge
+                }
+            };
 
             var response = new LabDashboardSummaryResponse
             {
-                TodayBookingsCount = appointments.Count(a => a.AppointmentSlot!.SlotDate == DateOnly.FromDateTime(DateTime.UtcNow)),
+                TodayBookingsCount = appointments.Count(a => a.AppointmentSlot != null && a.AppointmentSlot.SlotDate == DateOnly.FromDateTime(DateTime.UtcNow)),
                 Funnel = new LabDashboardFunnel
                 {
                     PendingCount = pendingCount,
@@ -187,7 +269,8 @@ namespace Apenir.API.Controllers
                     NetPayout = netPayout
                 },
                 Slots = slots,
-                Appointments = appointments
+                Appointments = appointments,
+                ExtraStats = extraStats
             };
 
             return Ok(ApiResponse<LabDashboardSummaryResponse>.SuccessResult(response, "Dashboard summary retrieved successfully."));
@@ -199,20 +282,50 @@ namespace Apenir.API.Controllers
         [EndpointDescription("Returns appointments for a branch where AssignedStaffId is null and status is Pending or Confirmed.")]
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<Appointment>>))]
         [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
-        public async Task<IActionResult> GetPendingAssignments([FromQuery] string branchId, CancellationToken cancellationToken)
+        public async Task<IActionResult> GetPendingAssignments(CancellationToken cancellationToken)
         {
-            if (string.IsNullOrWhiteSpace(branchId))
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch == null)
             {
-                return BadRequest(ApiResponse.FailureResult("Branch ID is required."));
+                return NotFound(ApiResponse.FailureResult("Lab/branch configuration not found for this user."));
             }
 
-            var pending = await _context.Appointments
+            var branchId = branch.Id;
+
+            var pending = await _context.Appointments.AsNoTracking()
                 .Where(a => a.BranchId == branchId && a.AssignedStaffId == null && 
                             (a.Status == AppointmentStatus.Pending || a.Status == AppointmentStatus.Confirmed))
-                .Include(a => a.CustomerUser)
-                .Include(a => a.AppointmentSlot)
                 .OrderBy(a => a.CreatedAt)
                 .ToListAsync(cancellationToken);
+
+            if (pending.Any())
+            {
+                var customerUserIds = pending.Select(a => a.CustomerUserId).Distinct().ToList();
+                var slotIds = pending.Select(a => a.AppointmentSlotId).Distinct().ToList();
+
+                var customers = await _context.Users.AsNoTracking().Where(u => customerUserIds.Contains(u.Id)).ToListAsync(cancellationToken);
+                var slots = await _context.AppointmentSlots.AsNoTracking().Where(s => slotIds.Contains(s.Id)).ToListAsync(cancellationToken);
+
+                foreach (var c in customers) c.PasswordHash = null;
+
+                var customersDict = customers.ToDictionary(c => c.Id);
+                var slotsDict = slots.ToDictionary(s => s.Id);
+
+                foreach (var a in pending)
+                {
+                    if (customersDict.TryGetValue(a.CustomerUserId, out var customer))
+                    {
+                        a.CustomerUser = customer;
+                    }
+                    if (slotsDict.TryGetValue(a.AppointmentSlotId, out var slot))
+                    {
+                        a.AppointmentSlot = slot;
+                    }
+                }
+            }
 
             return Ok(ApiResponse<List<Appointment>>.SuccessResult(pending, "Pending staff assignments retrieved successfully."));
         }
@@ -268,25 +381,25 @@ namespace Apenir.API.Controllers
             return Ok(ApiResponse.SuccessResult("Staff member assigned to appointment successfully."));
         }
 
-        [HttpGet("branches/{branchId}/services")]
+        [HttpGet("services")]
         [Authorize]
         [EndpointSummary("Get all diagnostic services active or available for a branch")]
         [EndpointDescription("Returns all branch-specific services merged with the master service metadata.")]
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<BranchServiceDto>>))]
         [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
-        public async Task<IActionResult> GetBranchServices([FromRoute] string branchId, CancellationToken cancellationToken)
+        public async Task<IActionResult> GetBranchServices(CancellationToken cancellationToken)
         {
-            if (string.IsNullOrWhiteSpace(branchId))
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch == null)
             {
-                return BadRequest(ApiResponse.FailureResult("Branch ID is required."));
+                return NotFound(ApiResponse.FailureResult("Lab/branch configuration not found for this user."));
             }
 
-            var branchExists = await _context.Branches.AnyAsync(b => b.Id == branchId, cancellationToken);
-            if (!branchExists)
-            {
-                return NotFound(ApiResponse.FailureResult("Branch not found."));
-            }
+            var branchId = branch.Id;
 
             var branchServices = await _context.BranchServices
                 .Where(bs => bs.BranchId == branchId)
@@ -319,7 +432,7 @@ namespace Apenir.API.Controllers
             return Ok(ApiResponse<List<BranchServiceDto>>.SuccessResult(result, "Branch services retrieved successfully."));
         }
 
-        [HttpPut("branches/{branchId}/services/{serviceId}")]
+        [HttpPut("services/{serviceId}")]
         [Authorize]
         [EndpointSummary("Update custom pricing and active status for a branch service")]
         [EndpointDescription("Overrides pricing or toggles the status of a specific service for the branch.")]
@@ -328,7 +441,6 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
         public async Task<IActionResult> UpdateBranchService(
-            [FromRoute] string branchId,
             [FromRoute] string serviceId,
             [FromBody] UpdateBranchServiceRequest request,
             CancellationToken cancellationToken)
@@ -339,16 +451,13 @@ namespace Apenir.API.Controllers
             }
 
             var currentUserId = _currentUserService.UserId?.ToString();
-            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
             if (branch == null)
             {
-                return NotFound(ApiResponse.FailureResult("Branch not found."));
+                return NotFound(ApiResponse.FailureResult("Lab/branch configuration not found for this user."));
             }
 
-            if (branch.LabUserId != currentUserId)
-            {
-                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch configuration."));
-            }
+            var branchId = branch.Id;
 
             var branchService = await _context.BranchServices
                 .FirstOrDefaultAsync(bs => bs.BranchId == branchId && bs.ServiceId == serviceId, cancellationToken);
@@ -383,6 +492,290 @@ namespace Apenir.API.Controllers
             return Ok(ApiResponse.SuccessResult("Branch service updated successfully."));
         }
 
+        [HttpPost("appointments/{appointmentId}/reports")]
+        [Authorize]
+        [EndpointSummary("Submit typed diagnostic report data")]
+        [EndpointDescription("Submits/updates typed test results for a specific patient under an appointment. If all patients in the appointment have results submitted, the appointment status transitions to Completed.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> SubmitReport(
+            [FromRoute] string appointmentId,
+            [FromBody] SubmitReportRequest request,
+            CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.MemberId) || string.IsNullOrWhiteSpace(request.ResultData))
+            {
+                return BadRequest(ApiResponse.FailureResult("MemberId and ResultData are required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var appointment = await _context.Appointments
+                .FirstOrDefaultAsync(a => a.Id == appointmentId, cancellationToken);
+
+            if (appointment == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Appointment not found."));
+            }
+
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.Id == appointment.BranchId, cancellationToken);
+
+            if (branch == null || branch.LabUserId != currentUserId)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this appointment."));
+            }
+
+            var memberExists = await _context.AppointmentMembers.AsNoTracking()
+                .AnyAsync(m => m.Id == request.MemberId && m.AppointmentId == appointmentId, cancellationToken);
+
+            if (!memberExists)
+            {
+                return BadRequest(ApiResponse.FailureResult("Member does not belong to this appointment."));
+            }
+
+            var report = await _context.Reports
+                .FirstOrDefaultAsync(r => r.AppointmentId == appointmentId && r.MemberId == request.MemberId, cancellationToken);
+
+            if (report == null)
+            {
+                report = new Report
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    AppointmentId = appointmentId,
+                    MemberId = request.MemberId,
+                    CreatedAt = DateTime.UtcNow
+                };
+                _context.Reports.Add(report);
+            }
+            else
+            {
+                _context.Reports.Update(report);
+            }
+
+            report.ResultData = request.ResultData;
+            report.UploadedBy = currentUserId ?? string.Empty;
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            // Automatically check if all members have reports to transition status to Completed
+            var totalMembers = await _context.AppointmentMembers.AsNoTracking()
+                .Where(m => m.AppointmentId == appointmentId)
+                .CountAsync(cancellationToken);
+
+            var reportedMembersCount = await _context.Reports.AsNoTracking()
+                .Where(r => r.AppointmentId == appointmentId && !string.IsNullOrEmpty(r.ResultData))
+                .Select(r => r.MemberId)
+                .Distinct()
+                .CountAsync(cancellationToken);
+
+            if (reportedMembersCount >= totalMembers)
+            {
+                appointment.Status = AppointmentStatus.Completed;
+                appointment.UpdatedAt = DateTime.UtcNow;
+                _context.Appointments.Update(appointment);
+                await _context.SaveChangesAsync(cancellationToken);
+            }
+
+            return Ok(ApiResponse.SuccessResult("Report data submitted successfully."));
+        }
+
+        [HttpGet("appointments/{appointmentId}/reports")]
+        [Authorize]
+        [EndpointSummary("Get all diagnostic reports for an appointment")]
+        [EndpointDescription("Returns all reports and typed result data submitted for the members of this appointment.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<AppointmentReportDto>>))]
+        [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetReports([FromRoute] string appointmentId, CancellationToken cancellationToken)
+        {
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var appointment = await _context.Appointments.AsNoTracking()
+                .FirstOrDefaultAsync(a => a.Id == appointmentId, cancellationToken);
+
+            if (appointment == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Appointment not found."));
+            }
+
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.Id == appointment.BranchId, cancellationToken);
+
+            if (branch == null || branch.LabUserId != currentUserId)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this appointment."));
+            }
+
+            var reports = await _context.Reports.AsNoTracking()
+                .Where(r => r.AppointmentId == appointmentId)
+                .ToListAsync(cancellationToken);
+
+            var members = await _context.AppointmentMembers.AsNoTracking()
+                .Where(m => m.AppointmentId == appointmentId)
+                .ToListAsync(cancellationToken);
+
+            var memberDict = members.ToDictionary(m => m.Id, m => m.MemberName);
+
+            var result = reports.Select(r => new AppointmentReportDto
+            {
+                ReportId = r.Id,
+                AppointmentId = r.AppointmentId,
+                MemberId = r.MemberId,
+                MemberName = memberDict.TryGetValue(r.MemberId, out var name) ? name : string.Empty,
+                FileUrl = r.FileUrl,
+                FileName = r.FileName,
+                ResultData = r.ResultData,
+                CreatedAt = r.CreatedAt
+            }).ToList();
+
+            return Ok(ApiResponse<List<AppointmentReportDto>>.SuccessResult(result, "Reports retrieved successfully."));
+        }
+
+        [HttpPost("appointments/list")]
+        [Authorize]
+        [EndpointSummary("Search and Filter Appointments for the lab owner")]
+        [EndpointDescription("Returns a paginated list of all appointments scheduled for the lab owner's branches, with optional filters.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<PaginatedList<Appointment>>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> ListAppointments([FromBody] LabSearchAppointmentsRequest? request, CancellationToken cancellationToken)
+        {
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch == null)
+            {
+                var emptyResponse = new PaginatedList<Appointment>
+                {
+                    Items = new List<Appointment>(),
+                    PageNumber = 1,
+                    PageSize = 0,
+                    RowsPerPage = request?.RowsPerPage ?? 10,
+                    PageCount = 0,
+                    TotalRows = 0
+                };
+                return Ok(ApiResponse<PaginatedList<Appointment>>.SuccessResult(emptyResponse, "Lab/branch configuration not found for this user."));
+            }
+
+            var branchId = branch.Id;
+
+            var query = _context.Appointments.AsNoTracking()
+                .Where(a => a.BranchId == branchId);
+
+            if (request != null)
+            {
+                if (!string.IsNullOrWhiteSpace(request.AppointmentNumber))
+                {
+                    var appNumQuery = request.AppointmentNumber.Trim().ToLower();
+                    query = query.Where(a => a.AppointmentNumber.ToLower().Contains(appNumQuery));
+                }
+
+                if (request.Status.HasValue)
+                {
+                    query = query.Where(a => a.Status == request.Status.Value);
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.CustomerName))
+                {
+                    var custNameQuery = request.CustomerName.Trim().ToLower();
+                    var customerIds = await _context.Users.AsNoTracking()
+                        .Where(u => u.Role == UserRole.Customer && u.Name != null && u.Name.ToLower().Contains(custNameQuery))
+                        .Select(u => u.Id)
+                        .ToListAsync(cancellationToken);
+
+                    query = query.Where(a => customerIds.Contains(a.CustomerUserId));
+                }
+
+                if (!string.IsNullOrWhiteSpace(request.StaffName))
+                {
+                    var staffNameQuery = request.StaffName.Trim().ToLower();
+                    var staffIds = await _context.Users.AsNoTracking()
+                        .Where(u => u.Role == UserRole.Staff && u.Name != null && u.Name.ToLower().Contains(staffNameQuery))
+                        .Select(u => u.Id)
+                        .ToListAsync(cancellationToken);
+
+                    query = query.Where(a => a.AssignedStaffId != null && staffIds.Contains(a.AssignedStaffId));
+                }
+
+                if (request.StartDate.HasValue || request.EndDate.HasValue)
+                {
+                    var slotsQuery = _context.AppointmentSlots.AsNoTracking().Where(s => s.BranchId == branchId);
+                    if (request.StartDate.HasValue)
+                    {
+                        slotsQuery = slotsQuery.Where(s => s.SlotDate >= request.StartDate.Value);
+                    }
+                    if (request.EndDate.HasValue)
+                    {
+                        slotsQuery = slotsQuery.Where(s => s.SlotDate <= request.EndDate.Value);
+                    }
+
+                    var slotIds = await slotsQuery.Select(s => s.Id).ToListAsync(cancellationToken);
+                    query = query.Where(a => slotIds.Contains(a.AppointmentSlotId));
+                }
+            }
+
+            var totalRows = await query.CountAsync(cancellationToken);
+            var pageNumber = request?.PageNumber ?? 1;
+            var rowsPerPage = request?.RowsPerPage ?? 10;
+            if (pageNumber < 1) pageNumber = 1;
+            if (rowsPerPage < 1) rowsPerPage = 10;
+
+            var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
+
+            var appointmentsList = await query
+                .OrderByDescending(a => a.CreatedAt)
+                .Skip((pageNumber - 1) * rowsPerPage)
+                .Take(rowsPerPage)
+                .ToListAsync(cancellationToken);
+
+            if (appointmentsList.Any())
+            {
+                var customerUserIds = appointmentsList.Select(a => a.CustomerUserId).Distinct().ToList();
+                var staffIds = appointmentsList.Where(a => a.AssignedStaffId != null).Select(a => a.AssignedStaffId!).Distinct().ToList();
+                var slotIds = appointmentsList.Select(a => a.AppointmentSlotId).Distinct().ToList();
+
+                var customers = await _context.Users.AsNoTracking().Where(u => customerUserIds.Contains(u.Id)).ToListAsync(cancellationToken);
+                var staffMembers = await _context.Users.AsNoTracking().Where(u => staffIds.Contains(u.Id)).ToListAsync(cancellationToken);
+                var slots = await _context.AppointmentSlots.AsNoTracking().Where(s => slotIds.Contains(s.Id)).ToListAsync(cancellationToken);
+
+                foreach (var c in customers) c.PasswordHash = null;
+                foreach (var s in staffMembers) s.PasswordHash = null;
+
+                var customersDict = customers.ToDictionary(c => c.Id);
+                var staffDict = staffMembers.ToDictionary(s => s.Id);
+                var slotsDict = slots.ToDictionary(s => s.Id);
+
+                foreach (var a in appointmentsList)
+                {
+                    if (customersDict.TryGetValue(a.CustomerUserId, out var customer))
+                    {
+                        a.CustomerUser = customer;
+                    }
+                    if (a.AssignedStaffId != null && staffDict.TryGetValue(a.AssignedStaffId, out var staffMember))
+                    {
+                        a.AssignedStaff = staffMember;
+                    }
+                    if (slotsDict.TryGetValue(a.AppointmentSlotId, out var slot))
+                    {
+                        a.AppointmentSlot = slot;
+                    }
+                }
+            }
+
+            var response = new PaginatedList<Appointment>
+            {
+                Items = appointmentsList,
+                PageNumber = pageNumber,
+                PageSize = appointmentsList.Count,
+                RowsPerPage = rowsPerPage,
+                PageCount = pageCount,
+                TotalRows = totalRows
+            };
+
+            return Ok(ApiResponse<PaginatedList<Appointment>>.SuccessResult(response, "Appointments retrieved successfully."));
+        }
+
         [HttpGet("staff")]
         [Authorize]
         [EndpointSummary("Get all active staff/phlebotomists for the lab")]
@@ -390,20 +783,15 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<User>>))]
         [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
         [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
-        public async Task<IActionResult> GetStaffList([FromQuery] string branchId, CancellationToken cancellationToken)
+        public async Task<IActionResult> GetStaffList(CancellationToken cancellationToken)
         {
-            if (string.IsNullOrWhiteSpace(branchId))
-            {
-                return BadRequest(ApiResponse.FailureResult("Branch ID is required."));
-            }
-
             var currentUserId = _currentUserService.UserId?.ToString();
             var branch = await _context.Branches.AsNoTracking()
-                .FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
 
-            if (branch == null || branch.LabUserId != currentUserId)
+            if (branch == null)
             {
-                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                return NotFound(ApiResponse.FailureResult("Lab/branch configuration not found for this user."));
             }
 
             var staff = await _context.Users.AsNoTracking()
@@ -422,6 +810,124 @@ namespace Apenir.API.Controllers
             return Ok(ApiResponse<List<User>>.SuccessResult(staff, "Staff list retrieved successfully."));
         }
 
+        [HttpPost("staff")]
+        [Authorize]
+        [EndpointSummary("Add a new staff/phlebotomist member")]
+        [EndpointDescription("Creates a new staff member account under the lab.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<User>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> AddStaff([FromBody] AddStaffRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Email) ||
+                string.IsNullOrWhiteSpace(request.Phone) || string.IsNullOrWhiteSpace(request.Password))
+            {
+                return BadRequest(ApiResponse.FailureResult("Name, Email, Phone, and Password are required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Lab/branch configuration not found for this user."));
+            }
+
+            var emailTaken = await _context.Users.AsNoTracking()
+                .AnyAsync(u => u.Email != null && u.Email.ToLower() == request.Email.Trim().ToLower(), cancellationToken);
+
+            if (emailTaken)
+            {
+                return BadRequest(ApiResponse.FailureResult("A user with this email address already exists."));
+            }
+
+            var newStaff = new User
+            {
+                Id = Guid.NewGuid().ToString(),
+                Name = request.Name.Trim(),
+                Email = request.Email.Trim().ToLower(),
+                Phone = request.Phone.Trim(),
+                PasswordHash = _passwordHasher.Hash(request.Password),
+                Role = UserRole.Staff,
+                LabId = branch.LabId,
+                IsActive = true,
+                IsDeleted = false,
+                Status = "Active",
+                CreatedAt = DateTime.UtcNow
+            };
+
+            _context.Users.Add(newStaff);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            // Hide password hash for response
+            newStaff.PasswordHash = null;
+
+            return Ok(ApiResponse<User>.SuccessResult(newStaff, "Staff member created successfully."));
+        }
+
+        [HttpPut("staff/{staffId}")]
+        [Authorize]
+        [EndpointSummary("Edit a staff/phlebotomist member")]
+        [EndpointDescription("Updates details, active status, or resets password for a staff member under the lab.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> EditStaff([FromRoute] string staffId, [FromBody] EditStaffRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Name) || string.IsNullOrWhiteSpace(request.Email) || string.IsNullOrWhiteSpace(request.Phone))
+            {
+                return BadRequest(ApiResponse.FailureResult("Name, Email, and Phone are required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Lab/branch configuration not found for this user."));
+            }
+
+            var staff = await _context.Users
+                .FirstOrDefaultAsync(u => u.Id == staffId && u.Role == UserRole.Staff && u.LabId == branch.LabId && !u.IsDeleted, cancellationToken);
+
+            if (staff == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Staff member not found under this lab."));
+            }
+
+            var newEmail = request.Email.Trim().ToLower();
+            if (staff.Email != newEmail)
+            {
+                var emailTaken = await _context.Users.AsNoTracking()
+                    .AnyAsync(u => u.Email != null && u.Email.ToLower() == newEmail && u.Id != staffId, cancellationToken);
+
+                if (emailTaken)
+                {
+                    return BadRequest(ApiResponse.FailureResult("A user with this email address already exists."));
+                }
+                staff.Email = newEmail;
+            }
+
+            staff.Name = request.Name.Trim();
+            staff.Phone = request.Phone.Trim();
+            staff.IsActive = request.IsActive;
+            staff.Status = request.IsActive ? "Active" : "Inactive";
+
+            if (!string.IsNullOrWhiteSpace(request.Password))
+            {
+                staff.PasswordHash = _passwordHasher.Hash(request.Password);
+            }
+
+            staff.UpdatedAt = DateTime.UtcNow;
+
+            _context.Users.Update(staff);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Staff member updated successfully."));
+        }
+
         [HttpPost("payment-batches/list")]
         [Authorize]
         [EndpointSummary("List payment batches for the lab")]
@@ -431,13 +937,10 @@ namespace Apenir.API.Controllers
         public async Task<IActionResult> ListPaymentBatches([FromBody] LabSearchBatchesRequest? request, CancellationToken cancellationToken)
         {
             var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
 
-            var branches = await _context.Branches.AsNoTracking()
-                .Where(b => b.LabUserId == currentUserId)
-                .ToListAsync(cancellationToken);
-
-            var branchIds = branches.Select(b => b.Id).ToList();
-            if (branchIds.Count == 0)
+            if (branch == null)
             {
                 var emptyResponse = new PaginatedList<LabBatchListDto>
                 {
@@ -448,13 +951,13 @@ namespace Apenir.API.Controllers
                     PageCount = 0,
                     TotalRows = 0
                 };
-                return Ok(ApiResponse<PaginatedList<LabBatchListDto>>.SuccessResult(emptyResponse, "No branches found for this lab owner."));
+                return Ok(ApiResponse<PaginatedList<LabBatchListDto>>.SuccessResult(emptyResponse, "Lab/branch configuration not found for this user."));
             }
 
-            var branchDict = branches.ToDictionary(b => b.Id, b => b.Name);
+            var branchId = branch.Id;
 
             var query = _context.PaymentBatches.AsNoTracking()
-                .Where(pb => branchIds.Contains(pb.BranchId));
+                .Where(pb => pb.BranchId == branchId);
 
             if (request != null)
             {
@@ -492,7 +995,7 @@ namespace Apenir.API.Controllers
             {
                 Id = pb.Id,
                 BranchId = pb.BranchId,
-                BranchName = branchDict.TryGetValue(pb.BranchId, out var name) ? name : string.Empty,
+                BranchName = branch.Name,
                 PaymentCount = pb.PaymentCount,
                 TotalGrossAmount = pb.TotalGrossAmount,
                 TotalPlatformCommission = pb.TotalPlatformCommission,
@@ -659,6 +1162,43 @@ namespace Apenir.API.Controllers
         public LabDashboardFinancials Financials { get; set; } = new();
         public List<AppointmentSlot> Slots { get; set; } = new();
         public List<Appointment> Appointments { get; set; } = new();
+        public LabDashboardExtraStats ExtraStats { get; set; } = new();
+    }
+
+    public class LabDashboardExtraStats
+    {
+        public decimal AverageOrderValue { get; set; }
+        public decimal CompletionRate { get; set; }
+        public decimal CancellationRate { get; set; }
+        public int ActiveStaffCount { get; set; }
+        public List<StaffWorkloadDto> StaffWorkload { get; set; } = new();
+        public List<SlotCapacityStatDto> SlotOccupancy { get; set; } = new();
+        public PatientDemographicsDto PatientDemographics { get; set; } = new();
+    }
+
+    public class StaffWorkloadDto
+    {
+        public string StaffId { get; set; } = string.Empty;
+        public string StaffName { get; set; } = string.Empty;
+        public int ActiveAssignmentsCount { get; set; }
+        public int CompletedAssignmentsCount { get; set; }
+    }
+
+    public class SlotCapacityStatDto
+    {
+        public string SlotId { get; set; } = string.Empty;
+        public string TimeWindow { get; set; } = string.Empty;
+        public int TotalCapacity { get; set; }
+        public int BookedCount { get; set; }
+        public double OccupancyPercentage { get; set; }
+    }
+
+    public class PatientDemographicsDto
+    {
+        public int MaleCount { get; set; }
+        public int FemaleCount { get; set; }
+        public int OtherCount { get; set; }
+        public double AverageAge { get; set; }
     }
 
     public class LabDashboardFunnel
@@ -752,6 +1292,52 @@ namespace Apenir.API.Controllers
         public decimal LabPayout { get; set; }
         public DateTime? PaidAt { get; set; }
         public PaymentMethod? PaymentMethod { get; set; }
+    }
+
+    public class SubmitReportRequest
+    {
+        public string MemberId { get; set; } = string.Empty;
+        public string ResultData { get; set; } = string.Empty;
+    }
+
+    public class AppointmentReportDto
+    {
+        public string ReportId { get; set; } = string.Empty;
+        public string AppointmentId { get; set; } = string.Empty;
+        public string MemberId { get; set; } = string.Empty;
+        public string MemberName { get; set; } = string.Empty;
+        public string? FileUrl { get; set; }
+        public string? FileName { get; set; }
+        public string? ResultData { get; set; }
+        public DateTime CreatedAt { get; set; }
+    }
+
+    public record LabSearchAppointmentsRequest(
+        string? AppointmentNumber,
+        AppointmentStatus? Status,
+        string? CustomerName,
+        string? StaffName,
+        DateOnly? StartDate,
+        DateOnly? EndDate,
+        int PageNumber = 1,
+        int RowsPerPage = 10
+    );
+
+    public class AddStaffRequest
+    {
+        public string Name { get; set; } = string.Empty;
+        public string Email { get; set; } = string.Empty;
+        public string Phone { get; set; } = string.Empty;
+        public string Password { get; set; } = string.Empty;
+    }
+
+    public class EditStaffRequest
+    {
+        public string Name { get; set; } = string.Empty;
+        public string Email { get; set; } = string.Empty;
+        public string Phone { get; set; } = string.Empty;
+        public bool IsActive { get; set; }
+        public string? Password { get; set; }
     }
 
 }
