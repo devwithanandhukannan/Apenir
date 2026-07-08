@@ -31,6 +31,9 @@ public class Payment
 
     public DateTime? PaidAt { get; set; }
 
+    [StringLength(36)]
+    public string? BatchId { get; set; }
+
     [Required]
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 

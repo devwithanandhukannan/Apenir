@@ -20,12 +20,12 @@ public class Report
     [StringLength(36)]
     public string MemberId { get; set; } = string.Empty;
 
-    [Required]
-    public string FileUrl { get; set; } = string.Empty;
+    public string? FileUrl { get; set; }
 
-    [Required]
     [StringLength(255)]
-    public string FileName { get; set; } = string.Empty;
+    public string? FileName { get; set; }
+
+    public string? ResultData { get; set; }
 
     [Required]
     [StringLength(36)]
