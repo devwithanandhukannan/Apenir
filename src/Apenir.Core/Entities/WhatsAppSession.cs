@@ -20,5 +20,7 @@ public class WhatsAppSession
     public string? Landmark { get; set; }
     public string? BuildingDetails { get; set; }
     public string? Floor { get; set; }
+    public string? CartItems { get; set; } // Comma-separated list of Service/Package IDs in cart
+    public decimal? TravelFee { get; set; }
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }

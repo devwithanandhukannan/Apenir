@@ -31,6 +31,11 @@ public class Service
     [Required]
     public bool IsActive { get; set; } = true;
 
+    [Required]
+    public bool IsPackage { get; set; } = false;
+
+    public string? SubtestSummary { get; set; }
+
     [StringLength(36)]
     public string? CreatedByBranchId { get; set; }
 

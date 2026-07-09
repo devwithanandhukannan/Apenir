@@ -270,6 +270,104 @@ namespace Apenir.API.Controllers
             return Ok(ApiResponse<BranchDetailsResponse>.SuccessResult(response, "Branch details retrieved successfully."));
         }
 
+        [HttpPut("details")]
+        [Authorize]
+        [EndpointSummary("Update lab branch details")]
+        [EndpointDescription("Allows updating phone, address, location coordinates, range, and working days config.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> UpdateBranchDetails(
+            [FromBody] UpdateBranchDetailsRequest request,
+            CancellationToken cancellationToken)
+        {
+            if (request == null)
+            {
+                return BadRequest(ApiResponse.FailureResult("Request body is required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.Phone))
+            {
+                branch.Phone = request.Phone.Trim();
+            }
+            if (request.AddressDetails != null)
+            {
+                branch.AddressDetails = request.AddressDetails;
+            }
+            if (request.WorkingDaysConfig != null)
+            {
+                branch.WorkingDaysConfig = request.WorkingDaysConfig;
+            }
+            if (request.Latitude.HasValue)
+            {
+                branch.Latitude = request.Latitude.Value;
+            }
+            if (request.Longitude.HasValue)
+            {
+                branch.Longitude = request.Longitude.Value;
+            }
+            if (request.ServiceRangeKm.HasValue)
+            {
+                branch.ServiceRangeKm = (double)request.ServiceRangeKm.Value;
+            }
+
+            _context.Branches.Update(branch);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Branch details updated successfully."));
+        }
+
+        [HttpPost("travel-charges")]
+        [Authorize]
+        [EndpointSummary("Configure branch travel/scooter fee charging tiers")]
+        [EndpointDescription("Resets and sets new distance-based travel charge tiers for the branch.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> UpdateBranchTravelCharges(
+            [FromBody] List<BranchTravelChargeInput> request,
+            CancellationToken cancellationToken)
+        {
+            if (request == null)
+            {
+                return BadRequest(ApiResponse.FailureResult("Request body is required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            // Remove existing charges
+            var existing = await _context.BranchTravelCharges
+                .Where(c => c.BranchId == branch.Id)
+                .ToListAsync(cancellationToken);
+            _context.BranchTravelCharges.RemoveRange(existing);
+
+            // Add new charges
+            foreach (var item in request)
+            {
+                var charge = new BranchTravelCharge
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    BranchId = branch.Id,
+                    MinDistanceKm = item.MinDistanceKm,
+                    MaxDistanceKm = item.MaxDistanceKm,
+                    Cost = item.Cost
+                };
+                _context.BranchTravelCharges.Add(charge);
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Branch travel charges configured successfully."));
+        }
+
         [HttpGet("dashboard/summary")]
         [Authorize]
         [EndpointSummary("Get dashboard summary metrics and slots")]
@@ -1255,6 +1353,160 @@ namespace Apenir.API.Controllers
             return Ok(ApiResponse<string>.SuccessResult(relativeUrl, $"Report for {member.MemberName} uploaded and delivered to WhatsApp successfully."));
         }
 
+        [HttpPost("reports/auto-match")]
+        [Authorize]
+        [Consumes("multipart/form-data")]
+        [EndpointSummary("Auto-match and upload multiple report PDFs using filename regex")]
+        [EndpointDescription("Scans filenames for UniqueSampleId matching the regex 'BK-(?:W-)?\\d{8}-\\d+-M\\d+', links them to members, saves files, and notifies customers on WhatsApp.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<AutoMatchReportsResult>))]
+        public async Task<IActionResult> AutoMatchReports(
+            [FromForm] List<IFormFile> files,
+            CancellationToken cancellationToken)
+        {
+            if (files == null || !files.Any())
+            {
+                return BadRequest(ApiResponse.FailureResult("No PDF files were provided."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            var uploadDir = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "reports");
+            if (!Directory.Exists(uploadDir))
+            {
+                Directory.CreateDirectory(uploadDir);
+            }
+
+            var regex = new System.Text.RegularExpressions.Regex(@"BK-(?:W-)?\d{8}-\d+-M\d+", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+            var matchedList = new List<string>();
+            var unmatchedList = new List<string>();
+
+            foreach (var file in files)
+            {
+                if (file.Length == 0) continue;
+
+                var match = regex.Match(file.FileName);
+                if (!match.Success)
+                {
+                    unmatchedList.Add($"{file.FileName} (No regex match found for Sample ID)");
+                    continue;
+                }
+
+                var sampleId = match.Value.ToUpper();
+
+                // Find the member associated with this sampleId under this branch's appointments
+                var member = await _context.AppointmentMembers
+                    .Include(m => m.Appointment)
+                    .FirstOrDefaultAsync(m => m.UniqueSampleId == sampleId && m.Appointment.BranchId == branch.Id, cancellationToken);
+
+                if (member == null)
+                {
+                    unmatchedList.Add($"{file.FileName} (No member found with Sample ID {sampleId} at this branch)");
+                    continue;
+                }
+
+                var appointment = member.Appointment;
+                if (appointment == null)
+                {
+                    unmatchedList.Add($"{file.FileName} (Internal error: appointment missing)");
+                    continue;
+                }
+
+                appointment.CustomerUser = await _context.Users.FirstOrDefaultAsync(u => u.Id == appointment.CustomerUserId, cancellationToken);
+
+                // Save file
+                var safeMemberName = string.Join("_", member.MemberName.Split(Path.GetInvalidFileNameChars()));
+                var filename = $"Report_{sampleId}_{safeMemberName}_{DateTime.UtcNow.Ticks}.pdf";
+                var filePath = Path.Combine(uploadDir, filename);
+
+                using (var stream = new FileStream(filePath, FileMode.Create))
+                {
+                    await file.CopyToAsync(stream, cancellationToken);
+                }
+
+                var relativeUrl = $"/reports/{filename}";
+
+                // Save or update Report
+                var existingReport = await _context.Reports
+                    .FirstOrDefaultAsync(r => r.AppointmentId == appointment.Id && r.MemberId == member.Id, cancellationToken);
+
+                if (existingReport != null)
+                {
+                    existingReport.FileUrl = relativeUrl;
+                    existingReport.FileName = filename;
+                    existingReport.UploadedBy = currentUserId ?? string.Empty;
+                    existingReport.WhatsappSent = false;
+                    _context.Reports.Update(existingReport);
+                }
+                else
+                {
+                    var newReport = new Report
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        AppointmentId = appointment.Id,
+                        MemberId = member.Id,
+                        FileUrl = relativeUrl,
+                        FileName = filename,
+                        UploadedBy = currentUserId ?? string.Empty,
+                        WhatsappSent = false,
+                        CreatedAt = DateTime.UtcNow
+                    };
+                    _context.Reports.Add(newReport);
+                }
+
+                // Check if all members have reports uploaded
+                var allMembersCount = await _context.AppointmentMembers.CountAsync(m => m.AppointmentId == appointment.Id, cancellationToken);
+                var reportsCount = await _context.Reports.CountAsync(r => r.AppointmentId == appointment.Id, cancellationToken);
+                var totalReports = existingReport == null ? reportsCount + 1 : reportsCount;
+
+                if (allMembersCount > 0 && totalReports >= appointment.MemberCount)
+                {
+                    appointment.Status = AppointmentStatus.Completed;
+                    appointment.UpdatedAt = DateTime.UtcNow;
+                    _context.Appointments.Update(appointment);
+                }
+
+                await _context.SaveChangesAsync(cancellationToken);
+
+                // Send WhatsApp notification
+                var requestScheme = Request.Scheme;
+                var requestHost = Request.Host;
+                var absoluteUrl = $"{requestScheme}://{requestHost}{relativeUrl}";
+
+                if (appointment.CustomerUser != null && !string.IsNullOrEmpty(appointment.CustomerUser.Phone))
+                {
+                    var message = $"📄 *Diagnostic Report Available*\n\nHere is the report for *{member.MemberName}* (Sample ID: {sampleId}).";
+                    await _whatsAppService.SendTextMessageAsync(appointment.CustomerUser.Phone, message);
+                    await _whatsAppService.SendDocumentMessageAsync(appointment.CustomerUser.Phone, absoluteUrl, filename);
+
+                    var savedReport = await _context.Reports.FirstOrDefaultAsync(r => r.AppointmentId == appointment.Id && r.MemberId == member.Id, cancellationToken);
+                    if (savedReport != null)
+                    {
+                        savedReport.WhatsappSent = true;
+                        _context.Reports.Update(savedReport);
+                        await _context.SaveChangesAsync(cancellationToken);
+                    }
+                }
+
+                matchedList.Add($"{file.FileName} -> Matched & linked to {member.MemberName} (Sample ID: {sampleId})");
+            }
+
+            var result = new AutoMatchReportsResult
+            {
+                MatchedCount = matchedList.Count,
+                UnmatchedCount = unmatchedList.Count,
+                Matched = matchedList,
+                Unmatched = unmatchedList
+            };
+
+            return Ok(ApiResponse<AutoMatchReportsResult>.SuccessResult(result, $"Process completed. Matched {matchedList.Count} files, unmatched {unmatchedList.Count} files."));
+        }
+
         [HttpPost("appointments/{appointmentId}/reports")]
         [Authorize]
         [EndpointSummary("Submit typed diagnostic report data")]
@@ -2183,5 +2435,30 @@ namespace Apenir.API.Controllers
         public int FemaleCount { get; set; }
         public int OtherCount { get; set; }
         public double AverageAge { get; set; }
+    }
+
+    public class UpdateBranchDetailsRequest
+    {
+        public string? Phone { get; set; }
+        public string? AddressDetails { get; set; }
+        public string? WorkingDaysConfig { get; set; }
+        public decimal? Latitude { get; set; }
+        public decimal? Longitude { get; set; }
+        public decimal? ServiceRangeKm { get; set; }
+    }
+
+    public class BranchTravelChargeInput
+    {
+        public double MinDistanceKm { get; set; }
+        public double MaxDistanceKm { get; set; }
+        public decimal Cost { get; set; }
+    }
+
+    public class AutoMatchReportsResult
+    {
+        public int MatchedCount { get; set; }
+        public int UnmatchedCount { get; set; }
+        public List<string> Matched { get; set; } = new();
+        public List<string> Unmatched { get; set; } = new();
     }
 }

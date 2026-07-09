@@ -415,6 +415,10 @@ namespace Apenir.API.BackgroundServices
             switch (replyId)
             {
                 case "menu_book":
+                    // Reset cart when starting a new booking
+                    session.CartItems = string.Empty;
+                    session.SelectedTestId = string.Empty;
+                    session.TravelFee = null;
                     session.CurrentState = WhatsAppState.AwaitingLocation;
                     await SaveSessionAsync(session, context, cancellationToken);
                     await SendLocationRequest(to, httpClientFactory, configuration);
@@ -429,6 +433,18 @@ namespace Apenir.API.BackgroundServices
                     await SaveSessionAsync(session, context, cancellationToken);
                     await SendGreeting(to, httpClientFactory, configuration);
                     return;
+
+                case "cart_add_more":
+                    session.CurrentState = WhatsAppState.ChoosingTest;
+                    await SaveSessionAsync(session, context, cancellationToken);
+                    await ShowServicesForSession(to, session, context, httpClientFactory, configuration, cancellationToken);
+                    return;
+
+                case "cart_checkout":
+                    session.CurrentState = WhatsAppState.AwaitingAddressDetails;
+                    await SaveSessionAsync(session, context, cancellationToken);
+                    await SendTextMessage(to, "📝 Please reply with your address details: Building name/number, floor, and landmark.\n\n(e.g., 'Flat 202, 2nd Floor, next to SBI Bank')", httpClientFactory, configuration);
+                    return;
             }
 
             switch (session.CurrentState)
@@ -438,10 +454,42 @@ namespace Apenir.API.BackgroundServices
                     var selectedService = allServices.FirstOrDefault(s => s.Id == replyId);
                     if (selectedService != null)
                     {
-                        session.SelectedTestId = selectedService.Id;
-                        session.CurrentState = WhatsAppState.AwaitingAddressDetails;
+                        var cart = string.IsNullOrEmpty(session.CartItems)
+                            ? new List<string>()
+                            : session.CartItems.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList();
+
+                        if (!cart.Contains(selectedService.Id))
+                        {
+                            cart.Add(selectedService.Id);
+                            session.CartItems = string.Join(",", cart);
+                            session.SelectedTestId = selectedService.Id; // Primary selection
+                        }
+
                         await SaveSessionAsync(session, context, cancellationToken);
-                        await SendTextMessage(to, "📝 Please reply with your address details: Building name/number, floor, and landmark.\n\n(e.g., 'Flat 202, 2nd Floor, next to SBI Bank')", httpClientFactory, configuration);
+
+                        var cartPayload = new
+                        {
+                            messaging_product = "whatsapp",
+                            to,
+                            type = "interactive",
+                            interactive = new
+                            {
+                                type = "button",
+                                body = new
+                                {
+                                    text = $"✅ Added *{selectedService.Name}* to your booking cart!\n\nCurrent items: {cart.Count}. Would you like to add another test or proceed to checkout?"
+                                },
+                                action = new
+                                {
+                                    buttons = new[]
+                                    {
+                                        new { type = "reply", reply = new { id = "cart_add_more", title = "➕ Add more" } },
+                                        new { type = "reply", reply = new { id = "cart_checkout", title = "🛒 Checkout" } }
+                                    }
+                                }
+                            }
+                        };
+                        await SendWhatsAppMessage(cartPayload, httpClientFactory, configuration);
                     }
                     else
                     {
@@ -604,16 +652,22 @@ namespace Apenir.API.BackgroundServices
             IConfiguration configuration,
             CancellationToken cancellationToken)
         {
-            var serviceId = session.SelectedTestId ?? string.Empty;
+            var cart = string.IsNullOrEmpty(session.CartItems)
+                ? new List<string> { session.SelectedTestId ?? string.Empty }
+                : session.CartItems.Split(',', StringSplitOptions.RemoveEmptyEntries).ToList();
+
             var allServices = await GetCachedServicesAsync(context, cancellationToken);
-            var service = allServices.FirstOrDefault(s => s.Id == serviceId);
-            var basePrice = service?.BasePrice ?? 0m;
 
             var branchServices = await context.BranchServices
-                .Where(bs => bs.ServiceId == serviceId && bs.IsActive)
+                .Where(bs => cart.Contains(bs.ServiceId) && bs.IsActive)
                 .ToListAsync(cancellationToken);
 
-            var eligibleBranchIds = branchServices.Select(bs => bs.BranchId).ToHashSet();
+            var eligibleBranchIds = branchServices
+                .GroupBy(bs => bs.BranchId)
+                .Where(g => g.Select(bs => bs.ServiceId).Distinct().Count() == cart.Count)
+                .Select(g => g.Key)
+                .ToHashSet();
+
             var allBranches = await GetCachedBranchesAsync(context, cancellationToken);
 
             double userLat = session.Latitude ?? 0.0;
@@ -627,7 +681,7 @@ namespace Apenir.API.BackgroundServices
 
             if (!nearbyBranches.Any())
             {
-                await SendTextMessage(to, "❌ Sorry, no labs offering this test are within range of your location. Please choose another test.", httpClientFactory, configuration);
+                await SendTextMessage(to, "❌ Sorry, no labs offering all your selected tests are within range of your location. Please choose another test.", httpClientFactory, configuration);
                 session.CurrentState = WhatsAppState.Start;
                 await SaveSessionAsync(session, context, cancellationToken);
                 await SendGreeting(to, httpClientFactory, configuration);
@@ -638,16 +692,31 @@ namespace Apenir.API.BackgroundServices
             foreach (var item in nearbyBranches)
             {
                 var b = item.Branch;
-                var overridePrice = branchServices.FirstOrDefault(bs => bs.BranchId == b.Id)?.CustomPrice;
-                var displayPrice = overridePrice ?? basePrice;
+                var branchServicesForLab = branchServices.Where(bs => bs.BranchId == b.Id).ToList();
+
+                decimal totalDisplayPrice = 0m;
+                foreach (var bs in branchServicesForLab)
+                {
+                    var s = allServices.FirstOrDefault(srv => srv.Id == bs.ServiceId);
+                    if (s != null)
+                    {
+                        decimal itemPrice = bs.CustomPrice ?? s.BasePrice;
+                        decimal commissionPct = bs.CustomCommissionPct ?? s.PlatformCommissionPct;
+                        totalDisplayPrice += itemPrice + (itemPrice * (commissionPct / 100m));
+                    }
+                }
 
                 rows.Add(new
                 {
                     id          = b.Id,
                     title       = b.Name.Length > 24 ? b.Name[..24] : b.Name,
-                    description = $"{b.City} · {item.Distance:F1} km away · ₹{displayPrice}"
+                    description = $"{b.City} · {item.Distance:F1} km away · ₹{Math.Round(totalDisplayPrice)}"
                 });
             }
+
+            var firstServiceId = cart.FirstOrDefault() ?? string.Empty;
+            var firstService = allServices.FirstOrDefault(s => s.Id == firstServiceId);
+            var testLabel = cart.Count > 1 ? $"{cart.Count} selected tests" : (firstService?.Name ?? "diagnostic test");
 
             var payload = new
             {
@@ -658,7 +727,7 @@ namespace Apenir.API.BackgroundServices
                 {
                     type   = "list",
                     header = new { type = "text", text = "Available Labs" },
-                    body   = new { text  = $"Select a nearby lab for *{service?.Name ?? "the test"}*:" },
+                    body   = new { text  = $"Select a nearby lab for *{testLabel}*:" },
                     footer = new { text  = "NABL certified partners" },
                     action = new
                     {
@@ -882,6 +951,21 @@ namespace Apenir.API.BackgroundServices
             }
             decimal rate = branchService.CustomPrice ?? basePrice;
 
+            var travelFee = await Apenir.Application.Common.Helpers.PricingHelper.CalculateTravelFeeAsync(
+                context, session.SelectedLabId ?? string.Empty, session.Latitude ?? 0.0, session.Longitude ?? 0.0, cancellationToken);
+
+            session.TravelFee = travelFee;
+            context.WhatsAppSessions.Update(session);
+            await context.SaveChangesAsync(cancellationToken);
+
+            decimal totalLabServicePrice = rate + (session.MemberCount > 1
+                ? (session.MemberCount - 1) * rate * 0.8m
+                : 0m);
+
+            decimal commissionPct = branchService.CustomCommissionPct ?? (service?.PlatformCommissionPct ?? 15.00m);
+            decimal adminCommission = totalLabServicePrice * (commissionPct / 100m);
+            decimal customerPrice = totalLabServicePrice + adminCommission + travelFee;
+
             var allBranches = await GetCachedBranchesAsync(context, cancellationToken);
             var lab         = allBranches.FirstOrDefault(b => b.Id == session.SelectedLabId);
             var labName     = lab?.Name ?? session.SelectedLabName ?? "Lab";
@@ -889,9 +973,7 @@ namespace Apenir.API.BackgroundServices
             var user         = await context.Users.FirstOrDefaultAsync(u => u.Phone == to, cancellationToken);
             var customerName = user?.Name ?? "Customer";
 
-            int total = (int)rate + (session.MemberCount > 1
-                ? (int)Math.Round((session.MemberCount - 1) * rate * 0.8m)
-                : 0);
+            int total = (int)Math.Round(customerPrice);
 
             string paymentUrl = "https://rzp.io/i/example";
             try
@@ -1214,9 +1296,14 @@ namespace Apenir.API.BackgroundServices
                     bs.ServiceId == session.SelectedTestId &&
                     bs.IsActive, cancellationToken);
             decimal rate  = (branchService != null ? (branchService.CustomPrice ?? basePrice) : basePrice);
-            int     total = (int)rate + (session.MemberCount > 1
-                ? (int)Math.Round((session.MemberCount - 1) * rate * 0.8m)
-                : 0);
+            decimal totalLabServicePrice = rate + (session.MemberCount > 1
+                ? (session.MemberCount - 1) * rate * 0.8m
+                : 0m);
+
+            decimal commissionPct = (branchService != null ? (branchService.CustomCommissionPct ?? (service?.PlatformCommissionPct ?? 15.00m)) : (service?.PlatformCommissionPct ?? 15.00m));
+            decimal adminCommission = totalLabServicePrice * (commissionPct / 100m);
+            decimal travelFee = session.TravelFee ?? 0m;
+            decimal totalAmount = totalLabServicePrice + adminCommission + travelFee;
 
             return
                 $"📋 *Booking Summary*\n" +
@@ -1225,9 +1312,50 @@ namespace Apenir.API.BackgroundServices
                 (!string.IsNullOrEmpty(labAddress) ? $"📍 {labAddress}\n" : "") +
                 $"📅 Date & Time: {slotDisplay}\n" +
                 $"👥 {session.MemberCount} person{(session.MemberCount > 1 ? "s" : "")}\n" +
-                $"💰 Total: ₹{total}\n" +
+                $"💵 Service Price: ₹{Math.Round(totalLabServicePrice)}\n" +
+                $"💼 Platform Commission: ₹{Math.Round(adminCommission)}\n" +
+                (travelFee > 0 ? $"🚗 Scooter/Visit Charge: ₹{Math.Round(travelFee)}\n" : "") +
+                $"💰 Total Customer Price: ₹{Math.Round(totalAmount)}\n" +
                 $"🏠 Address: {session.BuildingDetails}\n" +
                 $"📍 Location: Shared ✓";
+        }
+
+        private async Task ShowServicesForSession(
+            string to,
+            WhatsAppSession session,
+            IApplicationDbContext context,
+            IHttpClientFactory httpClientFactory,
+            IConfiguration configuration,
+            CancellationToken cancellationToken)
+        {
+            var userLat = session.Latitude ?? 0.0;
+            var userLng = session.Longitude ?? 0.0;
+            var allBranches = await GetCachedBranchesAsync(context, cancellationToken);
+            var nearbyBranches = allBranches
+                .Where(b => b.IsActive)
+                .Select(b => new { Branch = b, Distance = CalculateDistanceKm(userLat, userLng, (double)b.Latitude, (double)b.Longitude) })
+                .Where(x => x.Distance <= x.Branch.ServiceRangeKm)
+                .ToList();
+
+            var nearbyBranchIds = nearbyBranches.Select(x => x.Branch.Id).ToHashSet();
+            var branchServices = await context.BranchServices
+                .Where(bs => bs.IsActive && nearbyBranchIds.Contains(bs.BranchId))
+                .Select(bs => bs.ServiceId)
+                .Distinct()
+                .ToListAsync(cancellationToken);
+
+            var allServices = await GetCachedServicesAsync(context, cancellationToken);
+            var availableServices = allServices
+                .Where(s => branchServices.Contains(s.Id))
+                .ToList();
+
+            if (!availableServices.Any())
+            {
+                await SendTextMessage(to, "❌ Sorry, no diagnostic services are available near your location.", httpClientFactory, configuration);
+                return;
+            }
+
+            await SendServiceListForNearby(to, availableServices, httpClientFactory, configuration);
         }
     }
 }

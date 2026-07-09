@@ -24,5 +24,8 @@ public interface IApplicationDbContext
     DbSet<RefreshToken> RefreshTokens { get; }
     DbSet<BranchInvite> BranchInvites { get; }
     DbSet<StaffInvite> StaffInvites { get; }
+    DbSet<PackageItem> PackageItems { get; }
+    DbSet<BranchTravelCharge> BranchTravelCharges { get; }
+    DbSet<Notification> Notifications { get; }
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
 }

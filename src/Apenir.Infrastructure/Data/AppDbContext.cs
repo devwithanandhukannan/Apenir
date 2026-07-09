@@ -26,6 +26,9 @@ public class AppDbContext : DbContext, IApplicationDbContext
     public DbSet<RefreshToken> RefreshTokens => Set<RefreshToken>();
     public DbSet<BranchInvite> BranchInvites => Set<BranchInvite>();
     public DbSet<StaffInvite> StaffInvites => Set<StaffInvite>();
+    public DbSet<PackageItem> PackageItems => Set<PackageItem>();
+    public DbSet<BranchTravelCharge> BranchTravelCharges => Set<BranchTravelCharge>();
+    public DbSet<Notification> Notifications => Set<Notification>();
 
     public AppDbContext(DbContextOptions<AppDbContext> options) : base(options)
     {
@@ -54,6 +57,9 @@ public class AppDbContext : DbContext, IApplicationDbContext
         modelBuilder.Entity<RefreshToken>().ToCollection("refresh_tokens");
         modelBuilder.Entity<BranchInvite>().ToCollection("branch_invites");
         modelBuilder.Entity<StaffInvite>().ToCollection("staff_invites");
+        modelBuilder.Entity<PackageItem>().ToCollection("package_items");
+        modelBuilder.Entity<BranchTravelCharge>().ToCollection("branch_travel_charges");
+        modelBuilder.Entity<Notification>().ToCollection("notifications");
 
         modelBuilder.Entity<User>().HasIndex(u => u.Email).IsUnique();
         modelBuilder.Entity<User>().HasIndex(u => u.Phone).IsUnique();

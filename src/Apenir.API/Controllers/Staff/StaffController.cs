@@ -193,7 +193,11 @@ public class StaffController : ControllerBase
         // Notify WhatsApp
         if (appointment.CustomerUser != null && !string.IsNullOrEmpty(appointment.CustomerUser.Phone))
         {
-            var waMessage = $"✅ *Passcode Verified!*\n\nDiagnostic samples for {appointment.MemberCount} member(s) have been collected successfully. We are transporting them to the lab.";
+            var staffUser = await _context.Users.AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+            var staffName = staffUser?.Name ?? "Our Phlebotomist";
+
+            var waMessage = $"✅ *Passcode Verified!*\n\nPhlebotomist *{staffName}* is a verified and trusted representative of Apenir. Diagnostic samples for {appointment.MemberCount} member(s) have been collected successfully and are on their way to the lab.";
             await _whatsAppService.SendTextMessageAsync(appointment.CustomerUser.Phone, waMessage);
         }
 
@@ -261,7 +265,7 @@ public class StaffController : ControllerBase
             _context.AppointmentMembers.RemoveRange(existingMembers);
         }
 
-        var newMembers = request.Members.Select(m => new AppointmentMember
+        var newMembers = request.Members.Select((m, index) => new AppointmentMember
         {
             Id = Guid.NewGuid().ToString(),
             AppointmentId = appointment.Id,
@@ -269,13 +273,174 @@ public class StaffController : ControllerBase
             Age = m.Age,
             Gender = Enum.TryParse<Gender>(m.Gender, true, out var genderEnum) ? genderEnum : Gender.Other,
             Relationship = m.Relationship ?? "Self",
-            AdditionalNotes = m.AdditionalNotes
+            AdditionalNotes = m.AdditionalNotes,
+            UniqueSampleId = $"{appointment.AppointmentNumber}-M{index + 1}"
         }).ToList();
 
         await _context.AppointmentMembers.AddRangeAsync(newMembers, cancellationToken);
         await _context.SaveChangesAsync(cancellationToken);
 
         return Ok(ApiResponse.SuccessResult("Member details saved successfully."));
+    }
+
+    [HttpPost("appointments/walkin")]
+    [EndpointSummary("Create a walk-in onsite appointment and register members")]
+    [EndpointDescription("Registers a new customer profile (if new), creates a booking, adds members, and returns auto-generated sample IDs.")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<WalkinBookingResult>))]
+    public async Task<IActionResult> CreateWalkinBooking(
+        [FromBody] CreateWalkinBookingRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request == null || string.IsNullOrWhiteSpace(request.Phone) || string.IsNullOrWhiteSpace(request.ServiceId))
+        {
+            return BadRequest(ApiResponse.FailureResult("Phone, ServiceId, and member details are required."));
+        }
+
+        var currentUserId = _currentUserService.UserId?.ToString();
+        var staffUser = await _context.Users.FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+        if (staffUser == null || string.IsNullOrEmpty(staffUser.LabId))
+        {
+            return BadRequest(ApiResponse.FailureResult("Staff member is not assigned to any lab."));
+        }
+
+        // Get the branch associated with staff's LabId
+        var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabId == staffUser.LabId, cancellationToken);
+        if (branch == null)
+        {
+            return NotFound(ApiResponse.FailureResult("Associated lab branch not found."));
+        }
+
+        // Find or create customer
+        var lowercasePhone = request.Phone.Trim();
+        var customerUser = await _context.Users.FirstOrDefaultAsync(u => u.Phone == lowercasePhone, cancellationToken);
+        if (customerUser == null)
+        {
+            customerUser = new User
+            {
+                Id = Guid.NewGuid().ToString(),
+                Name = request.CustomerName?.Trim() ?? "Walkin User",
+                Phone = lowercasePhone,
+                Role = UserRole.Customer,
+                IsActive = true,
+                CreatedAt = DateTime.UtcNow
+            };
+            _context.Users.Add(customerUser);
+
+            var customer = new Customer
+            {
+                Id = Guid.NewGuid().ToString(),
+                UserId = customerUser.Id,
+                Phone = lowercasePhone,
+                Name = customerUser.Name
+            };
+            _context.Customers.Add(customer);
+            await _context.SaveChangesAsync(cancellationToken);
+        }
+
+        // Fetch Service & slot
+        var service = await _context.Services.FirstOrDefaultAsync(s => s.Id == request.ServiceId, cancellationToken);
+        if (service == null)
+        {
+            return NotFound(ApiResponse.FailureResult("Service not found."));
+        }
+
+        var branchService = await _context.BranchServices
+            .FirstOrDefaultAsync(bs => bs.BranchId == branch.Id && bs.ServiceId == service.Id && bs.IsActive, cancellationToken);
+        if (branchService == null)
+        {
+            return BadRequest(ApiResponse.FailureResult("This service is not active at the branch."));
+        }
+
+        var memberCount = request.Members.Count > 0 ? request.Members.Count : 1;
+
+        // Pricing
+        decimal rate = branchService.CustomPrice ?? service.BasePrice;
+        decimal totalLabServicePrice = rate + (memberCount > 1 ? (memberCount - 1) * rate * 0.8m : 0m);
+        decimal commissionPct = branchService.CustomCommissionPct ?? service.PlatformCommissionPct;
+        decimal adminCommission = totalLabServicePrice * (commissionPct / 100m);
+        decimal customerPrice = totalLabServicePrice + adminCommission; // Walkin onsite has no travel charge
+
+        var bookingId = $"BK-W-{DateTime.UtcNow:yyyyMMdd}-{new Random().Next(1000, 9999)}";
+        var appointment = new Appointment
+        {
+            Id = Guid.NewGuid().ToString(),
+            AppointmentNumber = bookingId,
+            CustomerUserId = customerUser.Id,
+            BranchId = branch.Id,
+            AssignedStaffId = currentUserId,
+            Status = AppointmentStatus.Collected, // Instantly collected
+            TotalAmount = customerPrice,
+            PlatformCommission = adminCommission,
+            LabPayout = totalLabServicePrice,
+            LocationLatitude = branch.Latitude,
+            LocationLongitude = branch.Longitude,
+            LocationAddress = "On-site Walkin at Lab",
+            Passcode = "0000",
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+            MemberCount = memberCount
+        };
+
+        _context.Appointments.Add(appointment);
+
+        var memberResults = new List<WalkinMemberDto>();
+        for (int i = 0; i < memberCount; i++)
+        {
+            var m = request.Members[i];
+            var uniqueSampleId = $"{bookingId}-M{i + 1}";
+            var member = new AppointmentMember
+            {
+                Id = Guid.NewGuid().ToString(),
+                AppointmentId = appointment.Id,
+                MemberName = m.Name,
+                Age = m.Age,
+                Gender = Enum.TryParse<Gender>(m.Gender, true, out var genderEnum) ? genderEnum : Gender.Other,
+                Relationship = m.Relationship ?? "Self",
+                UniqueSampleId = uniqueSampleId
+            };
+            _context.AppointmentMembers.Add(member);
+
+            memberResults.Add(new WalkinMemberDto
+            {
+                MemberId = member.Id,
+                Name = member.MemberName,
+                UniqueSampleId = uniqueSampleId
+            });
+        }
+
+        // Add payment record as Created (pending pay on desk)
+        var payment = new Payment
+        {
+            Id = Guid.NewGuid().ToString(),
+            AppointmentId = appointment.Id,
+            RazorpayOrderId = $"walkin_{bookingId}",
+            RazorpayPaymentId = $"walkin_pay_{bookingId}",
+            Status = PaymentStatus.Created,
+            CreatedAt = DateTime.UtcNow
+        };
+        _context.Payments.Add(payment);
+
+        await _context.SaveChangesAsync(cancellationToken);
+
+        // Send a WhatsApp trusted phlebotomist registration summary to the Customer
+        var staffName = staffUser.Name ?? "Our Phlebotomist";
+        var welcomeMsg = $"🧬 *On-site Booking Registered!*\n\n" +
+                         $"Booking ID: *{bookingId}*\n" +
+                         $"Service: {service.Name}\n" +
+                         $"Phlebotomist: {staffName}\n" +
+                         $"Patient count: {memberCount}\n\n" +
+                         $"Please make payment at the billing desk. Passcode/OTP validation completed.";
+        await _whatsAppService.SendTextMessageAsync(customerUser.Phone, welcomeMsg);
+
+        var result = new WalkinBookingResult
+        {
+            AppointmentId = appointment.Id,
+            BookingNumber = bookingId,
+            TotalAmount = customerPrice,
+            Members = memberResults
+        };
+
+        return Ok(ApiResponse<WalkinBookingResult>.SuccessResult(result, "Walk-in onsite booking completed."));
     }
 }
 
@@ -336,4 +501,35 @@ public class AppointmentMemberDto
     public string Gender { get; set; } = string.Empty;
     public string? Relationship { get; set; }
     public string? AdditionalNotes { get; set; }
+}
+
+public class CreateWalkinBookingRequest
+{
+    public string Phone { get; set; } = string.Empty;
+    public string? CustomerName { get; set; }
+    public string ServiceId { get; set; } = string.Empty;
+    public List<WalkinMemberInput> Members { get; set; } = new();
+}
+
+public class WalkinMemberInput
+{
+    public string Name { get; set; } = string.Empty;
+    public int Age { get; set; }
+    public string Gender { get; set; } = string.Empty;
+    public string? Relationship { get; set; }
+}
+
+public class WalkinBookingResult
+{
+    public string AppointmentId { get; set; } = string.Empty;
+    public string BookingNumber { get; set; } = string.Empty;
+    public decimal TotalAmount { get; set; }
+    public List<WalkinMemberDto> Members { get; set; } = new();
+}
+
+public class WalkinMemberDto
+{
+    public string MemberId { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string UniqueSampleId { get; set; } = string.Empty;
 }

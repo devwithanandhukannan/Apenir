@@ -207,18 +207,40 @@ public class RazorpayWebhookController : ControllerBase
         }
 
         // Calculate Pricing
-        var basePrice = service?.BasePrice ?? 0m;
-        var branchService = await _context.BranchServices
-            .FirstOrDefaultAsync(bs => bs.BranchId == labId && bs.ServiceId == testId && bs.IsActive, cancellationToken);
-        if (branchService == null)
+        var testIds = (testId ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries).ToList();
+        var allServices = await _context.Services.AsNoTracking().ToListAsync(cancellationToken);
+        var services = allServices.Where(s => testIds.Contains(s.Id)).ToList();
+        if (!services.Any())
         {
-            throw new Exception("Service is not active or available at the selected branch.");
+            throw new Exception("No active services matched in the booking request.");
         }
-        decimal rate = branchService.CustomPrice ?? basePrice;
 
-        int total = (int)rate + (memberCount > 1
-            ? (int)Math.Round((memberCount - 1) * rate * 0.8m)
-            : 0);
+        var travelFee = await Apenir.Application.Common.Helpers.PricingHelper.CalculateTravelFeeAsync(
+            _context, labId, (double)latitude, (double)longitude, cancellationToken);
+
+        decimal totalLabServicePrice = 0m;
+        decimal totalAdminCommission = 0m;
+
+        foreach (var srv in services)
+        {
+            var branchService = await _context.BranchServices
+                .FirstOrDefaultAsync(bs => bs.BranchId == labId && bs.ServiceId == srv.Id && bs.IsActive, cancellationToken);
+            if (branchService == null)
+            {
+                throw new Exception($"Service {srv.Name} is not active or available at the selected branch.");
+            }
+
+            decimal rate = branchService.CustomPrice ?? srv.BasePrice;
+            decimal servicePrice = rate + (memberCount > 1 ? (memberCount - 1) * rate * 0.8m : 0m);
+            decimal commissionPct = branchService.CustomCommissionPct ?? srv.PlatformCommissionPct;
+            decimal adminCommission = servicePrice * (commissionPct / 100m);
+
+            totalLabServicePrice += servicePrice;
+            totalAdminCommission += adminCommission;
+        }
+
+        decimal customerPrice = totalLabServicePrice + totalAdminCommission + travelFee;
+        decimal labPayout = totalLabServicePrice + travelFee;
 
         // 3. Update Slot
         slot.BookedCount += memberCount;
@@ -245,11 +267,12 @@ public class RazorpayWebhookController : ControllerBase
             Landmark = landmark,
             Passcode = new Random().Next(1000, 9999).ToString(),
             Status = AppointmentStatus.Confirmed,
-            TotalAmount = total,
-            PlatformCommission = total * (((branchService != null && branchService.CustomCommissionPct.HasValue) ? branchService.CustomCommissionPct.Value : (service != null ? service.PlatformCommissionPct : 15.00m)) / 100m),
-            LabPayout = total * (1m - ((branchService != null && branchService.CustomCommissionPct.HasValue) ? branchService.CustomCommissionPct.Value : (service != null ? service.PlatformCommissionPct : 15.00m)) / 100m),
+            TotalAmount = customerPrice,
+            PlatformCommission = totalAdminCommission,
+            LabPayout = labPayout,
             CreatedAt = DateTime.UtcNow,
-            MemberCount = memberCount
+            MemberCount = memberCount,
+            ServiceIds = testId
         };
         _context.Appointments.Add(appointment);
 
@@ -323,7 +346,7 @@ public class RazorpayWebhookController : ControllerBase
             $"🏥 Lab: {lab?.Name ?? "Selected Lab"}\n" +
             $"📅 Date & Time: {slotDisplay}\n" +
             $"👥 Persons: {memberCount}\n" +
-            $"💰 Amount Paid: ₹{total}\n" +
+            $"💰 Amount Paid: ₹{Math.Round(customerPrice)}\n" +
             $"🔑 Passcode/OTP: *{appointment.Passcode}*\n\n" +
             $"🧪 *Instructions:*\n" +
             $"• Fast for 8-10 hours prior to sample collection.\n" +

@@ -56,6 +56,10 @@ public class Branch
     [StringLength(20)]
     public string? NotificationPhone { get; set; }
 
+    public string? AddressDetails { get; set; }
+
+    public string? WorkingDaysConfig { get; set; } // JSON configuration for working hours and operating days
+
     [Required]
     [StringLength(36)]
     public string CreatedBy { get; set; } = string.Empty;

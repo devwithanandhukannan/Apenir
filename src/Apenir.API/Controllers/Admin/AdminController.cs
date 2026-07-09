@@ -750,6 +750,147 @@ namespace Apenir.API.Controllers.Admin
             return Ok(ApiResponse<PaginatedList<Payroll>>.SuccessResult(response, "PAYROLLS_RETRIEVED"));
         }
 
+        [HttpPost("finance/batches/generate")]
+        [EndpointSummary("Generate a new payment/payout batch for a branch and date range")]
+        [EndpointDescription("Finds all completed, unpaid appointments for the branch in the date range, and creates a PaymentBatch.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<PaymentBatch>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GeneratePaymentBatch(
+            [FromBody] GeneratePaymentBatchRequest request,
+            CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.BranchId) || request.StartDate == default || request.EndDate == default)
+            {
+                return BadRequest(ApiResponse.FailureResult("BranchId, StartDate, and EndDate are required."));
+            }
+
+            var branch = await _context.Branches.AsNoTracking().FirstOrDefaultAsync(b => b.Id == request.BranchId, cancellationToken);
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            // Get already batched appointments
+            var batchedAppointmentIds = await _context.PaymentBatches.AsNoTracking()
+                .SelectMany(pb => pb.AppointmentIds)
+                .ToListAsync(cancellationToken);
+
+            var startDateTime = request.StartDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
+            var endDateTime = request.EndDate.ToDateTime(TimeOnly.MaxValue, DateTimeKind.Utc);
+
+            // Fetch completed, paid, unbatched appointments
+            var appointments = await _context.Appointments
+                .Where(a => a.BranchId == request.BranchId &&
+                            a.Status == AppointmentStatus.Completed &&
+                            a.CreatedAt >= startDateTime &&
+                            a.CreatedAt <= endDateTime &&
+                            !batchedAppointmentIds.Contains(a.Id))
+                .ToListAsync(cancellationToken);
+
+            if (!appointments.Any())
+            {
+                return BadRequest(ApiResponse.FailureResult("No unbatched completed appointments found in the specified date range."));
+            }
+
+            // Create batch
+            var appointmentIds = appointments.Select(a => a.Id).ToList();
+            
+            // Look up payments for these appointments
+            var payments = await _context.Payments
+                .Where(p => appointmentIds.Contains(p.AppointmentId))
+                .ToListAsync(cancellationToken);
+            var paymentIds = payments.Select(p => p.Id).ToList();
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+
+            var batch = new PaymentBatch
+            {
+                Id = Guid.NewGuid().ToString(),
+                BranchId = request.BranchId,
+                PaymentIds = paymentIds,
+                AppointmentIds = appointmentIds,
+                PaymentCount = appointmentIds.Count,
+                TotalGrossAmount = appointments.Sum(a => a.TotalAmount),
+                TotalPlatformCommission = appointments.Sum(a => a.PlatformCommission),
+                TotalNetPayout = appointments.Sum(a => a.LabPayout),
+                Status = PaymentBatchStatus.Initiated,
+                Notes = request.Notes,
+                CreatedBy = currentUserId,
+                CreatedAt = DateTime.UtcNow
+            };
+
+            _context.PaymentBatches.Add(batch);
+
+            // Also create matching Payroll record (legacy sync)
+            var payroll = new Payroll
+            {
+                Id = batch.Id, // Sync IDs
+                BranchId = request.BranchId,
+                PeriodType = "Custom",
+                PeriodStart = request.StartDate,
+                PeriodEnd = request.EndDate,
+                GrossAmount = batch.TotalGrossAmount,
+                PlatformCommission = batch.TotalPlatformCommission,
+                NetPayout = batch.TotalNetPayout,
+                Status = PayrollStatus.Pending,
+                CreatedAt = DateTime.UtcNow
+            };
+            _context.Payrolls.Add(payroll);
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse<PaymentBatch>.SuccessResult(batch, "Payment batch generated successfully."));
+        }
+
+        [HttpPost("finance/batches/{id}/settle")]
+        [EndpointSummary("Settle a payment batch")]
+        [EndpointDescription("Marks the payment batch as Settled and updates the corresponding Payroll record and payments.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> SettlePaymentBatch(
+            [FromRoute] string id,
+            [FromBody] SettlePaymentBatchRequest request,
+            CancellationToken cancellationToken)
+        {
+            var batch = await _context.PaymentBatches.FirstOrDefaultAsync(pb => pb.Id == id, cancellationToken);
+            if (batch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Payment batch not found."));
+            }
+
+            if (batch.Status == PaymentBatchStatus.Settled)
+            {
+                return BadRequest(ApiResponse.FailureResult("Payment batch is already settled."));
+            }
+
+            batch.Status = PaymentBatchStatus.Settled;
+            batch.Notes = !string.IsNullOrWhiteSpace(request?.Notes) ? request.Notes : batch.Notes;
+
+            // Update matching Payroll record if exists
+            var payroll = await _context.Payrolls.FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
+            if (payroll != null)
+            {
+                payroll.Status = PayrollStatus.Settled;
+                payroll.SettledAt = DateTime.UtcNow;
+                payroll.RazorpayTransferId = request?.RazorpayTransferId;
+                _context.Payrolls.Update(payroll);
+            }
+
+            // Mark underlying payments as Settled or update their notes
+            var payments = await _context.Payments
+                .Where(p => batch.PaymentIds.Contains(p.Id))
+                .ToListAsync(cancellationToken);
+            foreach (var p in payments)
+            {
+                p.Status = PaymentStatus.Paid; // Settled successfully
+                _context.Payments.Update(p);
+            }
+
+            _context.PaymentBatches.Update(batch);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Payment batch settled successfully."));
+        }
+
         [HttpPost("customers")]
         [EndpointSummary("Search and Filter Customers with Pagination")]
         [EndpointDescription("Returns a paginated list of customers (UserRole = Customer) matching optional filters.")]
@@ -1543,4 +1684,17 @@ namespace Apenir.API.Controllers.Admin
         public int ActiveSlotsCount { get; set; }
     }
 
+    public class GeneratePaymentBatchRequest
+    {
+        public string BranchId { get; set; } = string.Empty;
+        public DateOnly StartDate { get; set; }
+        public DateOnly EndDate { get; set; }
+        public string? Notes { get; set; }
+    }
+
+    public class SettlePaymentBatchRequest
+    {
+        public string? Notes { get; set; }
+        public string? RazorpayTransferId { get; set; }
+    }
 }

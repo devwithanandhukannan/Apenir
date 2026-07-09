@@ -33,6 +33,9 @@ public class AppointmentMember
 
     public string? AdditionalNotes { get; set; }
 
+    [StringLength(100)]
+    public string? UniqueSampleId { get; set; }
+
     // Navigation properties
     [ForeignKey(nameof(AppointmentId))]
     public virtual Appointment? Appointment { get; set; }

@@ -77,6 +77,9 @@ public class Appointment
     [StringLength(500)]
     public string? ReportPdfPath { get; set; }
 
+    [StringLength(500)]
+    public string ServiceIds { get; set; } = string.Empty;
+
     // Navigation properties
     [ForeignKey(nameof(CustomerUserId))]
     public virtual User? CustomerUser { get; set; }
