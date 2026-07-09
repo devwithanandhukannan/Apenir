@@ -12,6 +12,8 @@ public class AppDbContext : DbContext, IApplicationDbContext
     public DbSet<Branch> Branches => Set<Branch>();
     public DbSet<Service> Services => Set<Service>();
     public DbSet<BranchService> BranchServices => Set<BranchService>();
+    public DbSet<Package> Packages => Set<Package>();
+    public DbSet<BranchPackage> BranchPackages => Set<BranchPackage>();
     public DbSet<BranchSlotConfiguration> BranchSlotConfigurations => Set<BranchSlotConfiguration>();
     public DbSet<AppointmentSlot> AppointmentSlots => Set<AppointmentSlot>();
     public DbSet<Appointment> Appointments => Set<Appointment>();
@@ -40,6 +42,8 @@ public class AppDbContext : DbContext, IApplicationDbContext
         modelBuilder.Entity<Branch>().ToCollection("branches");
         modelBuilder.Entity<Service>().ToCollection("services");
         modelBuilder.Entity<BranchService>().ToCollection("branch_services");
+        modelBuilder.Entity<Package>().ToCollection("packages");
+        modelBuilder.Entity<BranchPackage>().ToCollection("branch_packages");
         modelBuilder.Entity<BranchSlotConfiguration>().ToCollection("branch_slot_configurations");
         modelBuilder.Entity<AppointmentSlot>().ToCollection("appointment_slots");
         modelBuilder.Entity<Appointment>().ToCollection("appointments");
