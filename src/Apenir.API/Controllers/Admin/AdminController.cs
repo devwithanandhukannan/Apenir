@@ -1229,36 +1229,51 @@ namespace Apenir.API.Controllers.Admin
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<FinanceInsightsResponse>))]
         public async Task<IActionResult> GetFinanceInsights(CancellationToken cancellationToken)
         {
-            var totalInbound = await _context.Payments.AsNoTracking()
+            // Load all paid payments with their appointments into memory.
+            // MongoDB EF Core provider cannot translate Include() + SumAsync()
+            // with navigation property projections server-side.
+            var allPaidPayments = await _context.Payments.AsNoTracking()
                 .Where(p => p.Status == PaymentStatus.Paid)
-                .Include(p => p.Appointment)
-                .SumAsync(p => p.Appointment != null ? p.Appointment.TotalAmount : 0, cancellationToken);
+                .ToListAsync(cancellationToken);
 
-            var totalOutbound = await _context.Payrolls.AsNoTracking()
+            // Resolve appointment navigation for paid payments
+            var appointmentIds = allPaidPayments.Select(p => p.AppointmentId).Distinct().ToList();
+            var appointments = await _context.Appointments.AsNoTracking()
+                .Where(a => appointmentIds.Contains(a.Id))
+                .ToListAsync(cancellationToken);
+            var appointmentsDict = appointments.ToDictionary(a => a.Id);
+            foreach (var p in allPaidPayments)
+            {
+                if (appointmentsDict.TryGetValue(p.AppointmentId, out var appt))
+                {
+                    p.Appointment = appt;
+                }
+            }
+
+            var totalInbound = allPaidPayments.Sum(p => p.Appointment?.TotalAmount ?? 0);
+
+            var settledPayrolls = await _context.Payrolls.AsNoTracking()
                 .Where(pr => pr.Status == PayrollStatus.Settled)
-                .SumAsync(pr => pr.NetPayout, cancellationToken);
+                .ToListAsync(cancellationToken);
+            var totalOutbound = settledPayrolls.Sum(pr => pr.NetPayout);
 
-            var totalProfit = await _context.Payments.AsNoTracking()
-                .Where(p => p.Status == PaymentStatus.Paid)
-                .Include(p => p.Appointment)
-                .SumAsync(p => p.Appointment != null ? p.Appointment.PlatformCommission : 0, cancellationToken);
+            var totalProfit = allPaidPayments.Sum(p => p.Appointment?.PlatformCommission ?? 0);
 
-            var totalTransactions = await _context.Payments.AsNoTracking()
-                .CountAsync(p => p.Status == PaymentStatus.Paid, cancellationToken);
+            var totalTransactions = allPaidPayments.Count;
 
-            var pendingPayouts = await _context.Payrolls.AsNoTracking()
+            var pendingPayrollsList = await _context.Payrolls.AsNoTracking()
                 .Where(pr => pr.Status == PayrollStatus.Pending)
-                .SumAsync(pr => pr.NetPayout, cancellationToken);
+                .ToListAsync(cancellationToken);
+            var pendingPayouts = pendingPayrollsList.Sum(pr => pr.NetPayout);
 
             var lastSixMonths = DateTime.UtcNow.AddMonths(-6);
-            var paymentsLastSixMonths = await _context.Payments.AsNoTracking()
-                .Where(p => p.Status == PaymentStatus.Paid && p.CreatedAt >= lastSixMonths)
-                .Include(p => p.Appointment)
-                .ToListAsync(cancellationToken);
+            var paymentsLastSixMonths = allPaidPayments
+                .Where(p => p.CreatedAt >= lastSixMonths)
+                .ToList();
 
-            var payrollsLastSixMonths = await _context.Payrolls.AsNoTracking()
-                .Where(pr => pr.Status == PayrollStatus.Settled && pr.CreatedAt >= lastSixMonths)
-                .ToListAsync(cancellationToken);
+            var payrollsLastSixMonths = settledPayrolls
+                .Where(pr => pr.CreatedAt >= lastSixMonths)
+                .ToList();
 
             var monthlyTrendsList = new List<MonthlyTrendDto>();
             for (int i = 5; i >= 0; i--)
@@ -1287,10 +1302,7 @@ namespace Apenir.API.Controllers.Admin
                 });
             }
 
-            var paymentsByMethod = await _context.Payments.AsNoTracking()
-                .Where(p => p.Status == PaymentStatus.Paid)
-                .Include(p => p.Appointment)
-                .ToListAsync(cancellationToken);
+            var paymentsByMethod = allPaidPayments;
 
             var totalInboundForShare = paymentsByMethod.Sum(p => p.Appointment?.TotalAmount ?? 0);
 
