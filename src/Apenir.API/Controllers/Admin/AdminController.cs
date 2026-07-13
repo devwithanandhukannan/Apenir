@@ -563,7 +563,48 @@ namespace Apenir.API.Controllers.Admin
             return Ok(ApiResponse<List<AdminBranchServiceDto>>.SuccessResult(result, "Branch services retrieved successfully."));
         }
 
+        [HttpPut("services/{id}")]
+        [EndpointSummary("Admin: update any service (platform or lab-custom)")]
+        [EndpointDescription("Admin can edit name, description, category, base price, commission %, and active status for any service. Inactive services are hidden from lab portals.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> AdminUpdateService(
+            [FromRoute] string id,
+            [FromBody] AdminUpdateServiceRequest request,
+            CancellationToken cancellationToken)
+        {
+            var service = await _context.Services.FirstOrDefaultAsync(s => s.Id == id, cancellationToken);
+            if (service == null)
+                return NotFound(ApiResponse.FailureResult("Service not found."));
+
+            if (!string.IsNullOrWhiteSpace(request.Name))
+                service.Name = request.Name.Trim();
+
+            if (request.Description != null)
+                service.Description = request.Description.Trim();
+
+            if (!string.IsNullOrWhiteSpace(request.Category))
+                service.Category = request.Category.Trim();
+
+            if (request.BasePrice.HasValue && request.BasePrice.Value >= 0)
+                service.BasePrice = request.BasePrice.Value;
+
+            if (request.PlatformCommissionPct.HasValue &&
+                request.PlatformCommissionPct.Value >= 0 &&
+                request.PlatformCommissionPct.Value <= 100)
+                service.PlatformCommissionPct = request.PlatformCommissionPct.Value;
+
+            if (request.IsActive.HasValue)
+                service.IsActive = request.IsActive.Value;
+
+            _context.Services.Update(service);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Service updated successfully."));
+        }
+
         [HttpPut("branches/{branchId}/services/{serviceId}/commission")]
+
         [EndpointSummary("Update custom commission percentage for a specific branch service")]
         [EndpointDescription("Allows administrators to customize or increase the commission/interest percentage for a specific branch service.")]
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
@@ -1464,6 +1505,15 @@ namespace Apenir.API.Controllers.Admin
         decimal? CustomPrice,
         decimal? CustomCommissionPct,
         bool IsActive
+    );
+
+    public record AdminUpdateServiceRequest(
+        string? Name,
+        string? Description,
+        string? Category,
+        decimal? BasePrice,
+        decimal? PlatformCommissionPct,
+        bool? IsActive
     );
 
     public record UpdateBranchCommissionRequest(
