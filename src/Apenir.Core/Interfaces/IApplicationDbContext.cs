@@ -10,6 +10,8 @@ public interface IApplicationDbContext
     DbSet<Branch> Branches { get; }
     DbSet<Service> Services { get; }
     DbSet<BranchService> BranchServices { get; }
+    DbSet<Package> Packages { get; }
+    DbSet<BranchPackage> BranchPackages { get; }
     DbSet<BranchSlotConfiguration> BranchSlotConfigurations { get; }
     DbSet<AppointmentSlot> AppointmentSlots { get; }
     DbSet<Appointment> Appointments { get; }
