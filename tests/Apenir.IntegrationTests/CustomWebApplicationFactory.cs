@@ -25,7 +25,7 @@ namespace Apenir.IntegrationTests
                 services.Replace(ServiceDescriptor.Scoped<IRefreshTokenRepository>(_ => RefreshTokenRepoMock.Object));
                 
                 // Replace seeder with a mock that does nothing to bypass MongoDB connection checks
-                services.Replace(ServiceDescriptor.Scoped<Apenir.Infrastructure.Services.IDatabaseSeeder>(_ => Mock.Of<Apenir.Infrastructure.Services.IDatabaseSeeder>()));
+                // services.Replace(ServiceDescriptor.Scoped<Apenir.Infrastructure.Services.IDatabaseSeeder>(_ => Mock.Of<Apenir.Infrastructure.Services.IDatabaseSeeder>()));
             });
         }
     }

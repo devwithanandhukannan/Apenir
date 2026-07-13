@@ -123,16 +123,26 @@ using (var scope = app.Services.CreateScope())
     var passwordHasher = scope.ServiceProvider.GetRequiredService<IPasswordHasher>();
     var config = scope.ServiceProvider.GetRequiredService<IConfiguration>();
 
-    var hasAdmin = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.AnyAsync(
-        context.Users.Where(u => u.Role == UserRole.SuperAdmin));
+    var defaultEmail = config["AdminSettings:DefaultEmail"] ?? "admin@gmail.com";
+    var defaultPass = config["AdminSettings:DefaultPassword"] ?? "admin@123";
+    var defaultName = config["AdminSettings:DefaultFullName"] ?? "Super Admin";
 
-    if (!hasAdmin)
+    // 1. Remove all other SuperAdmin accounts to clean obsolete seed admin accounts
+    var otherAdmins = context.Users.Where(u => u.Role == UserRole.SuperAdmin && u.Email != defaultEmail).ToList();
+    if (otherAdmins.Any())
     {
-        var defaultEmail = config["AdminSettings:DefaultEmail"] ?? "admin@gmail.com";
-        var defaultPass = config["AdminSettings:DefaultPassword"] ?? "admin@123";
-        var defaultName = config["AdminSettings:DefaultFullName"] ?? "Super Admin";
+        context.Users.RemoveRange(otherAdmins);
+        await context.SaveChangesAsync();
+        Console.WriteLine($"[DB INITIALIZATION] Removed {otherAdmins.Count} obsolete SuperAdmin accounts.");
+    }
 
-        var adminUser = new User
+    // 2. Find or seed the configured admin user
+    var adminUser = await Microsoft.EntityFrameworkCore.EntityFrameworkQueryableExtensions.FirstOrDefaultAsync(
+        context.Users.Where(u => u.Email == defaultEmail));
+
+    if (adminUser == null)
+    {
+        adminUser = new User
         {
             Id = Guid.NewGuid().ToString(),
             Name = defaultName,
@@ -149,6 +159,33 @@ using (var scope = app.Services.CreateScope())
         context.Users.Add(adminUser);
         await context.SaveChangesAsync();
         Console.WriteLine($"[DB INITIALIZATION] Default Admin user created: Email={defaultEmail}");
+    }
+    else
+    {
+        bool updated = false;
+
+        if (adminUser.Role != UserRole.SuperAdmin)
+        {
+            adminUser.Role = UserRole.SuperAdmin;
+            updated = true;
+        }
+        if (adminUser.Name != defaultName)
+        {
+            adminUser.Name = defaultName;
+            updated = true;
+        }
+        // Verify password: if verification fails, update hash
+        if (!passwordHasher.Verify(adminUser.PasswordHash, defaultPass))
+        {
+            adminUser.PasswordHash = passwordHasher.Hash(defaultPass);
+            updated = true;
+        }
+
+        if (updated)
+        {
+            await context.SaveChangesAsync();
+            Console.WriteLine($"[DB INITIALIZATION] Default Admin user details updated to match appsettings.json: Email={defaultEmail}");
+        }
     }
 }
 

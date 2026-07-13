@@ -410,6 +410,47 @@ namespace Apenir.API.Controllers.Admin
             return await GetUsersByRole(UserRole.Lab, request, cancellationToken);
         }
 
+        [HttpPut("labs/{labId}/status")]
+        [EndpointSummary("Update active status of a lab/branch account")]
+        [EndpointDescription("Allows administrators to activate or deactivate a lab branch account.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> UpdateLabStatus(
+            [FromRoute] string labId,
+            [FromBody] UpdateLabStatusRequest request,
+            CancellationToken cancellationToken)
+        {
+            if (request == null)
+            {
+                return BadRequest(ApiResponse.FailureResult("Request body is required."));
+            }
+
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == labId, cancellationToken);
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            branch.IsActive = request.IsActive;
+            branch.Status = request.IsActive ? "Active" : "Inactive";
+            _context.Branches.Update(branch);
+
+            if (!string.IsNullOrEmpty(branch.LabUserId))
+            {
+                var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == branch.LabUserId, cancellationToken);
+                if (user != null)
+                {
+                    user.IsActive = request.IsActive;
+                    user.Status = request.IsActive ? "Active" : "Inactive";
+                    _context.Users.Update(user);
+                }
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+            return Ok(ApiResponse.SuccessResult($"Branch account status updated to {(request.IsActive ? "Active" : "Inactive")} successfully."));
+        }
+
         private async Task<IActionResult> GetUsersByRole(UserRole role, SearchUsersRequest? request, CancellationToken cancellationToken)
         {
             var query = _context.Users.AsNoTracking().Where(u => u.Role == role && !u.IsDeleted);
@@ -1508,6 +1549,10 @@ namespace Apenir.API.Controllers.Admin
         DateOnly? EndDate,
         int PageNumber = 1,
         int RowsPerPage = 10
+    );
+
+    public record UpdateLabStatusRequest(
+        bool IsActive
     );
 
 

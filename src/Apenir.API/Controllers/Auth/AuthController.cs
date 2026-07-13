@@ -10,6 +10,10 @@ using Apenir.Application.DTOs;
 using Apenir.Application.Features.Auth.Commands;
 using Apenir.API.Helpers;
 
+using Apenir.Core.Interfaces;
+using System.Linq;
+using Microsoft.EntityFrameworkCore;
+
 namespace Apenir.API.Controllers
 {
     [ApiController]
@@ -17,10 +21,32 @@ namespace Apenir.API.Controllers
     public class AuthController : ControllerBase
     {
         private readonly IMediator _mediator;
+        private readonly IApplicationDbContext _context;
 
-        public AuthController(IMediator mediator)
+        public AuthController(IMediator mediator, IApplicationDbContext context)
         {
             _mediator = mediator;
+            _context = context;
+        }
+
+        [HttpGet("check-email")]
+        [EndpointSummary("Check Email Availability")]
+        [EndpointDescription("Checks if a given email is already in use by another active account.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<object>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse<object>))]
+        public async Task<IActionResult> CheckEmail([FromQuery] string email, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrWhiteSpace(email))
+            {
+                return BadRequest(ApiResponse<object>.FailureResult("Email query parameter is required."));
+            }
+
+            var lowercaseEmail = email.Trim().ToLower();
+            var exists = await _context.Users.AnyAsync(
+                u => u.Email != null && u.Email.ToLower() == lowercaseEmail && !u.IsDeleted,
+                cancellationToken);
+
+            return Ok(ApiResponse<object>.SuccessResult(new { Available = !exists, Exists = exists }));
         }
 
         [HttpPost("otp/send")]
