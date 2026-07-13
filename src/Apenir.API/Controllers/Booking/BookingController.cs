@@ -180,7 +180,7 @@ public class BookingController : ControllerBase
         decimal rate = branchService.CustomPrice ?? basePrice;
 
         // Extra travel cost based on OSRM road distance
-        decimal travelCost = (decimal)roadDistance * branch.PerKmCharge;
+        decimal travelCost = (decimal)roadDistance * (branch.PerKmCharge ?? 0m);
 
         int total = (int)rate + (memberCount > 1
             ? (int)Math.Round((memberCount - 1) * rate * 0.8m)

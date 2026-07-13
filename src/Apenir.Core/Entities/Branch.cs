@@ -53,7 +53,7 @@ public class Branch
 
     public double ServiceRangeKm { get; set; } = 10.0;
 
-    public decimal PerKmCharge { get; set; } = 0m;
+    public decimal? PerKmCharge { get; set; } = 0m;
 
     [StringLength(20)]
     public string? NotificationPhone { get; set; }
