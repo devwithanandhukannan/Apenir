@@ -34,10 +34,12 @@ namespace Apenir.API.Controllers.Admin
         [HttpPost("labs")]
         [EndpointSummary("Search and Filter Labs")]
         [EndpointDescription("Returns a list of labs matching optional name, district, city, and status filter criteria.")]
-        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<Branch>>))]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<LabListDto>>))]
         public async Task<IActionResult> SearchLabs([FromBody] SearchLabsRequest? request, CancellationToken cancellationToken)
         {
-            var query = _context.Branches.Include(b => b.LabUser).AsNoTracking();
+            var query = _context.Branches
+                .Include(b => b.LabUser)
+                .AsNoTracking();
 
             if (request != null)
             {
@@ -67,7 +69,40 @@ namespace Apenir.API.Controllers.Admin
             }
 
             var labs = await query.ToListAsync(cancellationToken);
-            return Ok(ApiResponse<List<Branch>>.SuccessResult(labs, "LABS_RETRIEVED"));
+
+            // Project into safe DTO – avoids circular-reference / null-nav crashes when serialising
+            var result = labs.Select(b => new LabListDto
+            {
+                Id = b.Id,
+                LabUserId = b.LabUserId,
+                Name = b.Name,
+                District = b.District,
+                City = b.City,
+                Pincode = b.Pincode,
+                Latitude = b.Latitude,
+                Longitude = b.Longitude,
+                Phone = b.Phone,
+                IsActive = b.IsActive,
+                Status = b.Status,
+                LabId = b.LabId,
+                ServiceRangeKm = b.ServiceRangeKm,
+                PerKmCharge = b.PerKmCharge,
+                NotificationPhone = b.NotificationPhone,
+                CreatedBy = b.CreatedBy,
+                CreatedAt = b.CreatedAt,
+                LabUser = b.LabUser == null ? null : new LabUserSummary
+                {
+                    Id = b.LabUser.Id,
+                    Name = b.LabUser.Name,
+                    Email = b.LabUser.Email,
+                    Phone = b.LabUser.Phone,
+                    IsActive = b.LabUser.IsActive ?? false,
+                    Status = b.LabUser.Status
+                },
+                Creator = null // not needed on list view, omit to prevent nav-cycle
+            }).ToList();
+
+            return Ok(ApiResponse<List<LabListDto>>.SuccessResult(result, "LABS_RETRIEVED"));
         }
 
         [HttpPost("labs/{labId}/staff")]
@@ -1462,6 +1497,39 @@ namespace Apenir.API.Controllers.Admin
         string? City,
         string? Status
     );
+
+    public class LabUserSummary
+    {
+        public string Id { get; set; } = string.Empty;
+        public string? Name { get; set; }
+        public string? Email { get; set; }
+        public string? Phone { get; set; }
+        public bool IsActive { get; set; }
+        public string? Status { get; set; }
+    }
+
+    public class LabListDto
+    {
+        public string Id { get; set; } = string.Empty;
+        public string LabUserId { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public string District { get; set; } = string.Empty;
+        public string City { get; set; } = string.Empty;
+        public string Pincode { get; set; } = string.Empty;
+        public decimal Latitude { get; set; }
+        public decimal Longitude { get; set; }
+        public string Phone { get; set; } = string.Empty;
+        public bool IsActive { get; set; }
+        public string? Status { get; set; }
+        public string? LabId { get; set; }
+        public double ServiceRangeKm { get; set; }
+        public decimal? PerKmCharge { get; set; }
+        public string? NotificationPhone { get; set; }
+        public string CreatedBy { get; set; } = string.Empty;
+        public DateTime CreatedAt { get; set; }
+        public LabUserSummary? LabUser { get; set; }
+        public object? Creator { get; set; }
+    }
 
     public record SearchUsersRequest(
         string? Name,
