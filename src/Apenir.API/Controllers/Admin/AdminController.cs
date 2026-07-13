@@ -38,7 +38,6 @@ namespace Apenir.API.Controllers.Admin
         public async Task<IActionResult> SearchLabs([FromBody] SearchLabsRequest? request, CancellationToken cancellationToken)
         {
             var query = _context.Branches
-                .Include(b => b.LabUser)
                 .AsNoTracking();
 
             if (request != null)
@@ -70,36 +69,47 @@ namespace Apenir.API.Controllers.Admin
 
             var labs = await query.ToListAsync(cancellationToken);
 
+            // Fetch the LabUser documents separately to avoid translation failures on MongoDB provider joins
+            var labUserIds = labs.Select(b => b.LabUserId).Where(id => !string.IsNullOrEmpty(id)).Distinct().ToList();
+            var labUsers = await _context.Users
+                .Where(u => labUserIds.Contains(u.Id))
+                .AsNoTracking()
+                .ToListAsync(cancellationToken);
+            var labUserMap = labUsers.ToDictionary(u => u.Id);
+
             // Project into safe DTO – avoids circular-reference / null-nav crashes when serialising
-            var result = labs.Select(b => new LabListDto
-            {
-                Id = b.Id,
-                LabUserId = b.LabUserId,
-                Name = b.Name,
-                District = b.District,
-                City = b.City,
-                Pincode = b.Pincode,
-                Latitude = b.Latitude,
-                Longitude = b.Longitude,
-                Phone = b.Phone,
-                IsActive = b.IsActive,
-                Status = b.Status,
-                LabId = b.LabId,
-                ServiceRangeKm = b.ServiceRangeKm,
-                PerKmCharge = b.PerKmCharge,
-                NotificationPhone = b.NotificationPhone,
-                CreatedBy = b.CreatedBy,
-                CreatedAt = b.CreatedAt,
-                LabUser = b.LabUser == null ? null : new LabUserSummary
+            var result = labs.Select(b => {
+                var labUser = !string.IsNullOrEmpty(b.LabUserId) && labUserMap.TryGetValue(b.LabUserId, out var u) ? u : null;
+                return new LabListDto
                 {
-                    Id = b.LabUser.Id,
-                    Name = b.LabUser.Name,
-                    Email = b.LabUser.Email,
-                    Phone = b.LabUser.Phone,
-                    IsActive = b.LabUser.IsActive ?? false,
-                    Status = b.LabUser.Status
-                },
-                Creator = null // not needed on list view, omit to prevent nav-cycle
+                    Id = b.Id,
+                    LabUserId = b.LabUserId,
+                    Name = b.Name,
+                    District = b.District,
+                    City = b.City,
+                    Pincode = b.Pincode,
+                    Latitude = b.Latitude,
+                    Longitude = b.Longitude,
+                    Phone = b.Phone,
+                    IsActive = b.IsActive,
+                    Status = b.Status,
+                    LabId = b.LabId,
+                    ServiceRangeKm = b.ServiceRangeKm,
+                    PerKmCharge = b.PerKmCharge,
+                    NotificationPhone = b.NotificationPhone,
+                    CreatedBy = b.CreatedBy,
+                    CreatedAt = b.CreatedAt,
+                    LabUser = labUser == null ? null : new LabUserSummary
+                    {
+                        Id = labUser.Id,
+                        Name = labUser.Name,
+                        Email = labUser.Email,
+                        Phone = labUser.Phone,
+                        IsActive = labUser.IsActive ?? false,
+                        Status = labUser.Status
+                    },
+                    Creator = null // not needed on list view, omit to prevent nav-cycle
+                };
             }).ToList();
 
             return Ok(ApiResponse<List<LabListDto>>.SuccessResult(result, "LABS_RETRIEVED"));
