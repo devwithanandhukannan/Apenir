@@ -37,7 +37,7 @@ namespace Apenir.API.Controllers.Admin
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<Branch>>))]
         public async Task<IActionResult> SearchLabs([FromBody] SearchLabsRequest? request, CancellationToken cancellationToken)
         {
-            var query = _context.Branches.AsNoTracking();
+            var query = _context.Branches.Include(b => b.LabUser).AsNoTracking();
 
             if (request != null)
             {
