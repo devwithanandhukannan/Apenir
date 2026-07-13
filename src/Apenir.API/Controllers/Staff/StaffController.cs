@@ -152,6 +152,40 @@ public class StaffController : ControllerBase
         return Ok(ApiResponse.SuccessResult($"Status transitioned and customer notified via WhatsApp successfully."));
     }
 
+    [HttpPost("appointments/{id}/otp/trigger")]
+    [EndpointSummary("Trigger 2-minute collection OTP via WhatsApp")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+    [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+    public async Task<IActionResult> TriggerOtp([FromRoute] string id, CancellationToken cancellationToken)
+    {
+        var currentUserId = _currentUserService.UserId?.ToString();
+        var appointment = await _context.Appointments
+            .FirstOrDefaultAsync(a => a.Id == id && a.AssignedStaffId == currentUserId, cancellationToken);
+
+        if (appointment == null)
+        {
+            return NotFound(ApiResponse.FailureResult("Assigned appointment not found."));
+        }
+
+        appointment.CustomerUser = await _context.Users.FirstOrDefaultAsync(u => u.Id == appointment.CustomerUserId, cancellationToken);
+
+        var random = new Random();
+        var otp = random.Next(1000, 9999).ToString();
+        appointment.Passcode = otp;
+        appointment.UpdatedAt = DateTime.UtcNow;
+
+        _context.Appointments.Update(appointment);
+        await _context.SaveChangesAsync(cancellationToken);
+
+        if (appointment.CustomerUser != null && !string.IsNullOrEmpty(appointment.CustomerUser.Phone))
+        {
+            var waMessage = $"🔑 *Your Collection Verification OTP is: {otp}*\n\nThis OTP is valid for the next 2 minutes. Please share it with our phlebotomist upon arrival to verify sample collection.";
+            await _whatsAppService.SendTextMessageAsync(appointment.CustomerUser.Phone, waMessage);
+        }
+
+        return Ok(ApiResponse.SuccessResult("Verification OTP triggered and dispatched via WhatsApp successfully."));
+    }
+
     [HttpPost("appointments/{id}/verify-otp")]
     [EndpointSummary("Verify customer OTP/passcode")]
     [EndpointDescription("Validates the 4-digit passcode. On success, sets status to Collected and returns existing customer profiles.")]
@@ -269,7 +303,9 @@ public class StaffController : ControllerBase
             Age = m.Age,
             Gender = Enum.TryParse<Gender>(m.Gender, true, out var genderEnum) ? genderEnum : Gender.Other,
             Relationship = m.Relationship ?? "Self",
-            AdditionalNotes = m.AdditionalNotes
+            AdditionalNotes = m.AdditionalNotes,
+            UniqueNumber = string.IsNullOrWhiteSpace(m.UniqueNumber) ? $"MEM-{Guid.NewGuid().ToString("N").Substring(0, 8).ToUpper()}" : m.UniqueNumber.Trim(),
+            TestName = m.TestName
         }).ToList();
 
         await _context.AppointmentMembers.AddRangeAsync(newMembers, cancellationToken);
@@ -336,4 +372,6 @@ public class AppointmentMemberDto
     public string Gender { get; set; } = string.Empty;
     public string? Relationship { get; set; }
     public string? AdditionalNotes { get; set; }
+    public string? UniqueNumber { get; set; }
+    public string? TestName { get; set; }
 }

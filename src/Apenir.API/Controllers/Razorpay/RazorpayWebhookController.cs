@@ -148,195 +148,319 @@ public class RazorpayWebhookController : ControllerBase
         try
         {
             // 1. Fetch related data
-            var service = await _context.Services.FirstOrDefaultAsync(s => s.Id == testId, cancellationToken);
-        var lab = await _context.Branches.FirstOrDefaultAsync(b => b.Id == labId, cancellationToken);
-        var slot = await _context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == slotId, cancellationToken);
+            var itemIds = testId.Split(',').Select(id => id.Trim()).ToList();
+            var services = await _context.Services.AsNoTracking().Where(s => itemIds.Contains(s.Id)).ToListAsync(cancellationToken);
+            var packages = await _context.Packages.AsNoTracking().Where(p => itemIds.Contains(p.Id)).ToListAsync(cancellationToken);
 
-        // 2. Fetch or create Customer early to check for existing recent appointments
-        var user = await _context.Users.FirstOrDefaultAsync(u => u.Phone == to, cancellationToken);
-        if (user != null)
-        {
-            var recentAppt = await _context.Appointments.FirstOrDefaultAsync(
-                a => a.CustomerUserId == user.Id && a.AppointmentSlotId == slotId && a.CreatedAt >= DateTime.UtcNow.AddMinutes(-30),
-                cancellationToken);
+            var lab = await _context.Branches.FirstOrDefaultAsync(b => b.Id == labId, cancellationToken);
+            var slot = await _context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == slotId, cancellationToken);
 
-            if (recentAppt != null)
+            // 2. Fetch or create Customer early to check for existing recent appointments
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Phone == to, cancellationToken);
+            if (user != null)
             {
-                _logger.LogInformation("ℹ️ Booking already exists (recently created via SimulatePayment) for User {UserId} and Slot {SlotId}. Skipping webhook.", user.Id, slotId);
+                var recentAppt = await _context.Appointments.FirstOrDefaultAsync(
+                    a => a.CustomerUserId == user.Id && a.AppointmentSlotId == slotId && a.CreatedAt >= DateTime.UtcNow.AddMinutes(-30),
+                    cancellationToken);
+
+                if (recentAppt != null)
+                {
+                    _logger.LogInformation("ℹ️ Booking already exists (recently created via SimulatePayment) for User {UserId} and Slot {SlotId}. Skipping webhook.", user.Id, slotId);
+                    return;
+                }
+            }
+
+            if (slot == null || !slot.IsAvailable || slot.BookedCount + memberCount > slot.MaxCapacity)
+            {
+                _logger.LogWarning("⚠️ Slot not available: {SlotId}. Refusing webhook creation.", slotId);
+                // Send warning WhatsApp message
+                await _whatsAppService.SendTextMessageAsync(to, "⚠️ We received your payment, but the selected slot has filled up. Our customer support will contact you to reschedule your test immediately.");
                 return;
             }
-        }
 
-        if (slot == null || !slot.IsAvailable || slot.BookedCount + memberCount > slot.MaxCapacity)
-        {
-            _logger.LogWarning("⚠️ Slot not available: {SlotId}. Refusing webhook creation.", slotId);
-            // Send warning WhatsApp message
-            await _whatsAppService.SendTextMessageAsync(to, "⚠️ We received your payment, but the selected slot has filled up. Our customer support will contact you to reschedule your test immediately.");
-            return;
-        }
+            // Check if appointment already created for this payment ID to prevent duplicate webhook deliveries
+            var paymentExists = await _context.Payments.AnyAsync(p => p.RazorpayPaymentId == paymentId, cancellationToken);
+            if (paymentExists)
+            {
+                _logger.LogInformation("ℹ️ Webhook received for already processed payment ID: {PaymentId}", paymentId);
+                return;
+            }
 
-        // Check if appointment already created for this payment ID to prevent duplicate webhook deliveries
-        var paymentExists = await _context.Payments.AnyAsync(p => p.RazorpayPaymentId == paymentId, cancellationToken);
-        if (paymentExists)
-        {
-            _logger.LogInformation("ℹ️ Webhook received for already processed payment ID: {PaymentId}", paymentId);
-            return;
-        }
+            if (user == null)
+            {
+                user = new User
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    Name = "WhatsApp User",
+                    Phone = to,
+                    Role = UserRole.Customer,
+                    IsActive = true
+                };
+                _context.Users.Add(user);
 
-        if (user == null)
-        {
-            user = new User
+                var customer = new Customer
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    UserId = user.Id,
+                    Phone = to,
+                    Name = "WhatsApp User"
+                };
+                _context.Customers.Add(customer);
+                await _context.SaveChangesAsync(cancellationToken);
+            }
+
+            // Calculate Pricing for multiple items
+            var branchServices = await _context.BranchServices
+                .Where(bs => bs.BranchId == labId && itemIds.Contains(bs.ServiceId) && bs.IsActive)
+                .ToListAsync(cancellationToken);
+
+            var branchPackages = await _context.BranchPackages
+                .Where(bp => bp.BranchId == labId && itemIds.Contains(bp.PackageId) && bp.IsActive)
+                .ToListAsync(cancellationToken);
+
+            decimal rate = 0m;
+            decimal totalCommissionPct = 0m;
+            int itemsCount = 0;
+
+            foreach (var itemId in itemIds)
+            {
+                var s = services.FirstOrDefault(x => x.Id == itemId);
+                if (s != null)
+                {
+                    var bs = branchServices.FirstOrDefault(x => x.ServiceId == itemId);
+                    rate += bs?.CustomPrice ?? s.BasePrice;
+                    totalCommissionPct += bs?.CustomCommissionPct ?? s.PlatformCommissionPct;
+                    itemsCount++;
+                }
+                else
+                {
+                    var p = packages.FirstOrDefault(x => x.Id == itemId);
+                    if (p != null)
+                    {
+                        var bp = branchPackages.FirstOrDefault(x => x.PackageId == itemId);
+                        rate += bp?.CustomPrice ?? p.BasePrice;
+                        totalCommissionPct += bp?.CustomCommissionPct ?? p.PlatformCommissionPct;
+                        itemsCount++;
+                    }
+                }
+            }
+
+            decimal avgCommissionPct = itemsCount > 0 ? (totalCommissionPct / itemsCount) : 15.00m;
+
+            int total = (int)rate + (memberCount > 1
+                ? (int)Math.Round((memberCount - 1) * rate * 0.8m)
+                : 0);
+
+            // 3. Update Slot
+            slot.BookedCount += memberCount;
+            if (slot.BookedCount >= slot.MaxCapacity)
+                slot.IsAvailable = false;
+            _context.AppointmentSlots.Update(slot);
+
+            // 4. Create Booking ID
+            var bookingId = $"BK-{DateTime.UtcNow:yyyyMMdd}-{new Random().Next(1000, 9999)}";
+
+            var itemNames = services.Select(s => s.Name).Concat(packages.Select(p => p.Name)).ToList();
+            var itemNamesStr = string.Join(", ", itemNames);
+            var locationAddress = $"{building}, Floor {floor}, Landmark: {landmark} | Tests: {itemNamesStr}";
+
+            // 5. Create Appointment
+            var appointment = new Appointment
             {
                 Id = Guid.NewGuid().ToString(),
-                Name = "WhatsApp User",
-                Phone = to,
-                Role = UserRole.Customer,
-                IsActive = true
+                AppointmentNumber = bookingId,
+                CustomerUserId = user.Id,
+                BranchId = labId,
+                AppointmentSlotId = slotId,
+                LocationLatitude = latitude,
+                LocationLongitude = longitude,
+                LocationAddress = locationAddress,
+                BuildingDetails = building,
+                Floor = floor,
+                Landmark = landmark,
+                Passcode = new Random().Next(1000, 9999).ToString(),
+                Status = AppointmentStatus.Confirmed,
+                TotalAmount = total,
+                PlatformCommission = total * (avgCommissionPct / 100m),
+                LabPayout = total * (1m - (avgCommissionPct / 100m)),
+                CreatedAt = DateTime.UtcNow,
+                MemberCount = memberCount
             };
-            _context.Users.Add(user);
+            _context.Appointments.Add(appointment);
 
-            var customer = new Customer
+            // Create Members
+            var customerName = string.IsNullOrWhiteSpace(user.Name) ? "Patient" : user.Name;
+            for (int i = 0; i < memberCount; i++)
             {
-                Id = Guid.NewGuid().ToString(),
-                UserId = user.Id,
-                Phone = to,
-                Name = "WhatsApp User"
-            };
-            _context.Customers.Add(customer);
-            await _context.SaveChangesAsync(cancellationToken);
-        }
+                var member = new AppointmentMember
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    AppointmentId = appointment.Id,
+                    MemberName = i == 0 ? customerName : $"Member {i + 1}",
+                    Age = 0,
+                    Gender = Gender.Other,
+                    Relationship = i == 0 ? "Self" : "Family Member",
+                    UniqueNumber = $"MEM-{Guid.NewGuid().ToString("N").Substring(0, 8).ToUpper()}",
+                    TestName = itemNamesStr
+                };
+                _context.AppointmentMembers.Add(member);
+            }
 
-        // Calculate Pricing
-        var basePrice = service?.BasePrice ?? 0m;
-        var branchService = await _context.BranchServices
-            .FirstOrDefaultAsync(bs => bs.BranchId == labId && bs.ServiceId == testId && bs.IsActive, cancellationToken);
-        if (branchService == null)
-        {
-            throw new Exception("Service is not active or available at the selected branch.");
-        }
-        decimal rate = branchService.CustomPrice ?? basePrice;
-
-        int total = (int)rate + (memberCount > 1
-            ? (int)Math.Round((memberCount - 1) * rate * 0.8m)
-            : 0);
-
-        // 3. Update Slot
-        slot.BookedCount += memberCount;
-        if (slot.BookedCount >= slot.MaxCapacity)
-            slot.IsAvailable = false;
-        _context.AppointmentSlots.Update(slot);
-
-        // 4. Create Booking ID
-        var bookingId = $"BK-{DateTime.UtcNow:yyyyMMdd}-{new Random().Next(1000, 9999)}";
-
-        // 5. Create Appointment
-        var appointment = new Appointment
-        {
-            Id = Guid.NewGuid().ToString(),
-            AppointmentNumber = bookingId,
-            CustomerUserId = user.Id,
-            BranchId = labId,
-            AppointmentSlotId = slotId,
-            LocationLatitude = latitude,
-            LocationLongitude = longitude,
-            LocationAddress = $"{building}, Floor {floor}, Landmark: {landmark}",
-            BuildingDetails = building,
-            Floor = floor,
-            Landmark = landmark,
-            Passcode = new Random().Next(1000, 9999).ToString(),
-            Status = AppointmentStatus.Confirmed,
-            TotalAmount = total,
-            PlatformCommission = total * (((branchService != null && branchService.CustomCommissionPct.HasValue) ? branchService.CustomCommissionPct.Value : (service != null ? service.PlatformCommissionPct : 15.00m)) / 100m),
-            LabPayout = total * (1m - ((branchService != null && branchService.CustomCommissionPct.HasValue) ? branchService.CustomCommissionPct.Value : (service != null ? service.PlatformCommissionPct : 15.00m)) / 100m),
-            CreatedAt = DateTime.UtcNow,
-            MemberCount = memberCount
-        };
-        _context.Appointments.Add(appointment);
-
-        // Create Members
-        var customerName = string.IsNullOrWhiteSpace(user.Name) ? "Patient" : user.Name;
-        for (int i = 0; i < memberCount; i++)
-        {
-            var member = new AppointmentMember
+            // Create Payment record
+            var payment = new Payment
             {
                 Id = Guid.NewGuid().ToString(),
                 AppointmentId = appointment.Id,
-                MemberName = i == 0 ? customerName : $"Member {i + 1}",
-                Age = 0,
-                Gender = Gender.Other,
-                Relationship = i == 0 ? "Self" : "Family Member"
+                RazorpayOrderId = orderId,
+                RazorpayPaymentId = paymentId,
+                Status = PaymentStatus.Paid,
+                PaymentMethod = PaymentMethod.UPI,
+                PaidAt = DateTime.UtcNow,
+                CreatedAt = DateTime.UtcNow
             };
-            _context.AppointmentMembers.Add(member);
-        }
+            _context.Payments.Add(payment);
 
-        // Create Payment record
-        var payment = new Payment
-        {
-            Id = Guid.NewGuid().ToString(),
-            AppointmentId = appointment.Id,
-            RazorpayOrderId = orderId,
-            RazorpayPaymentId = paymentId,
-            Status = PaymentStatus.Paid,
-            PaymentMethod = PaymentMethod.UPI,
-            PaidAt = DateTime.UtcNow,
-            CreatedAt = DateTime.UtcNow
-        };
-        _context.Payments.Add(payment);
-
-        await _context.SaveChangesAsync(cancellationToken);
-
-        // Reset WhatsApp session to Done state so they don't get stuck
-        var session = await _context.WhatsAppSessions.FirstOrDefaultAsync(s => s.Phone == to, cancellationToken);
-        if (session != null)
-        {
-            session.CurrentState = WhatsAppState.Done;
-            session.SelectedLabId = labId;
-            session.SelectedSlot = slotId;
-            session.MemberCount = memberCount;
-            session.SelectedTestId = testId;
-            session.UpdatedAt = DateTime.UtcNow;
-            _context.WhatsAppSessions.Update(session);
             await _context.SaveChangesAsync(cancellationToken);
-        }
 
-        var slotDisplay = $"{slot.SlotDate:dddd, MMM dd yyyy} @ {slot.StartTime:hh:mm tt}";
+            // Reset WhatsApp session to Done state so they don't get stuck
+            var session = await _context.WhatsAppSessions.FirstOrDefaultAsync(s => s.Phone == to, cancellationToken);
+            if (session != null)
+            {
+                session.CurrentState = WhatsAppState.Done;
+                session.SelectedLabId = labId;
+                session.SelectedSlot = slotId;
+                session.MemberCount = memberCount;
+                session.SelectedTestId = testId;
+                session.UpdatedAt = DateTime.UtcNow;
+                _context.WhatsAppSessions.Update(session);
+                await _context.SaveChangesAsync(cancellationToken);
+            }
 
-        // Notify Lab via WhatsApp NotificationPhone
-        if (lab != null && !string.IsNullOrEmpty(lab.NotificationPhone))
-        {
-            var labNotification = $"🔔 *New Diagnostic Request!*\n\n" +
-                                  $"Booking ID: *{bookingId}*\n" +
-                                  $"Test: {service?.Name}\n" +
-                                  $"Slot: {slotDisplay}\n" +
-                                  $"Members: {memberCount}\n" +
-                                  $"Place: {appointment.LocationAddress}\n" +
-                                  $"Customer Phone: +{to}";
+            var slotDisplay = $"{slot.SlotDate:dddd, MMM dd yyyy} @ {slot.StartTime:hh:mm tt}";
 
-            await _whatsAppService.SendTextMessageAsync(lab.NotificationPhone, labNotification);
-        }
+            // Generate Invoice PDF
+            var invoicesFolder = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "invoices");
+            if (!Directory.Exists(invoicesFolder))
+            {
+                Directory.CreateDirectory(invoicesFolder);
+            }
+            var invoiceFileName = $"Invoice_{bookingId}.pdf";
+            var invoiceFilePath = Path.Combine(invoicesFolder, invoiceFileName);
 
-        // Send WhatsApp confirmation to Customer
-        var confirmMsg =
-            $"✅ *Booking Confirmed!*\n\n" +
-            $"🆔 Booking ID: *{bookingId}*\n" +
-            $"🩸 Service: {service?.Name ?? "Diagnostic Test"}\n" +
-            $"🏥 Lab: {lab?.Name ?? "Selected Lab"}\n" +
-            $"📅 Date & Time: {slotDisplay}\n" +
-            $"👥 Persons: {memberCount}\n" +
-            $"💰 Amount Paid: ₹{total}\n" +
-            $"🔑 Passcode/OTP: *{appointment.Passcode}*\n\n" +
-            $"🧪 *Instructions:*\n" +
-            $"• Fast for 8-10 hours prior to sample collection.\n" +
-            $"• Show the phlebotomist your Passcode (*{appointment.Passcode}*).\n" +
-            $"• Report PDF will be sent to your WhatsApp on completion.\n\n" +
-            $"Thank you for choosing LabCare! 🙏";
+            var receiptText = $"APENIR DIAGNOSTIC SERVICES - INVOICE\n" +
+                              $"--------------------------------------------------\n" +
+                              $"Booking ID   : {bookingId}\n" +
+                              $"Customer Name: {customerName}\n" +
+                              $"Phone        : +{to}\n" +
+                              $"Lab Branch   : {lab?.Name ?? "Selected Lab"}\n" +
+                              $"Date & Time  : {slotDisplay}\n" +
+                              $"Members      : {memberCount}\n" +
+                              $"--------------------------------------------------\n" +
+                              $"Booked Tests:\n" +
+                              string.Join("\n", itemNames.Select(n => " - " + n)) + "\n" +
+                              $"--------------------------------------------------\n" +
+                              $"Total Paid   : INR {total}\n" +
+                              $"--------------------------------------------------\n" +
+                              $"Thank you for choosing Apenir Medical!";
 
-        await _whatsAppService.SendTextMessageAsync(to, confirmMsg);
+            var pdfBytes = CreateSimplePdf(receiptText);
+            await System.IO.File.WriteAllBytesAsync(invoiceFilePath, pdfBytes, cancellationToken);
+
+            var req = HttpContext.Request;
+            var reqBaseUrl = $"{req.Scheme}://{req.Host}{req.PathBase}";
+            var invoiceUrl = $"{reqBaseUrl}/invoices/{invoiceFileName}";
+
+            // Notify Lab via WhatsApp NotificationPhone
+            if (lab != null && !string.IsNullOrEmpty(lab.NotificationPhone))
+            {
+                var labNotification = $"            var labNotification = $\"🔔 *New Diagnostic Request!*\\n\\n\" +\n" +
+                                      $"Booking ID: *{bookingId}*\n" +
+                                      $"Test: {itemNamesStr}\n" +
+                                      $"Slot: {slotDisplay}\n" +
+                                      $"Members: {memberCount}\n" +
+                                      $"Place: {appointment.LocationAddress}\n" +
+                                      $"Customer Phone: +{to}";
+
+                await _whatsAppService.SendTextMessageAsync(lab.NotificationPhone, labNotification);
+            }
+
+            // Send WhatsApp confirmation and Invoice to Customer
+            var confirmMsg =
+                $"✅ *Booking Confirmed!*\n\n" +
+                $"🆔 Booking ID: *{bookingId}*\n" +
+                $"🩸 Service: {itemNamesStr}\n" +
+                $"🏥 Lab: {lab?.Name ?? "Selected Lab"}\n" +
+                $"📅 Date & Time: {slotDisplay}\n" +
+                $"👥 Persons: {memberCount}\n" +
+                $"💰 Amount Paid: ₹{total}\n" +
+                $"🔑 Passcode/OTP: *{appointment.Passcode}*\n\n" +
+                $"🧪 *Instructions:*\n" +
+                $"• Fast for 8-10 hours prior to sample collection.\n" +
+                $"• Show the phlebotomist your Passcode (*{appointment.Passcode}*).\n" +
+                $"• Report PDF will be sent to your WhatsApp on completion.\n\n" +
+                $"Thank you for choosing LabCare! 🙏";
+
+            await _whatsAppService.SendTextMessageAsync(to, confirmMsg);
+            await _whatsAppService.SendDocumentMessageAsync(to, invoiceUrl, $"Invoice_{bookingId}.pdf");
         }
         finally
         {
             lockObj.Release();
         }
+    }
+
+    private static byte[] CreateSimplePdf(string text)
+    {
+        var content = "BT\n/F1 12 Tf\n20 800 Td\n16 TL\n";
+        var lines = text.Split('\n');
+        foreach (var line in lines)
+        {
+            var escapedLine = line.Replace("\\", "\\\\").Replace("(", "\\(").Replace(")", "\\)");
+            content += $"({escapedLine}) Tj\nT*\n";
+        }
+        content += "ET";
+        
+        var streamBytes = Encoding.UTF8.GetBytes(content);
+        var streamLen = streamBytes.Length;
+        
+        var pdfHeader = "%PDF-1.4\n" +
+                        "1 0 obj\n" +
+                        "<< /Type /Catalog /Pages 2 0 R >>\n" +
+                        "endobj\n" +
+                        "2 0 obj\n" +
+                        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>\n" +
+                        "endobj\n" +
+                        "3 0 obj\n" +
+                        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >> >> /Contents 4 0 R >>\n" +
+                        "endobj\n" +
+                        "4 0 obj\n" +
+                        $"<< /Length {streamLen} >>\n" +
+                        "stream\n";
+        
+        var pdfFooter = "\nendstream\n" +
+                        "endobj\n" +
+                        "xref\n" +
+                        "0 5\n" +
+                        "0000000000 65535 f \n" +
+                        "0000000009 00000 n \n" +
+                        "0000000058 00000 n \n" +
+                        "0000000115 00000 n \n" +
+                        "0000000284 00000 n \n" +
+                        "trailer\n" +
+                        "<< /Size 5 /Root 1 0 R >>\n" +
+                        "startxref\n" +
+                        "350\n" +
+                        "%%EOF";
+                        
+        var headerBytes = Encoding.UTF8.GetBytes(pdfHeader);
+        var footerBytes = Encoding.UTF8.GetBytes(pdfFooter);
+        
+        var result = new byte[headerBytes.Length + streamBytes.Length + footerBytes.Length];
+        Buffer.BlockCopy(headerBytes, 0, result, 0, headerBytes.Length);
+        Buffer.BlockCopy(streamBytes, 0, result, headerBytes.Length, streamBytes.Length);
+        Buffer.BlockCopy(footerBytes, 0, result, headerBytes.Length + streamBytes.Length, footerBytes.Length);
+        
+        return result;
     }
 
     private bool VerifySignature(string rawBody, string signature, string secret)

@@ -50,7 +50,16 @@ public class User
 
     public DateTime? ResetPasswordTokenExpiry { get; set; }
 
+    [StringLength(255)]
+    public string? PendingNewEmail { get; set; }
+
+    [StringLength(100)]
+    public string? EmailVerificationToken { get; set; }
+
+    public DateTime? EmailVerificationTokenExpiry { get; set; }
+
     public DateTime? CreatedAt { get; set; } = DateTime.UtcNow;
+
 
     public DateTime? UpdatedAt { get; set; }
 }

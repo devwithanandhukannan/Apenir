@@ -37,7 +37,11 @@ namespace Apenir.API.Controllers
         [EndpointDescription("Returns all customer payments with status Paid that are not part of any active batch for the specified lab/branch.")]
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<UnbatchedPaymentDto>>))]
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
-        public async Task<IActionResult> GetUnbatchedPayments([FromRoute] string branchId, CancellationToken cancellationToken)
+        public async Task<IActionResult> GetUnbatchedPayments(
+            [FromRoute] string branchId,
+            [FromQuery] DateOnly? startDate,
+            [FromQuery] DateOnly? endDate,
+            CancellationToken cancellationToken)
         {
             var branchExists = await _context.Branches.AsNoTracking()
                 .AnyAsync(b => b.Id == branchId, cancellationToken);
@@ -48,9 +52,25 @@ namespace Apenir.API.Controllers
             }
 
             // Find all appointments for this branch
-            var appointments = await _context.Appointments.AsNoTracking()
-                .Where(a => a.BranchId == branchId)
-                .ToListAsync(cancellationToken);
+            var apptQuery = _context.Appointments.AsNoTracking().Where(a => a.BranchId == branchId);
+
+            if (startDate.HasValue || endDate.HasValue)
+            {
+                var slotQuery = _context.AppointmentSlots.AsNoTracking();
+                if (startDate.HasValue)
+                {
+                    slotQuery = slotQuery.Where(s => s.SlotDate >= startDate.Value);
+                }
+                if (endDate.HasValue)
+                {
+                    slotQuery = slotQuery.Where(s => s.SlotDate <= endDate.Value);
+                }
+                var matchingSlotIds = await slotQuery.Select(s => s.Id).ToListAsync(cancellationToken);
+                apptQuery = apptQuery.Where(a => matchingSlotIds.Contains(a.AppointmentSlotId));
+            }
+
+            var appointments = await apptQuery.ToListAsync(cancellationToken);
+
 
             var appointmentIds = appointments.Select(a => a.Id).ToList();
             if (appointmentIds.Count == 0)
@@ -393,6 +413,33 @@ namespace Apenir.API.Controllers
             await _context.SaveChangesAsync(cancellationToken);
 
             return Ok(ApiResponse.SuccessResult("Payment batch abandoned and hard-deleted successfully. All associated payments have been released back to unpaid status."));
+        }
+
+        [HttpPost("{batchId}/pay")]
+        [EndpointSummary("Mark payment batch as Paid by admin")]
+        [EndpointDescription("Changes the status of an Initiated payment batch to Paid.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> PayBatch([FromRoute] string batchId, CancellationToken cancellationToken)
+        {
+            var batch = await _context.PaymentBatches.FirstOrDefaultAsync(b => b.Id == batchId, cancellationToken);
+            if (batch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Payment batch not found."));
+            }
+
+            if (batch.Status != PaymentBatchStatus.Initiated)
+            {
+                return BadRequest(ApiResponse.FailureResult("Only initiated batches can be marked as Paid."));
+            }
+
+            batch.Status = PaymentBatchStatus.Paid;
+
+            _context.PaymentBatches.Update(batch);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Payment batch marked as Paid successfully."));
         }
     }
 

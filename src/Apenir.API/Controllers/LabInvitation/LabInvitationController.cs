@@ -290,7 +290,7 @@ namespace Apenir.API.Controllers
 
             // Update User
             user.PasswordHash = _passwordHasher.Hash(request.Password);
-            user.Phone = request.Phone;
+            user.Phone = string.IsNullOrWhiteSpace(request.Phone) ? "Pending" : request.Phone.Trim();
             user.Status = "Active";
             user.IsActive = true;
             user.UpdatedAt = DateTime.UtcNow;
@@ -317,10 +317,10 @@ namespace Apenir.API.Controllers
             }
 
             // Update Branch
-            branch.Phone = request.Phone;
-            branch.City = request.City;
-            branch.District = request.District;
-            branch.Pincode = request.Pincode;
+            branch.Phone = string.IsNullOrWhiteSpace(request.Phone) ? "Pending" : request.Phone.Trim();
+            branch.City = string.IsNullOrWhiteSpace(request.City) ? "Pending" : request.City.Trim();
+            branch.District = string.IsNullOrWhiteSpace(request.District) ? "Pending" : request.District.Trim();
+            branch.Pincode = string.IsNullOrWhiteSpace(request.Pincode) ? "Pending" : request.Pincode.Trim();
             branch.Latitude = request.Latitude;
             branch.Longitude = request.Longitude;
             branch.Status = "Active";

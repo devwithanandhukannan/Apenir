@@ -1896,9 +1896,9 @@ namespace Apenir.API.Controllers
                 return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this batch."));
             }
 
-            if (batch.Status != PaymentBatchStatus.Initiated)
+            if (batch.Status != PaymentBatchStatus.Paid)
             {
-                return BadRequest(ApiResponse.FailureResult("Only batches with 'Initiated' status can be confirmed."));
+                return BadRequest(ApiResponse.FailureResult("Only batches with 'Paid' status can be confirmed."));
             }
 
             batch.Status = PaymentBatchStatus.Settled;
@@ -1969,6 +1969,204 @@ namespace Apenir.API.Controllers
                 context.AppointmentSlots.AddRange(newSlots);
                 await context.SaveChangesAsync(cancellationToken);
             }
+        }
+
+        [HttpPost("change-password")]
+        [Authorize]
+        [EndpointSummary("Change lab user password")]
+        public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.OldPassword) || string.IsNullOrWhiteSpace(request.NewPassword))
+            {
+                return BadRequest(ApiResponse.FailureResult("Old password and new password are required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+            if (user == null)
+            {
+                return NotFound(ApiResponse.FailureResult("User not found."));
+            }
+
+            if (!_passwordHasher.Verify(user.PasswordHash ?? string.Empty, request.OldPassword))
+            {
+                return BadRequest(ApiResponse.FailureResult("Incorrect old password."));
+            }
+
+            user.PasswordHash = _passwordHasher.Hash(request.NewPassword);
+            user.UpdatedAt = DateTime.UtcNow;
+
+            _context.Users.Update(user);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Password changed successfully."));
+        }
+
+        [HttpPost("change-email/request")]
+        [Authorize]
+        [EndpointSummary("Request email change with pre-verification")]
+        public async Task<IActionResult> RequestChangeEmail([FromBody] ChangeEmailRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.NewEmail))
+            {
+                return BadRequest(ApiResponse.FailureResult("New email address is required."));
+            }
+
+            var targetEmail = request.NewEmail.Trim().ToLower();
+
+            // Check if email already in use
+            var emailInUse = await _context.Users.AnyAsync(u => u.Email != null && u.Email.ToLower() == targetEmail && !u.IsDeleted, cancellationToken);
+            if (emailInUse)
+            {
+                return BadRequest(ApiResponse.FailureResult("Email is already in use by another account."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+            if (user == null)
+            {
+                return NotFound(ApiResponse.FailureResult("User not found."));
+            }
+
+            var random = new Random();
+            string verificationCode = random.Next(100000, 999999).ToString();
+
+            user.PendingNewEmail = targetEmail;
+            user.EmailVerificationToken = verificationCode;
+            user.EmailVerificationTokenExpiry = DateTime.UtcNow.AddMinutes(15);
+
+            _context.Users.Update(user);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            // Send verification email
+            var emailSubject = "Apenir Email Verification Code";
+            var emailBody = $"Your code to change your Apenir email to {targetEmail} is: <strong>{verificationCode}</strong>. Valid for 15 minutes.";
+            await _emailService.SendEmailAsync(targetEmail, emailSubject, emailBody);
+
+            return Ok(ApiResponse.SuccessResult("Verification code sent to the new email address successfully."));
+        }
+
+        [HttpPost("change-email/confirm")]
+        [Authorize]
+        [EndpointSummary("Confirm email change")]
+        public async Task<IActionResult> ConfirmChangeEmail([FromBody] ConfirmChangeEmailRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Code))
+            {
+                return BadRequest(ApiResponse.FailureResult("Verification code is required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+            if (user == null)
+            {
+                return NotFound(ApiResponse.FailureResult("User not found."));
+            }
+
+            if (user.EmailVerificationToken != request.Code.Trim() || user.EmailVerificationTokenExpiry < DateTime.UtcNow)
+            {
+                return BadRequest(ApiResponse.FailureResult("Invalid or expired verification code."));
+            }
+
+            if (string.IsNullOrWhiteSpace(user.PendingNewEmail))
+            {
+                return BadRequest(ApiResponse.FailureResult("No pending email change request found."));
+            }
+
+            user.Email = user.PendingNewEmail;
+            user.PendingNewEmail = null;
+            user.EmailVerificationToken = null;
+            user.EmailVerificationTokenExpiry = null;
+            user.UpdatedAt = DateTime.UtcNow;
+
+            _context.Users.Update(user);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Email updated successfully."));
+        }
+
+        [HttpPost("appointments/upload-report")]
+        [Authorize]
+        [Consumes("multipart/form-data")]
+        [EndpointSummary("Upload diagnostic test report PDF")]
+        public async Task<IActionResult> UploadReport(
+            [FromForm] string? appointmentId,
+            [FromForm] string? memberUniqueNumber,
+            [FromForm] IFormFile file,
+            CancellationToken cancellationToken)
+        {
+            if (file == null || file.Length == 0)
+            {
+                return BadRequest(ApiResponse.FailureResult("PDF report file is required."));
+            }
+
+            if (!file.ContentType.Contains("pdf", StringComparison.OrdinalIgnoreCase))
+            {
+                return BadRequest(ApiResponse.FailureResult("Only PDF files are allowed."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            if (branch == null)
+            {
+                return BadRequest(ApiResponse.FailureResult("Branch not found for current user."));
+            }
+
+            Appointment? appointment = null;
+
+            if (!string.IsNullOrWhiteSpace(appointmentId))
+            {
+                appointment = await _context.Appointments.FirstOrDefaultAsync(a => a.Id == appointmentId && a.BranchId == branch.Id, cancellationToken);
+            }
+            else if (!string.IsNullOrWhiteSpace(memberUniqueNumber))
+            {
+                var member = await _context.AppointmentMembers.FirstOrDefaultAsync(m => m.UniqueNumber == memberUniqueNumber.Trim(), cancellationToken);
+                if (member != null)
+                {
+                    appointment = await _context.Appointments.FirstOrDefaultAsync(a => a.Id == member.AppointmentId && a.BranchId == branch.Id, cancellationToken);
+                }
+            }
+
+            if (appointment == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Appointment not found. Make sure the ID or member unique ID is correct and belongs to your branch."));
+            }
+
+            // Save file
+            var reportsFolder = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "reports");
+            if (!Directory.Exists(reportsFolder))
+            {
+                Directory.CreateDirectory(reportsFolder);
+            }
+
+            var fileName = $"{appointment.AppointmentNumber}_{Guid.NewGuid().ToString("N").Substring(0, 8)}.pdf";
+            var filePath = Path.Combine(reportsFolder, fileName);
+
+            using (var stream = new FileStream(filePath, FileMode.Create))
+            {
+                await file.CopyToAsync(stream, cancellationToken);
+            }
+
+            var baseUrl = $"{Request.Scheme}://{Request.Host}{Request.PathBase}";
+            var reportUrl = $"{baseUrl}/reports/{fileName}";
+
+            appointment.ReportPdfPath = reportUrl;
+            appointment.Status = AppointmentStatus.Completed; // Mark completed when report is uploaded
+            appointment.UpdatedAt = DateTime.UtcNow;
+
+            _context.Appointments.Update(appointment);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            // Send report PDF via WhatsApp to customer
+            var customer = await _context.Users.FirstOrDefaultAsync(u => u.Id == appointment.CustomerUserId, cancellationToken);
+            if (customer != null && !string.IsNullOrEmpty(customer.Phone))
+            {
+                var caption = $"🔬 *Your Lab Reports are Ready!*\n\nHello {customer.Name ?? "Customer"}, your diagnostic reports for booking *{appointment.AppointmentNumber}* have been uploaded. You can download the PDF here.";
+                await _whatsAppService.SendTextMessageAsync(customer.Phone, caption);
+                await _whatsAppService.SendDocumentMessageAsync(customer.Phone, reportUrl, $"{appointment.AppointmentNumber}_Report.pdf");
+            }
+
+            return Ok(ApiResponse<string>.SuccessResult(reportUrl, "Report PDF uploaded and sent to customer successfully."));
         }
     }
 
@@ -2227,5 +2425,21 @@ namespace Apenir.API.Controllers
         public decimal Latitude { get; set; }
         public decimal Longitude { get; set; }
         public double ServiceRangeKm { get; set; }
+    }
+
+    public class ChangePasswordRequest
+    {
+        public string OldPassword { get; set; } = string.Empty;
+        public string NewPassword { get; set; } = string.Empty;
+    }
+
+    public class ChangeEmailRequest
+    {
+        public string NewEmail { get; set; } = string.Empty;
+    }
+
+    public class ConfirmChangeEmailRequest
+    {
+        public string Code { get; set; } = string.Empty;
     }
 }

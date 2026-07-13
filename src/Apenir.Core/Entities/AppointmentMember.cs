@@ -33,6 +33,12 @@ public class AppointmentMember
 
     public string? AdditionalNotes { get; set; }
 
+    [StringLength(50)]
+    public string? UniqueNumber { get; set; }
+
+    [StringLength(100)]
+    public string? TestName { get; set; }
+
     // Navigation properties
     [ForeignKey(nameof(AppointmentId))]
     public virtual Appointment? Appointment { get; set; }

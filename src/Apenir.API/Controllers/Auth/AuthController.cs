@@ -158,5 +158,37 @@ namespace Apenir.API.Controllers
             }
             return Ok(result);
         }
+
+        [HttpPost("otp/verify-only")]
+        [EndpointSummary("Verify OTP only (no login)")]
+        [EndpointDescription("Verifies the OTP passcode for a given phone number without logging in or creating a user.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> VerifyOtpOnly([FromBody] VerifyOtpRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Phone) || string.IsNullOrWhiteSpace(request.Otp))
+            {
+                return BadRequest(ApiResponse.FailureResult("Phone number and OTP passcode are required."));
+            }
+
+            using var sha256 = System.Security.Cryptography.SHA256.Create();
+            byte[] hashBytes = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(request.Otp));
+            string hashedInput = Convert.ToHexString(hashBytes).ToLower();
+
+            var otpRecord = await _context.OtpCodes
+                .Where(o => o.Phone == request.Phone && o.ExpiresAt > DateTime.UtcNow)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (otpRecord == null || otpRecord.HashCode != hashedInput)
+            {
+                return BadRequest(ApiResponse.FailureResult("OTP_INVALID_OR_EXPIRED"));
+            }
+
+            // Remove it so it cannot be used again
+            _context.OtpCodes.Remove(otpRecord);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("OTP_VERIFIED"));
+        }
     }
 }

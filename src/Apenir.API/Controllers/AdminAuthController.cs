@@ -48,7 +48,7 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
         [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
         [ProducesResponseType(StatusCodes.Status401Unauthorized, Type = typeof(ApiResponse))]
-        public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest request, CancellationToken cancellationToken)
+        public async Task<IActionResult> ChangePassword([FromBody] Apenir.Application.DTOs.ChangePasswordRequest request, CancellationToken cancellationToken)
         {
             var result = await _mediator.Send(new ChangePasswordCommand(request), cancellationToken);
             return Ok(result);
