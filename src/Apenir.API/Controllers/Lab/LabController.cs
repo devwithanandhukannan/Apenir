@@ -270,6 +270,38 @@ namespace Apenir.API.Controllers
             return Ok(ApiResponse<BranchDetailsResponse>.SuccessResult(response, "Branch details retrieved successfully."));
         }
 
+                [HttpPut("details")]
+        [Authorize]
+        [EndpointSummary("Update branch profile details")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> UpdateBranchDetails([FromBody] UpdateBranchDetailsRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null) return BadRequest(ApiResponse.FailureResult("Request body is required."));
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            branch.Name = request.Name;
+            branch.Phone = request.Phone;
+            branch.City = request.City;
+            branch.District = request.District;
+            branch.Pincode = request.Pincode;
+            branch.Latitude = request.Latitude;
+            branch.Longitude = request.Longitude;
+            branch.ServiceRangeKm = request.ServiceRangeKm;
+
+            _context.Branches.Update(branch);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Branch profile details updated successfully."));
+        }
+
         [HttpGet("dashboard/summary")]
         [Authorize]
         [EndpointSummary("Get dashboard summary metrics and slots")]
@@ -2183,5 +2215,17 @@ namespace Apenir.API.Controllers
         public int FemaleCount { get; set; }
         public int OtherCount { get; set; }
         public double AverageAge { get; set; }
+    }
+
+    public class UpdateBranchDetailsRequest
+    {
+        public string Name { get; set; } = string.Empty;
+        public string Phone { get; set; } = string.Empty;
+        public string City { get; set; } = string.Empty;
+        public string District { get; set; } = string.Empty;
+        public string Pincode { get; set; } = string.Empty;
+        public decimal Latitude { get; set; }
+        public decimal Longitude { get; set; }
+        public double ServiceRangeKm { get; set; }
     }
 }
