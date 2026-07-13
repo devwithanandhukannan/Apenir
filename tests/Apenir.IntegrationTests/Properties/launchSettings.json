@@ -1,0 +1,12 @@
+{
+  "profiles": {
+    "Apenir.IntegrationTests": {
+      "commandName": "Project",
+      "launchBrowser": true,
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      },
+      "applicationUrl": "   0;http://localhost:50101"
+    }
+  }
+}
