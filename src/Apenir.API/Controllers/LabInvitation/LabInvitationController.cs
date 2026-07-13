@@ -326,6 +326,28 @@ namespace Apenir.API.Controllers
             branch.Status = "Active";
             branch.IsActive = true;
 
+            // Seed initial slot configurations if provided
+            if (request.Slots != null && request.Slots.Count > 0)
+            {
+                foreach (var s in request.Slots)
+                {
+                    if (TimeOnly.TryParse(s.StartTime, out var startTime) && TimeOnly.TryParse(s.EndTime, out var endTime))
+                    {
+                        var slotConfig = new BranchSlotConfiguration
+                        {
+                            Id = Guid.NewGuid().ToString(),
+                            BranchId = branch.Id,
+                            DayText = s.DayText,
+                            StartTime = startTime,
+                            EndTime = endTime,
+                            MaxCapacity = s.MaxCapacity,
+                            IsLeave = false
+                        };
+                        _context.BranchSlotConfigurations.Add(slotConfig);
+                    }
+                }
+            }
+
             // Mark invitation as used
             invite.IsUsed = true;
 
@@ -354,5 +376,14 @@ namespace Apenir.API.Controllers
         public string Pincode { get; set; } = string.Empty;
         public decimal Latitude { get; set; }
         public decimal Longitude { get; set; }
+        public List<SlotConfigInput>? Slots { get; set; }
+    }
+
+    public class SlotConfigInput
+    {
+        public DayText DayText { get; set; }
+        public string StartTime { get; set; } = string.Empty;
+        public string EndTime { get; set; } = string.Empty;
+        public int MaxCapacity { get; set; } = 1;
     }
 }
