@@ -480,6 +480,54 @@ namespace Apenir.API.Controllers.Admin
             return Ok(ApiResponse<List<User>>.SuccessResult(users, "USERS_RETRIEVED"));
         }
 
+        [HttpGet("branches/{branchId}/services")]
+        [EndpointSummary("Get all services for a branch with override details")]
+        [EndpointDescription("Returns all platform and custom services visible to a branch, merged with any per-branch price, commission, and active status overrides.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<AdminBranchServiceDto>>))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetBranchServicesAdmin(
+            [FromRoute] string branchId,
+            CancellationToken cancellationToken)
+        {
+            var branchExists = await _context.Branches.AnyAsync(b => b.Id == branchId, cancellationToken);
+            if (!branchExists)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            // All services: admin-created (CreatedByBranchId == null) OR created by this branch
+            var allServices = await _context.Services.AsNoTracking()
+                .Where(s => s.IsActive && (s.CreatedByBranchId == null || s.CreatedByBranchId == branchId))
+                .OrderBy(s => s.Category).ThenBy(s => s.Name)
+                .ToListAsync(cancellationToken);
+
+            var branchServices = await _context.BranchServices.AsNoTracking()
+                .Where(bs => bs.BranchId == branchId)
+                .ToListAsync(cancellationToken);
+
+            var result = allServices.Select(s =>
+            {
+                var bs = branchServices.FirstOrDefault(x => x.ServiceId == s.Id);
+                return new AdminBranchServiceDto
+                {
+                    BranchServiceId = bs?.Id,
+                    ServiceId = s.Id,
+                    Name = s.Name,
+                    Category = s.Category,
+                    Description = s.Description,
+                    BasePrice = s.BasePrice,
+                    DefaultCommissionPct = s.PlatformCommissionPct,
+                    CustomPrice = bs?.CustomPrice,
+                    CustomCommissionPct = bs?.CustomCommissionPct,
+                    IsEnrolled = bs != null,
+                    IsActive = bs?.IsActive ?? false,
+                    IsCustom = s.CreatedByBranchId != null
+                };
+            }).ToList();
+
+            return Ok(ApiResponse<List<AdminBranchServiceDto>>.SuccessResult(result, "Branch services retrieved successfully."));
+        }
+
         [HttpPut("branches/{branchId}/services/{serviceId}/commission")]
         [EndpointSummary("Update custom commission percentage for a specific branch service")]
         [EndpointDescription("Allows administrators to customize or increase the commission/interest percentage for a specific branch service.")]
@@ -1386,6 +1434,22 @@ namespace Apenir.API.Controllers.Admin
     public record UpdateBranchCommissionRequest(
         decimal CommissionPct
     );
+
+    public class AdminBranchServiceDto
+    {
+        public string? BranchServiceId { get; set; }
+        public string ServiceId { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public string Category { get; set; } = string.Empty;
+        public string? Description { get; set; }
+        public decimal BasePrice { get; set; }
+        public decimal DefaultCommissionPct { get; set; }
+        public decimal? CustomPrice { get; set; }
+        public decimal? CustomCommissionPct { get; set; }
+        public bool IsEnrolled { get; set; }
+        public bool IsActive { get; set; }
+        public bool IsCustom { get; set; }
+    }
 
     public record InviteLabRequest(
         string Email,
