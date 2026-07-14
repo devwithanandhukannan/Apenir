@@ -1722,6 +1722,60 @@ namespace Apenir.API.Controllers
             return Ok(ApiResponse.SuccessResult("Staff member updated successfully."));
         }
 
+        [HttpDelete("staff/{staffId}")]
+        [Authorize]
+        [EndpointSummary("Delete staff member")]
+        [EndpointDescription("Marks a staff member as deleted and removes them from all active assigned cases.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> DeleteStaff([FromRoute] string staffId, CancellationToken cancellationToken)
+        {
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Lab/branch configuration not found for this user."));
+            }
+
+            var staff = await _context.Users
+                .FirstOrDefaultAsync(u => u.Id == staffId && u.Role == UserRole.Staff && u.LabId == branch.LabId && !u.IsDeleted, cancellationToken);
+
+            if (staff == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Staff member not found under this lab."));
+            }
+
+            // Mark staff as deleted
+            staff.IsDeleted = true;
+            staff.IsActive = false;
+            staff.Status = "Deleted";
+            staff.UpdatedAt = DateTime.UtcNow;
+
+            _context.Users.Update(staff);
+
+            // Revert assigned cases/appointments that are not completed/cancelled
+            var activeAppointments = await _context.Appointments
+                .Where(a => a.AssignedStaffId == staffId && a.Status != AppointmentStatus.Completed && a.Status != AppointmentStatus.Cancelled)
+                .ToListAsync(cancellationToken);
+
+            foreach (var app in activeAppointments)
+            {
+                app.AssignedStaffId = null;
+                if (app.Status == AppointmentStatus.Assigned || app.Status == AppointmentStatus.Collected)
+                {
+                    app.Status = AppointmentStatus.Confirmed;
+                }
+                app.UpdatedAt = DateTime.UtcNow;
+                _context.Appointments.Update(app);
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Staff member deleted successfully."));
+        }
+
         [HttpPost("payment-batches/list")]
         [Authorize]
         [EndpointSummary("List payment batches for the lab")]
