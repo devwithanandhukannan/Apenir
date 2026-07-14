@@ -244,9 +244,17 @@ public class StaffController : ControllerBase
         // Fetch customer profiles linked to this phone number
         var customerPhone = appointment.CustomerUser?.Phone ?? string.Empty;
         
-        var mainCustomer = await _context.Customers
-            .Include(c => c.User)
-            .FirstOrDefaultAsync(c => c.User != null && c.User.Phone == customerPhone, cancellationToken);
+        // Find the user first by phone number to make EF query translation simple and safe
+        var matchedUser = await _context.Users
+            .FirstOrDefaultAsync(u => u.Phone == customerPhone, cancellationToken);
+
+        Customer? mainCustomer = null;
+        if (matchedUser != null)
+        {
+            mainCustomer = await _context.Customers
+                .Include(c => c.User)
+                .FirstOrDefaultAsync(c => c.UserId == matchedUser.Id, cancellationToken);
+        }
 
         var existingProfiles = new List<CustomerProfileDto>();
         if (mainCustomer != null)
@@ -270,7 +278,7 @@ public class StaffController : ControllerBase
         if (pastAppointments.Any())
         {
             var pastMembers = await _context.AppointmentMembers
-                .Where(m => pastAppointments.Contains(m.AppointmentId))
+                .Where(m => pastAppointments.Contains(m.AppointmentId) && !string.IsNullOrWhiteSpace(m.MemberName))
                 .ToListAsync(cancellationToken);
 
             var uniquePastMembers = pastMembers
@@ -281,7 +289,8 @@ public class StaffController : ControllerBase
             foreach (var pm in uniquePastMembers)
             {
                 // Avoid adding the main customer again if named the same
-                if (mainCustomer != null && mainCustomer.Name.Trim().ToLower() == pm.MemberName.Trim().ToLower())
+                if (mainCustomer != null && !string.IsNullOrWhiteSpace(mainCustomer.Name) && 
+                    mainCustomer.Name.Trim().ToLower() == pm.MemberName.Trim().ToLower())
                     continue;
 
                 existingProfiles.Add(new CustomerProfileDto
