@@ -31,6 +31,40 @@ namespace Apenir.API.Controllers.Admin
             _currentUserService = currentUserService;
         }
 
+        [HttpGet("executive-overview")]
+        [EndpointSummary("Get Executive Overview Metrics")]
+        [EndpointDescription("Returns real network-wide metrics for the administrator dashboard.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<AdminDashboardMetricsResponse>))]
+        public async Task<IActionResult> GetExecutiveOverview(CancellationToken cancellationToken)
+        {
+            var totalSamples = await _context.Appointments.CountAsync(cancellationToken);
+            
+            var today = DateTime.UtcNow.Date;
+            var todayPayments = await _context.Payments.AsNoTracking()
+                .Where(p => p.Status == PaymentStatus.Paid && p.CreatedAt >= today)
+                .ToListAsync(cancellationToken);
+            
+            var appointmentIds = todayPayments.Select(p => p.AppointmentId).ToList();
+            var appointments = await _context.Appointments.AsNoTracking()
+                .Where(a => appointmentIds.Contains(a.Id))
+                .ToListAsync(cancellationToken);
+            
+            decimal dailyRevenue = appointments.Sum(a => a.TotalAmount);
+            
+            var pendingReports = await _context.Appointments.CountAsync(a => a.Status == AppointmentStatus.Collected, cancellationToken);
+            var criticalAlerts = await _context.Appointments.CountAsync(a => a.Status == AppointmentStatus.Cancelled, cancellationToken);
+
+            var response = new AdminDashboardMetricsResponse
+            {
+                TotalSamples = totalSamples,
+                DailyRevenue = dailyRevenue,
+                PendingReports = pendingReports,
+                CriticalAlerts = criticalAlerts
+            };
+
+            return Ok(ApiResponse<AdminDashboardMetricsResponse>.SuccessResult(response, "METRICS_RETRIEVED"));
+        }
+
         [HttpPost("labs")]
         [EndpointSummary("Search and Filter Labs")]
         [EndpointDescription("Returns a list of labs matching optional name, district, city, and status filter criteria.")]
@@ -1792,4 +1826,11 @@ namespace Apenir.API.Controllers.Admin
         public int ActiveSlotsCount { get; set; }
     }
 
+    public class AdminDashboardMetricsResponse
+    {
+        public int TotalSamples { get; set; }
+        public decimal DailyRevenue { get; set; }
+        public int PendingReports { get; set; }
+        public int CriticalAlerts { get; set; }
+    }
 }
