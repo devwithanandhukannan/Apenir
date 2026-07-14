@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
 using Apenir.Core.Entities;
 using Apenir.Core.Enums;
 using Apenir.Core.Interfaces;
@@ -27,17 +28,20 @@ public class BookingController : ControllerBase
     private readonly ICurrentUserService _currentUserService;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IWhatsAppService _whatsAppService;
+    private readonly IConfiguration _configuration;
 
     public BookingController(
         IApplicationDbContext context,
         ICurrentUserService currentUserService,
         IHttpClientFactory httpClientFactory,
-        IWhatsAppService whatsAppService)
+        IWhatsAppService whatsAppService,
+        IConfiguration configuration)
     {
         _context = context;
         _currentUserService = currentUserService;
         _httpClientFactory = httpClientFactory;
         _whatsAppService = whatsAppService;
+        _configuration = configuration;
     }
 
     [HttpGet]
@@ -314,8 +318,8 @@ public class BookingController : ControllerBase
 
     [HttpPost("book")]
     [EndpointSummary("Book diagnostic appointment via location")]
-    [EndpointDescription("Validates geographic distance, applies OSRM travel pricing, updates slot capacity concurrently, and logs booking details.")]
-    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<Appointment>))]
+    [EndpointDescription("Validates geographic distance, applies OSRM travel pricing, generates a Razorpay payment link, and returns it to the client.")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<object>))]
     [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
     public async Task<IActionResult> BookAppointment([FromBody] WebBookingRequest request, CancellationToken cancellationToken)
     {
@@ -334,6 +338,12 @@ public class BookingController : ControllerBase
         if (string.IsNullOrEmpty(currentUserId))
         {
             return Unauthorized(ApiResponse.FailureResult("User not authenticated."));
+        }
+
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+        if (user == null || string.IsNullOrWhiteSpace(user.Phone))
+        {
+            return BadRequest(ApiResponse.FailureResult("A registered phone number is required to process payment."));
         }
 
         // 1. Fetch Slot
@@ -387,9 +397,6 @@ public class BookingController : ControllerBase
             .ToListAsync(cancellationToken);
 
         decimal rate = 0m;
-        decimal totalCommissionPct = 0m;
-        int itemsCount = 0;
-
         foreach (var itemId in itemIds)
         {
             var s = services.FirstOrDefault(x => x.Id == itemId);
@@ -397,8 +404,6 @@ public class BookingController : ControllerBase
             {
                 var bs = branchServices.FirstOrDefault(x => x.ServiceId == itemId);
                 rate += bs?.CustomPrice ?? s.BasePrice;
-                totalCommissionPct += bs?.CustomCommissionPct ?? s.PlatformCommissionPct;
-                itemsCount++;
             }
             else
             {
@@ -407,13 +412,9 @@ public class BookingController : ControllerBase
                 {
                     var bp = branchPackages.FirstOrDefault(x => x.PackageId == itemId);
                     rate += bp?.CustomPrice ?? p.BasePrice;
-                    totalCommissionPct += bp?.CustomCommissionPct ?? p.PlatformCommissionPct;
-                    itemsCount++;
                 }
             }
         }
-
-        decimal avgCommissionPct = itemsCount > 0 ? (totalCommissionPct / itemsCount) : 15.00m;
 
         // Extra travel cost based on OSRM road distance
         decimal travelCost = (decimal)roadDistance * (branch.PerKmCharge ?? 0m);
@@ -422,183 +423,70 @@ public class BookingController : ControllerBase
             ? (int)Math.Round((memberCount - 1) * rate * 0.8m)
             : 0) + (int)Math.Round(travelCost);
 
-        // 4. Update Slot capacity safely under database transaction (if context is a DbContext and supports transactions)
-        if (_context is DbContext dbContext)
-        {
-            try
-            {
-                await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-                
-                // Re-fetch slot to ensure fresh status under transaction
-                var freshSlot = await _context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == request.SlotId, cancellationToken);
-                if (freshSlot == null || !freshSlot.IsAvailable || freshSlot.BookedCount + memberCount > freshSlot.MaxCapacity)
-                {
-                    await transaction.RollbackAsync(cancellationToken);
-                    return BadRequest(ApiResponse.FailureResult("Selected slot has insufficient capacity."));
-                }
-
-                freshSlot.BookedCount += memberCount;
-                if (freshSlot.BookedCount >= freshSlot.MaxCapacity)
-                    freshSlot.IsAvailable = false;
-
-                _context.AppointmentSlots.Update(freshSlot);
-                await _context.SaveChangesAsync(cancellationToken);
-                await transaction.CommitAsync(cancellationToken);
-            }
-            catch (Exception ex)
-            {
-                if (ex.Message.Contains("transaction", StringComparison.OrdinalIgnoreCase) || 
-                    ex.Message.Contains("replica set", StringComparison.OrdinalIgnoreCase))
-                {
-                    slot.BookedCount += memberCount;
-                    if (slot.BookedCount >= slot.MaxCapacity)
-                        slot.IsAvailable = false;
-                    _context.AppointmentSlots.Update(slot);
-                }
-                else
-                {
-                    throw;
-                }
-            }
-        }
-        else
-        {
-            slot.BookedCount += memberCount;
-            if (slot.BookedCount >= slot.MaxCapacity)
-                slot.IsAvailable = false;
-            _context.AppointmentSlots.Update(slot);
-        }
-
-        // 5. Create Appointment
-        var bookingId = $"BK-{DateTime.UtcNow:yyyyMMdd}-{new Random().Next(1000, 9999)}";
+        // Generate Razorpay Payment Link
+        var rzpKeyId = _configuration["Razorpay:KeyId"];
+        var rzpKeySecret = _configuration["Razorpay:KeySecret"];
         var itemNames = services.Select(s => s.Name).Concat(packages.Select(p => p.Name)).ToList();
         var itemNamesStr = string.Join(", ", itemNames);
-        var locationAddress = $"{request.BuildingDetails}, Floor {request.Floor}, Landmark: {request.Landmark} | Tests: {itemNamesStr} (Includes ₹{Math.Round(travelCost)} travel fee for {roadDistance:F2} km)";
-
-        var appointment = new Appointment
-        {
-            Id = Guid.NewGuid().ToString(),
-            AppointmentNumber = bookingId,
-            CustomerUserId = currentUserId,
-            BranchId = branch.Id,
-            AppointmentSlotId = slot.Id,
-            LocationLatitude = (decimal)request.Latitude,
-            LocationLongitude = (decimal)request.Longitude,
-            LocationAddress = locationAddress,
-            BuildingDetails = request.BuildingDetails,
-            Floor = request.Floor,
-            Landmark = request.Landmark,
-            Passcode = new Random().Next(1000, 9999).ToString(),
-            Status = AppointmentStatus.Confirmed,
-            TotalAmount = total,
-            PlatformCommission = total * (avgCommissionPct / 100m),
-            LabPayout = total * (1m - (avgCommissionPct / 100m)),
-            CreatedAt = DateTime.UtcNow,
-            MemberCount = memberCount
-        };
-
-        _context.Appointments.Add(appointment);
-
-        // Add Member Profiles
-        var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
-        var customerName = user?.Name ?? "Patient";
-
-        for (int i = 0; i < memberCount; i++)
-        {
-            var member = new AppointmentMember
-            {
-                Id = Guid.NewGuid().ToString(),
-                AppointmentId = appointment.Id,
-                MemberName = i == 0 ? customerName : $"Member {i + 1}",
-                Age = 0,
-                Gender = Gender.Other,
-                Relationship = i == 0 ? "Self" : "Family Member",
-                UniqueNumber = $"MEM-{Guid.NewGuid().ToString("N").Substring(0, 8).ToUpper()}",
-                TestName = itemNamesStr
-            };
-            _context.AppointmentMembers.Add(member);
-        }
-
-        // Add Payment record
-        var payment = new Payment
-        {
-            Id = Guid.NewGuid().ToString(),
-            AppointmentId = appointment.Id,
-            RazorpayOrderId = $"order_WEB_{bookingId.Replace("-", "")}",
-            RazorpayPaymentId = $"pay_WEB_{bookingId.Replace("-", "")}",
-            Status = PaymentStatus.Paid,
-            PaymentMethod = PaymentMethod.UPI,
-            PaidAt = DateTime.UtcNow,
-            CreatedAt = DateTime.UtcNow
-        };
-        _context.Payments.Add(payment);
-
-        await _context.SaveChangesAsync(cancellationToken);
-
-        // Generate Invoice PDF
-        var invoicesFolder = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "invoices");
-        if (!Directory.Exists(invoicesFolder))
-        {
-            Directory.CreateDirectory(invoicesFolder);
-        }
-        var invoiceFileName = $"Invoice_{bookingId}.pdf";
-        var invoiceFilePath = Path.Combine(invoicesFolder, invoiceFileName);
-
-        var slotDisplay = $"{slot.SlotDate:dddd, MMM dd yyyy} @ {slot.StartTime:hh:mm tt}";
-        var receiptText = $"APENIR DIAGNOSTIC SERVICES - INVOICE\n" +
-                          $"--------------------------------------------------\n" +
-                          $"Booking ID   : {bookingId}\n" +
-                          $"Customer Name: {customerName}\n" +
-                          $"Phone        : +{user?.Phone ?? ""}\n" +
-                          $"Lab Branch   : {branch?.Name ?? "Selected Lab"}\n" +
-                          $"Date & Time  : {slotDisplay}\n" +
-                          $"Members      : {memberCount}\n" +
-                          $"--------------------------------------------------\n" +
-                          $"Booked Tests:\n" +
-                          string.Join("\n", itemNames.Select(n => " - " + n)) + "\n" +
-                          $"--------------------------------------------------\n" +
-                          $"Total Paid   : INR {total}\n" +
-                          $"--------------------------------------------------\n" +
-                          $"Thank you for choosing Apenir Medical!";
-
+        
+        string paymentUrl = "https://rzp.io/i/example";
         try
         {
-            var pdfBytes = CreateSimplePdf(receiptText);
-            await System.IO.File.WriteAllBytesAsync(invoiceFilePath, pdfBytes, cancellationToken);
+            var rzpClient = _httpClientFactory.CreateClient();
+            var authString = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{rzpKeyId}:{rzpKeySecret}"));
+            rzpClient.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", authString);
 
-            // Send to user's WhatsApp if they have a phone number
-            if (user != null && !string.IsNullOrEmpty(user.Phone))
+            var rzpPayload = new
             {
-                var confirmMsg =
-                    $"✅ *Booking Confirmed!*\n\n" +
-                    $"🆔 Booking ID: *{bookingId}*\n" +
-                    $"🩸 Service: {itemNamesStr}\n" +
-                    $"🏥 Lab: {branch?.Name ?? "Selected Lab"}\n" +
-                    $"📅 Date & Time: {slotDisplay}\n" +
-                    $"👥 Persons: {memberCount}\n" +
-                    $"💰 Amount Paid: ₹{total}\n" +
-                    $"🔑 Passcode/OTP: *{appointment.Passcode}*\n\n" +
-                    $"🧪 *Instructions:*\n" +
-                    $"• Fast for 8-10 hours prior to sample collection.\n" +
-                    $"• Show the phlebotomist your Passcode (*{appointment.Passcode}*).\n" +
-                    $"• Report PDF will be sent to your WhatsApp on completion.\n\n" +
-                    $"Thank you for choosing LabCare! 🙏";
+                amount = total * 100,
+                currency = "INR",
+                accept_partial = false,
+                description = $"LabCare Booking: {itemNamesStr}",
+                customer = new
+                {
+                    name = user.Name ?? "Web User",
+                    contact = $"+{user.Phone.Trim()}",
+                },
+                notify = new { sms = false, email = false },
+                reminder_enable = false,
+                notes = new
+                {
+                    phone = user.Phone.Trim(),
+                    lab = branch.Name,
+                    selected_test_id = string.Join(",", itemIds),
+                    selected_lab_id = branch.Id,
+                    selected_slot_id = slot.Id,
+                    member_count = memberCount.ToString(),
+                    building_details = request.BuildingDetails ?? "",
+                    landmark = request.Landmark ?? "",
+                    floor = request.Floor ?? "",
+                    latitude = request.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    longitude = request.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                }
+            };
 
-                await _whatsAppService.SendTextMessageAsync(user.Phone, confirmMsg);
+            var content = new StringContent(JsonSerializer.Serialize(rzpPayload), Encoding.UTF8, "application/json");
+            var response = await rzpClient.PostAsync("https://api.razorpay.com/v1/payment_links", content, cancellationToken);
 
-                // Build public invoice URL
-                var req = HttpContext.Request;
-                var reqBaseUrl = $"{req.Scheme}://{req.Host}{req.PathBase}";
-                var invoiceUrl = $"{reqBaseUrl}/invoices/{invoiceFileName}";
-                await _whatsAppService.SendDocumentMessageAsync(user.Phone, invoiceUrl, $"Invoice_{bookingId}.pdf");
+            if (response.IsSuccessStatusCode)
+            {
+                var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+                using var rzpDoc = JsonDocument.Parse(responseBody);
+                paymentUrl = rzpDoc.RootElement.GetProperty("short_url").GetString() ?? paymentUrl;
+            }
+            else
+            {
+                var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
+                return BadRequest(ApiResponse.FailureResult($"Razorpay link generation failed: {errorBody}"));
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error generating or sending receipt: {ex.Message}");
+            return StatusCode(500, ApiResponse.FailureResult($"Razorpay integration error: {ex.Message}"));
         }
 
-        return Ok(ApiResponse<Appointment>.SuccessResult(appointment, "Appointment booked successfully."));
+        return Ok(ApiResponse<object>.SuccessResult(new { paymentUrl }, "Payment link generated successfully."));
     }
 
     private static byte[] CreateSimplePdf(string text)
