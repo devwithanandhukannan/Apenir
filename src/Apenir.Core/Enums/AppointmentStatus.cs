@@ -7,5 +7,10 @@ public enum AppointmentStatus
     Assigned = 3,
     Collected = 4,
     Completed = 5,
-    Cancelled = 6
+    Cancelled = 6,
+    Coming = 7,
+    Reached = 8,
+    OtpVerified = 9,
+    TakingTest = 10,
+    HandoverToLab = 11
 }

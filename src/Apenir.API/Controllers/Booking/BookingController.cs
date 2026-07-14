@@ -597,6 +597,72 @@ public class BookingController : ControllerBase
     }
 
     private static double ToRadians(double val) => (Math.PI / 180) * val;
+
+    [HttpGet("lookup/{token}")]
+    [AllowAnonymous]
+    [EndpointSummary("Look up appointment and member by unique token ID")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<LookupMemberResult>))]
+    [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+    public async Task<IActionResult> LookupMember([FromRoute] string token, CancellationToken cancellationToken)
+    {
+        var member = await _context.AppointmentMembers
+            .FirstOrDefaultAsync(m => m.UniqueNumber == token, cancellationToken);
+
+        if (member == null)
+        {
+            return NotFound(ApiResponse.FailureResult("Invalid token ID. No collection member found."));
+        }
+
+        var appointment = await _context.Appointments
+            .Include(a => a.Branch)
+            .FirstOrDefaultAsync(a => a.Id == member.AppointmentId, cancellationToken);
+
+        if (appointment == null)
+        {
+            return NotFound(ApiResponse.FailureResult("Linked appointment not found."));
+        }
+
+        var customerUser = await _context.Users
+            .FirstOrDefaultAsync(u => u.Id == appointment.CustomerUserId, cancellationToken);
+
+        var result = new LookupMemberResult
+        {
+            UniqueNumber = member.UniqueNumber ?? string.Empty,
+            MemberName = member.MemberName,
+            Age = member.Age,
+            Gender = member.Gender.ToString(),
+            Relationship = member.Relationship,
+            TestName = member.TestName ?? string.Empty,
+            AdditionalNotes = member.AdditionalNotes,
+            AppointmentNumber = appointment.AppointmentNumber,
+            AppointmentStatus = appointment.Status.ToString(),
+            CustomerName = customerUser?.Name ?? "Patient",
+            CustomerPhone = customerUser?.Phone ?? string.Empty,
+            Address = appointment.LocationAddress,
+            LabName = appointment.Branch?.Name ?? "Associated Lab",
+            ReportPdfPath = appointment.ReportPdfPath
+        };
+
+        return Ok(ApiResponse<LookupMemberResult>.SuccessResult(result, "Member lookup successful."));
+    }
+}
+
+public class LookupMemberResult
+{
+    public string UniqueNumber { get; set; } = string.Empty;
+    public string MemberName { get; set; } = string.Empty;
+    public int Age { get; set; }
+    public string Gender { get; set; } = string.Empty;
+    public string Relationship { get; set; } = string.Empty;
+    public string TestName { get; set; } = string.Empty;
+    public string? AdditionalNotes { get; set; }
+    public string AppointmentNumber { get; set; } = string.Empty;
+    public string AppointmentStatus { get; set; } = string.Empty;
+    public string CustomerName { get; set; } = string.Empty;
+    public string CustomerPhone { get; set; } = string.Empty;
+    public string Address { get; set; } = string.Empty;
+    public string LabName { get; set; } = string.Empty;
+    public string? ReportPdfPath { get; set; }
 }
 
 public class WebBookingRequest

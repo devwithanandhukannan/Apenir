@@ -118,23 +118,33 @@ public class StaffController : ControllerBase
         switch (request.Status.ToLower().Trim())
         {
             case "coming":
-                targetStatus = AppointmentStatus.Assigned; // Or custom state if added, keeping standard Confirmed/Assigned
+                targetStatus = AppointmentStatus.Coming;
                 waMessage = $"🚀 *Phlebotomist is on their way!*\n\nOur phlebotomist is en route to collect your diagnostic samples. Please be ready at your shared location.";
                 break;
 
             case "reached":
-                targetStatus = AppointmentStatus.Collected; // Transitions to Collected eventually, or stays Assigned with Reached note
-                // Let's keep it in Assigned or custom state, here we trigger arrival message
+                targetStatus = AppointmentStatus.Reached;
                 waMessage = $"📍 *Phlebotomist has arrived!*\n\nOur phlebotomist has reached your location. Please share your 4-digit Passcode/OTP (*{appointment.Passcode}*) to verify collection.";
                 break;
 
+            case "taketest":
+                targetStatus = AppointmentStatus.TakingTest;
+                waMessage = $"🔬 *Test collection in progress!*\n\nOur phlebotomist is now collecting your diagnostic samples.";
+                break;
+
+            case "collect":
+                targetStatus = AppointmentStatus.Collected;
+                waMessage = $"✅ *Samples collected successfully!*\n\nYour diagnostic samples have been successfully collected and sealed.";
+                break;
+
+            case "handover":
             case "reachedlab":
-                targetStatus = AppointmentStatus.Collected; // Marks samples delivered to lab
-                waMessage = $"🔬 *Samples received at lab!*\n\nYour collected diagnostic samples have reached our laboratory safely and are being queued for testing. Reports will be sent here shortly.";
+                targetStatus = AppointmentStatus.HandoverToLab;
+                waMessage = $"🔬 *Samples handed over to lab!*\n\nYour samples have been delivered to our laboratory branch and are now queued for analysis. Reports will be ready soon.";
                 break;
 
             default:
-                return BadRequest(ApiResponse.FailureResult("Invalid status transition. Allowed values: coming, reached, reachedlab."));
+                return BadRequest(ApiResponse.FailureResult("Invalid status transition. Allowed values: coming, reached, taketest, collect, handover."));
         }
 
         // Save status transition
@@ -218,7 +228,7 @@ public class StaffController : ControllerBase
         }
 
         // Verify and set collected status
-        appointment.Status = AppointmentStatus.Collected;
+        appointment.Status = AppointmentStatus.OtpVerified;
         appointment.UpdatedAt = DateTime.UtcNow;
         _context.Appointments.Update(appointment);
 
@@ -227,7 +237,7 @@ public class StaffController : ControllerBase
         // Notify WhatsApp
         if (appointment.CustomerUser != null && !string.IsNullOrEmpty(appointment.CustomerUser.Phone))
         {
-            var waMessage = $"✅ *Passcode Verified!*\n\nDiagnostic samples for {appointment.MemberCount} member(s) have been collected successfully. We are transporting them to the lab.";
+            var waMessage = $"🔑 *Passcode Verified!*\n\nYour collection passcode has been verified successfully. Our phlebotomist will now prepare for test collection.";
             await _whatsAppService.SendTextMessageAsync(appointment.CustomerUser.Phone, waMessage);
         }
 
@@ -320,10 +330,10 @@ public class StaffController : ControllerBase
         {
             return NotFound(ApiResponse.FailureResult("Assigned appointment not found."));
         }
-
-        if (request.Members.Count != appointment.MemberCount)
+        if (appointment.MemberCount != request.Members.Count)
         {
-            return BadRequest(ApiResponse.FailureResult($"This appointment was booked for {appointment.MemberCount} member(s). You must provide details for exactly {appointment.MemberCount} member(s)."));
+            appointment.MemberCount = request.Members.Count;
+            _context.Appointments.Update(appointment);
         }
 
         // Delete any existing members for this appointment to handle re-submissions cleanly
@@ -354,6 +364,172 @@ public class StaffController : ControllerBase
 
         return Ok(ApiResponse.SuccessResult("Member details saved successfully."));
     }
+
+    [HttpPost("appointments/{id}/register-member-profile")]
+    [EndpointSummary("Register a new customer profile on-the-spot")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<CustomerProfileDto>))]
+    public async Task<IActionResult> RegisterMemberProfile(
+        [FromRoute] string id,
+        [FromBody] RegisterMemberProfileRequest request,
+        CancellationToken cancellationToken)
+    {
+        var currentUserId = _currentUserService.UserId?.ToString();
+        var appointment = await _context.Appointments
+            .Include(a => a.CustomerUser)
+            .FirstOrDefaultAsync(a => a.Id == id && a.AssignedStaffId == currentUserId, cancellationToken);
+
+        if (appointment == null)
+        {
+            return NotFound(ApiResponse.FailureResult("Assigned appointment not found."));
+        }
+
+        // Create new User
+        var newUser = new User
+        {
+            Id = Guid.NewGuid().ToString(),
+            Name = request.Name.Trim(),
+            Phone = request.Phone?.Trim() ?? appointment.CustomerUser?.Phone,
+            Email = !string.IsNullOrWhiteSpace(request.Email) ? request.Email.Trim().ToLower() : $"{Guid.NewGuid().ToString("N").Substring(0, 8)}@apenir-temp.com",
+            Role = UserRole.Customer,
+            IsActive = true,
+            IsDeleted = false,
+            Status = "Active",
+            CreatedAt = DateTime.UtcNow
+        };
+
+        _context.Users.Add(newUser);
+
+        // Create Customer profile
+        var newCustomer = new Customer
+        {
+            Id = Guid.NewGuid().ToString(),
+            UserId = newUser.Id,
+            DateOfBirth = DateOnly.TryParse(request.Dob, out var dob) ? dob : null,
+            GenderEnum = Enum.TryParse<Gender>(request.Gender, true, out var genderVal) ? genderVal : Gender.Other,
+            Address = request.Address ?? appointment.LocationAddress,
+            District = request.District
+        };
+
+        _context.Customers.Add(newCustomer);
+        await _context.SaveChangesAsync(cancellationToken);
+
+        var result = new CustomerProfileDto
+        {
+            Id = newCustomer.Id,
+            Name = newUser.Name,
+            Gender = newCustomer.GenderEnum.ToString(),
+            Dob = newCustomer.DateOfBirth?.ToString("yyyy-MM-dd") ?? $"Age: {request.Age}",
+            Address = newCustomer.Address
+        };
+
+        return Ok(ApiResponse<CustomerProfileDto>.SuccessResult(result, "New customer profile registered successfully on-the-spot."));
+    }
+
+    [HttpGet("stats")]
+    [EndpointSummary("Get phlebotomy stats and history")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<StaffStatsDto>))]
+    public async Task<IActionResult> GetStaffStats(CancellationToken cancellationToken)
+    {
+        var currentUserId = _currentUserService.UserId?.ToString();
+        if (string.IsNullOrEmpty(currentUserId))
+        {
+            return Unauthorized(ApiResponse.FailureResult("User not authenticated."));
+        }
+
+        var appointments = await _context.Appointments
+            .Where(a => a.AssignedStaffId == currentUserId)
+            .ToListAsync(cancellationToken);
+
+        var slotIds = appointments.Select(a => a.AppointmentSlotId).Distinct().ToList();
+        var slots = await _context.AppointmentSlots
+            .Where(s => slotIds.Contains(s.Id))
+            .ToListAsync(cancellationToken);
+
+        foreach (var a in appointments)
+        {
+            a.AppointmentSlot = slots.FirstOrDefault(s => s.Id == a.AppointmentSlotId);
+        }
+
+        var today = DateOnly.FromDateTime(DateTime.Today);
+        var todayDt = DateTime.Today;
+        int diff = (7 + (todayDt.DayOfWeek - DayOfWeek.Monday)) % 7;
+        var startOfWeek = DateOnly.FromDateTime(todayDt.AddDays(-1 * diff));
+
+        var todayCompleted = appointments
+            .Where(a => (a.Status == AppointmentStatus.Collected || a.Status == AppointmentStatus.Completed || a.Status == AppointmentStatus.HandoverToLab) && 
+                        a.AppointmentSlot?.SlotDate == today)
+            .Count();
+
+        var weeklyCompleted = appointments
+            .Where(a => (a.Status == AppointmentStatus.Collected || a.Status == AppointmentStatus.Completed || a.Status == AppointmentStatus.HandoverToLab) && 
+                        a.AppointmentSlot?.SlotDate >= startOfWeek)
+            .Count();
+
+        var pendingCount = appointments
+            .Where(a => a.Status != AppointmentStatus.Completed && a.Status != AppointmentStatus.Cancelled && a.Status != AppointmentStatus.HandoverToLab)
+            .Count();
+
+        var customerIds = appointments.Select(a => a.CustomerUserId).Distinct().ToList();
+        var customers = await _context.Users
+            .Where(u => customerIds.Contains(u.Id))
+            .ToListAsync(cancellationToken);
+
+        var history = appointments
+            .Where(a => a.Status == AppointmentStatus.Completed || a.Status == AppointmentStatus.HandoverToLab || a.Status == AppointmentStatus.Collected)
+            .OrderByDescending(a => a.UpdatedAt ?? a.CreatedAt)
+            .Select(a => {
+                var custName = customers.FirstOrDefault(c => c.Id == a.CustomerUserId)?.Name ?? "Patient";
+                return new StaffHistoryItemDto
+                {
+                    Id = a.Id,
+                    AppointmentNumber = a.AppointmentNumber,
+                    CustomerName = custName,
+                    SlotDate = a.AppointmentSlot?.SlotDate,
+                    Status = a.Status.ToString(),
+                    MemberCount = a.MemberCount
+                };
+            }).ToList();
+
+        var stats = new StaffStatsDto
+        {
+            TodayCount = todayCompleted,
+            WeeklyCount = weeklyCompleted,
+            PendingCount = pendingCount,
+            PreviousHistory = history
+        };
+
+        return Ok(ApiResponse<StaffStatsDto>.SuccessResult(stats, "Stats and history retrieved successfully."));
+    }
+}
+
+public class StaffStatsDto
+{
+    public int TodayCount { get; set; }
+    public int WeeklyCount { get; set; }
+    public int PendingCount { get; set; }
+    public List<StaffHistoryItemDto> PreviousHistory { get; set; } = new();
+}
+
+public class StaffHistoryItemDto
+{
+    public string Id { get; set; } = string.Empty;
+    public string AppointmentNumber { get; set; } = string.Empty;
+    public string CustomerName { get; set; } = string.Empty;
+    public DateOnly? SlotDate { get; set; }
+    public string Status { get; set; } = string.Empty;
+    public int MemberCount { get; set; }
+}
+
+public class RegisterMemberProfileRequest
+{
+    public string Name { get; set; } = string.Empty;
+    public string? Phone { get; set; }
+    public string? Email { get; set; }
+    public string? Dob { get; set; }
+    public int Age { get; set; }
+    public string Gender { get; set; } = string.Empty;
+    public string? Address { get; set; }
+    public string? District { get; set; }
 }
 
 public class StaffAppointmentDto
