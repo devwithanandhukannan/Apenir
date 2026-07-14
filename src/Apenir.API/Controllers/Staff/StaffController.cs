@@ -315,6 +315,40 @@ public class StaffController : ControllerBase
         return Ok(ApiResponse<OtpVerificationResult>.SuccessResult(result, "OTP passcode verified successfully."));
     }
 
+    [HttpGet("appointments/{id}/members")]
+    [EndpointSummary("Get members details for an appointment")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<AppointmentMemberDto>>))]
+    [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+    public async Task<IActionResult> GetAppointmentMembers(
+        [FromRoute] string id,
+        CancellationToken cancellationToken)
+    {
+        var currentUserId = _currentUserService.UserId?.ToString();
+        var appointment = await _context.Appointments
+            .FirstOrDefaultAsync(a => a.Id == id && a.AssignedStaffId == currentUserId, cancellationToken);
+
+        if (appointment == null)
+        {
+            return NotFound(ApiResponse.FailureResult("Assigned appointment not found."));
+        }
+
+        var members = await _context.AppointmentMembers
+            .Where(m => m.AppointmentId == id)
+            .Select(m => new AppointmentMemberDto
+            {
+                Name = m.MemberName,
+                Age = m.Age,
+                Gender = m.Gender.ToString(),
+                Relationship = m.Relationship,
+                AdditionalNotes = m.AdditionalNotes,
+                UniqueNumber = m.UniqueNumber,
+                TestName = m.TestName
+            })
+            .ToListAsync(cancellationToken);
+
+        return Ok(ApiResponse<List<AppointmentMemberDto>>.SuccessResult(members, "Appointment members retrieved."));
+    }
+
     [HttpPost("appointments/{id}/members")]
     [EndpointSummary("Add appointment member details")]
     [EndpointDescription("Validates that exactly the booked number of members are provided and saves their details.")]
@@ -392,46 +426,150 @@ public class StaffController : ControllerBase
             return NotFound(ApiResponse.FailureResult("Assigned appointment not found."));
         }
 
-        // Create new User
-        var newUser = new User
+        // 1. Calculate Birth Date fallback from Age
+        DateOnly? dateOfBirth = null;
+        if (DateOnly.TryParse(request.Dob, out var dob))
         {
-            Id = Guid.NewGuid().ToString(),
-            Name = request.Name.Trim(),
-            Phone = request.Phone?.Trim() ?? appointment.CustomerUser?.Phone,
-            Email = !string.IsNullOrWhiteSpace(request.Email) ? request.Email.Trim().ToLower() : $"{Guid.NewGuid().ToString("N").Substring(0, 8)}@apenir-temp.com",
-            Role = UserRole.Customer,
-            IsActive = true,
-            IsDeleted = false,
-            Status = "Active",
-            CreatedAt = DateTime.UtcNow
-        };
-
-        _context.Users.Add(newUser);
-
-        // Create Customer profile
-        var newCustomer = new Customer
+            dateOfBirth = dob;
+        }
+        else if (request.Age > 0)
         {
-            Id = Guid.NewGuid().ToString(),
-            UserId = newUser.Id,
-            DateOfBirth = DateOnly.TryParse(request.Dob, out var dob) ? dob : null,
-            GenderEnum = Enum.TryParse<Gender>(request.Gender, true, out var genderVal) ? genderVal : Gender.Other,
-            Address = request.Address ?? appointment.LocationAddress,
-            District = request.District
-        };
+            dateOfBirth = DateOnly.FromDateTime(DateTime.Today.AddYears(-request.Age));
+        }
 
-        _context.Customers.Add(newCustomer);
+        var genderVal = Enum.TryParse<Gender>(request.Gender, true, out var gVal) ? gVal : Gender.Other;
+
+        // 2. Check if a User with the given Phone or Email already exists
+        var phoneToUse = request.Phone?.Trim() ?? appointment.CustomerUser?.Phone;
+        var emailToUse = request.Email?.Trim()?.ToLower();
+
+        User? existingUser = null;
+        if (!string.IsNullOrWhiteSpace(phoneToUse))
+        {
+            existingUser = await _context.Users
+                .FirstOrDefaultAsync(u => u.Phone == phoneToUse, cancellationToken);
+        }
+
+        if (existingUser == null && !string.IsNullOrWhiteSpace(emailToUse))
+        {
+            existingUser = await _context.Users
+                .FirstOrDefaultAsync(u => u.Email == emailToUse, cancellationToken);
+        }
+
+        Customer? customerProfile = null;
+
+        if (existingUser != null)
+        {
+            // Update name or email if empty
+            bool updatedUser = false;
+            if (string.IsNullOrWhiteSpace(existingUser.Name) && !string.IsNullOrWhiteSpace(request.Name))
+            {
+                existingUser.Name = request.Name.Trim();
+                updatedUser = true;
+            }
+            if (string.IsNullOrWhiteSpace(existingUser.Email) && !string.IsNullOrWhiteSpace(emailToUse))
+            {
+                existingUser.Email = emailToUse;
+                updatedUser = true;
+            }
+
+            if (updatedUser)
+            {
+                _context.Users.Update(existingUser);
+            }
+
+            // Find existing customer profile
+            customerProfile = await _context.Customers
+                .FirstOrDefaultAsync(c => c.UserId == existingUser.Id, cancellationToken);
+
+            if (customerProfile == null)
+            {
+                customerProfile = new Customer
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    UserId = existingUser.Id,
+                    DateOfBirth = dateOfBirth,
+                    GenderEnum = genderVal,
+                    Address = request.Address ?? appointment.LocationAddress,
+                    District = request.District
+                };
+                _context.Customers.Add(customerProfile);
+            }
+            else
+            {
+                // Update empty fields
+                bool updatedCust = false;
+                if (customerProfile.DateOfBirth == null && dateOfBirth != null)
+                {
+                    customerProfile.DateOfBirth = dateOfBirth;
+                    updatedCust = true;
+                }
+                if (customerProfile.GenderEnum == null)
+                {
+                    customerProfile.GenderEnum = genderVal;
+                    updatedCust = true;
+                }
+                if (string.IsNullOrWhiteSpace(customerProfile.Address) && !string.IsNullOrWhiteSpace(request.Address))
+                {
+                    customerProfile.Address = request.Address;
+                    updatedCust = true;
+                }
+                if (string.IsNullOrWhiteSpace(customerProfile.District) && !string.IsNullOrWhiteSpace(request.District))
+                {
+                    customerProfile.District = request.District;
+                    updatedCust = true;
+                }
+
+                if (updatedCust)
+                {
+                    _context.Customers.Update(customerProfile);
+                }
+            }
+        }
+        else
+        {
+            // 3. Create a brand new User and Customer profile
+            var tempEmail = !string.IsNullOrWhiteSpace(emailToUse) ? emailToUse : $"{Guid.NewGuid().ToString("N").Substring(0, 8)}@apenir-temp.com";
+            var newUser = new User
+            {
+                Id = Guid.NewGuid().ToString(),
+                Name = request.Name.Trim(),
+                Phone = phoneToUse,
+                Email = tempEmail,
+                Role = UserRole.Customer,
+                IsActive = true,
+                IsDeleted = false,
+                Status = "Active",
+                CreatedAt = DateTime.UtcNow
+            };
+
+            _context.Users.Add(newUser);
+
+            customerProfile = new Customer
+            {
+                Id = Guid.NewGuid().ToString(),
+                UserId = newUser.Id,
+                DateOfBirth = dateOfBirth,
+                GenderEnum = genderVal,
+                Address = request.Address ?? appointment.LocationAddress,
+                District = request.District
+            };
+
+            _context.Customers.Add(customerProfile);
+        }
+
         await _context.SaveChangesAsync(cancellationToken);
 
         var result = new CustomerProfileDto
         {
-            Id = newCustomer.Id,
-            Name = newUser.Name,
-            Gender = newCustomer.GenderEnum.ToString(),
-            Dob = newCustomer.DateOfBirth?.ToString("yyyy-MM-dd") ?? $"Age: {request.Age}",
-            Address = newCustomer.Address
+            Id = customerProfile.Id,
+            Name = existingUser != null ? existingUser.Name : request.Name.Trim(),
+            Gender = customerProfile.GenderEnum.ToString(),
+            Dob = customerProfile.DateOfBirth?.ToString("yyyy-MM-dd") ?? $"Age: {request.Age}",
+            Address = customerProfile.Address
         };
 
-        return Ok(ApiResponse<CustomerProfileDto>.SuccessResult(result, "New customer profile registered successfully on-the-spot."));
+        return Ok(ApiResponse<CustomerProfileDto>.SuccessResult(result, "Customer profile registered/linked successfully."));
     }
 
     [HttpGet("stats")]
