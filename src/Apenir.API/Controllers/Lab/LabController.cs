@@ -1989,7 +1989,7 @@ namespace Apenir.API.Controllers
                 return NotFound(ApiResponse.FailureResult("User not found."));
             }
 
-            if (!_passwordHasher.Verify(user.PasswordHash ?? string.Empty, request.OldPassword))
+            if (!_passwordHasher.Verify(request.OldPassword, user.PasswordHash ?? string.Empty))
             {
                 return BadRequest(ApiResponse.FailureResult("Incorrect old password."));
             }

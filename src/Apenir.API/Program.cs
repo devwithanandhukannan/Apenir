@@ -175,7 +175,7 @@ using (var scope = app.Services.CreateScope())
             updated = true;
         }
         // Verify password: if verification fails, update hash
-        if (!passwordHasher.Verify(adminUser.PasswordHash, defaultPass))
+        if (!passwordHasher.Verify(defaultPass, adminUser.PasswordHash))
         {
             adminUser.PasswordHash = passwordHasher.Hash(defaultPass);
             updated = true;
