@@ -72,7 +72,7 @@ namespace Apenir.API.Controllers
 
             if (result.Success && result.Data != null)
             {
-                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/api/auth/refresh");
+                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/");
                 result.Data = result.Data with { RefreshToken = string.Empty }; // Hide from response body
             }
 
@@ -110,7 +110,7 @@ namespace Apenir.API.Controllers
 
             if (result.Success && result.Data != null)
             {
-                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/api/auth/refresh");
+                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/");
                 result.Data.RefreshToken = string.Empty;
                 return Ok(ApiResponse<AuthResponse>.SuccessResult(new AuthResponse(result.Data.AccessToken, string.Empty, string.Empty, string.Empty))); // Ideally we'd have a unified response type
             }
@@ -138,7 +138,7 @@ namespace Apenir.API.Controllers
             var result = await _mediator.Send(new CommonLogoutCommand(refreshToken, HttpContext.Connection.RemoteIpAddress?.ToString()), cancellationToken);
             if (result.Success)
             {
-                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/api/auth/refresh");
+                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/");
             }
             return Ok(result);
         }
@@ -154,7 +154,7 @@ namespace Apenir.API.Controllers
             var result = await _mediator.Send(new CommonLogoutAllDevicesCommand(), cancellationToken);
             if (result.Success)
             {
-                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/api/auth/refresh");
+                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/");
             }
             return Ok(result);
         }

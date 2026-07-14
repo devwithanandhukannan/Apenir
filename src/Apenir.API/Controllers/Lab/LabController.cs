@@ -136,7 +136,7 @@ namespace Apenir.API.Controllers
             await _context.SaveChangesAsync(cancellationToken);
 
             // Set secure cookie
-            CookieHelper.SetRefreshTokenCookie(HttpContext, refreshTokenString, "/api/auth/refresh");
+            CookieHelper.SetRefreshTokenCookie(HttpContext, refreshTokenString, "/");
 
             // Retrieve associated Branch details
             Branch? userBranch = null;

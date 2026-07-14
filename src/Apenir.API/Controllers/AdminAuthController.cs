@@ -35,7 +35,7 @@ namespace Apenir.API.Controllers
             var result = await _mediator.Send(new AdminLoginCommand(request), cancellationToken);
             if (result.Success && result.Data != null)
             {
-                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/api/auth/refresh");
+                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/");
                 result.Data.RefreshToken = string.Empty;
             }
             return Ok(result);
