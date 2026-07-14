@@ -20,8 +20,18 @@ public class StaffOnlyAttribute : Attribute, IAuthorizationFilter
             return;
         }
 
-        var roleClaim = user.FindFirst(ClaimTypes.Role);
-        if (roleClaim == null || roleClaim.Value != "Staff")
+        var roleClaims = System.Linq.Enumerable.Where(user.Claims, c => c.Type == ClaimTypes.Role || c.Type.Equals("role", StringComparison.OrdinalIgnoreCase));
+        bool isStaff = false;
+        foreach (var claim in roleClaims)
+        {
+            if (claim.Value.Equals("Staff", StringComparison.OrdinalIgnoreCase))
+            {
+                isStaff = true;
+                break;
+            }
+        }
+
+        if (!isStaff)
         {
             context.Result = new JsonResult(new { code = "FORBIDDEN", message = "Insufficient permissions" })
             {

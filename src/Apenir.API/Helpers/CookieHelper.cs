@@ -13,7 +13,7 @@ namespace Apenir.API.Helpers
             {
                 HttpOnly = true,
                 Secure = true,
-                SameSite = SameSiteMode.Strict,
+                SameSite = SameSiteMode.None,
                 Path = path,
                 Expires = DateTime.UtcNow.AddDays(expiryDays)
             });
@@ -25,7 +25,7 @@ namespace Apenir.API.Helpers
             {
                 HttpOnly = true,
                 Secure = true,
-                SameSite = SameSiteMode.Strict,
+                SameSite = SameSiteMode.None,
                 Path = path
             });
         }

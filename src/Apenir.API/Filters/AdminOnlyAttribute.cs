@@ -20,11 +20,11 @@ public class AdminOnlyAttribute : Attribute, IAuthorizationFilter
             return;
         }
 
-        var roleClaims = user.FindAll(ClaimTypes.Role);
+        var roleClaims = System.Linq.Enumerable.Where(user.Claims, c => c.Type == ClaimTypes.Role || c.Type.Equals("role", StringComparison.OrdinalIgnoreCase));
         bool isAdmin = false;
         foreach (var claim in roleClaims)
         {
-            if (claim.Value == "SuperAdmin" || claim.Value == "Admin")
+            if (claim.Value.Equals("SuperAdmin", StringComparison.OrdinalIgnoreCase) || claim.Value.Equals("Admin", StringComparison.OrdinalIgnoreCase))
             {
                 isAdmin = true;
                 break;
