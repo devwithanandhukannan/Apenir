@@ -918,6 +918,7 @@ namespace Apenir.API.Controllers
                 
                 user = existingUser;
                 user.Name = request.Name.Trim();
+                user.LabId = ownerBranch.LabId;
                 user.CreatedAt = DateTime.UtcNow;
                 _context.Users.Update(user);
             }
@@ -929,6 +930,7 @@ namespace Apenir.API.Controllers
                     Name = request.Name.Trim(),
                     Email = request.Email.Trim(),
                     Role = UserRole.Staff,
+                    LabId = ownerBranch.LabId,
                     IsActive = true,
                     IsDeleted = false,
                     Status = "notverified",
@@ -956,7 +958,7 @@ namespace Apenir.API.Controllers
 
             var config = HttpContext.RequestServices.GetService(typeof(Microsoft.Extensions.Configuration.IConfiguration)) as Microsoft.Extensions.Configuration.IConfiguration;
             var frontendUrl = config?["FrontendUrl"] ?? "https://admin.anandhu-kannan.in";
-            var verifyUrl = $"{frontendUrl.TrimEnd('/')}/staff/register?token={token}";
+            var verifyUrl = $"{frontendUrl.TrimEnd('/')}/register/staff?token={token}";
 
             var emailSubject = $"Welcome to Apenir - Complete Registration for {request.Name}";
             var emailBody = $@"
