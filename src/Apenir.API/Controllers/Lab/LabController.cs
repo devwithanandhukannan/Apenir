@@ -51,6 +51,34 @@ namespace Apenir.API.Controllers
             _jwtSettings = jwtSettings.Value;
         }
 
+        /// <summary>
+        /// Returns the Branch for the currently authenticated user.
+        /// Works for both Lab users (matched via LabUserId) and Staff users (matched via their LabId).
+        /// </summary>
+        private async Task<Branch?> GetCurrentBranchAsync(CancellationToken cancellationToken)
+        {
+            var currentUserId = _currentUserService.UserId?.ToString();
+            if (string.IsNullOrEmpty(currentUserId)) return null;
+
+            // Primary lookup: the logged-in user is the lab owner
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch != null) return branch;
+
+            // Fallback: the logged-in user is a Staff member – find the branch via their LabId
+            var user = await _context.Users.AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+
+            if (user != null && user.Role == UserRole.Staff && !string.IsNullOrEmpty(user.LabId))
+            {
+                branch = await _context.Branches.AsNoTracking()
+                    .FirstOrDefaultAsync(b => b.LabId == user.LabId, cancellationToken);
+            }
+
+            return branch;
+        }
+
         [HttpPost("login")]
         [AllowAnonymous]
         [EndpointSummary("Lab Portal Login")]
@@ -144,9 +172,7 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
         public async Task<IActionResult> GetBranchStaff(CancellationToken cancellationToken)
         {
-            var currentUserId = _currentUserService.UserId?.ToString();
-            var branch = await _context.Branches.AsNoTracking()
-                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            var branch = await GetCurrentBranchAsync(cancellationToken);
 
             if (branch == null)
             {
@@ -170,9 +196,7 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
         public async Task<IActionResult> GetBranchAppointments(CancellationToken cancellationToken)
         {
-            var currentUserId = _currentUserService.UserId?.ToString();
-            var branch = await _context.Branches.AsNoTracking()
-                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            var branch = await GetCurrentBranchAsync(cancellationToken);
 
             if (branch == null)
             {
@@ -324,12 +348,17 @@ namespace Apenir.API.Controllers
                 branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
                 if (branch != null && branch.LabUserId != currentUserId)
                 {
-                    return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                    // Allow staff who belong to this branch
+                    var currentUser = await _context.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+                    if (currentUser == null || currentUser.Role != UserRole.Staff || currentUser.LabId != branch.LabId)
+                    {
+                        return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                    }
                 }
             }
             else
             {
-                branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+                branch = await GetCurrentBranchAsync(cancellationToken);
             }
 
             if (branch == null)
@@ -502,12 +531,17 @@ namespace Apenir.API.Controllers
                 branch = await _context.Branches.AsNoTracking().FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
                 if (branch != null && branch.LabUserId != currentUserId)
                 {
-                    return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                    // Allow staff who belong to this branch
+                    var currentUser = await _context.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+                    if (currentUser == null || currentUser.Role != UserRole.Staff || currentUser.LabId != branch.LabId)
+                    {
+                        return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                    }
                 }
             }
             else
             {
-                branch = await _context.Branches.AsNoTracking().FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+                branch = await GetCurrentBranchAsync(cancellationToken);
             }
 
             if (branch == null)
@@ -608,9 +642,7 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
         public async Task<IActionResult> GetBranchServices(CancellationToken cancellationToken)
         {
-            var currentUserId = _currentUserService.UserId?.ToString();
-            var branch = await _context.Branches.AsNoTracking()
-                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            var branch = await GetCurrentBranchAsync(cancellationToken);
 
             if (branch == null)
             {
