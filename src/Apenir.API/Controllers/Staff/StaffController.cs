@@ -233,23 +233,64 @@ public class StaffController : ControllerBase
 
         // Fetch customer profiles linked to this phone number
         var customerPhone = appointment.CustomerUser?.Phone ?? string.Empty;
-        var existingCustomers = await _context.Customers
-            .Where(c => c.Phone == customerPhone)
+        
+        var mainCustomer = await _context.Customers
+            .Include(c => c.User)
+            .FirstOrDefaultAsync(c => c.User != null && c.User.Phone == customerPhone, cancellationToken);
+
+        var existingProfiles = new List<CustomerProfileDto>();
+        if (mainCustomer != null)
+        {
+            existingProfiles.Add(new CustomerProfileDto
+            {
+                Id = mainCustomer.Id,
+                Name = mainCustomer.Name,
+                Gender = mainCustomer.Gender,
+                Dob = mainCustomer.Dob,
+                Address = mainCustomer.Address
+            });
+        }
+
+        // Get past appointment members for this customer
+        var pastAppointments = await _context.Appointments
+            .Where(a => a.CustomerUserId == appointment.CustomerUserId && a.Id != id)
+            .Select(a => a.Id)
             .ToListAsync(cancellationToken);
+
+        if (pastAppointments.Any())
+        {
+            var pastMembers = await _context.AppointmentMembers
+                .Where(m => pastAppointments.Contains(m.AppointmentId))
+                .ToListAsync(cancellationToken);
+
+            var uniquePastMembers = pastMembers
+                .GroupBy(m => m.MemberName.Trim().ToLower())
+                .Select(g => g.First())
+                .ToList();
+
+            foreach (var pm in uniquePastMembers)
+            {
+                // Avoid adding the main customer again if named the same
+                if (mainCustomer != null && mainCustomer.Name.Trim().ToLower() == pm.MemberName.Trim().ToLower())
+                    continue;
+
+                existingProfiles.Add(new CustomerProfileDto
+                {
+                    Id = pm.Id,
+                    Name = pm.MemberName,
+                    Gender = pm.Gender.ToString(),
+                    Dob = $"Age: {pm.Age}",
+                    Address = mainCustomer?.Address
+                });
+            }
+        }
 
         var result = new OtpVerificationResult
         {
             Verified = true,
             MemberCount = appointment.MemberCount,
             CustomerPhone = customerPhone,
-            ExistingProfiles = existingCustomers.Select(c => new CustomerProfileDto
-            {
-                Id = c.Id,
-                Name = c.Name,
-                Gender = c.Gender,
-                Dob = c.Dob,
-                Address = c.Address
-            }).ToList()
+            ExistingProfiles = existingProfiles
         };
 
         return Ok(ApiResponse<OtpVerificationResult>.SuccessResult(result, "OTP passcode verified successfully."));

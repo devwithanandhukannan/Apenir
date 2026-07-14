@@ -129,7 +129,8 @@ namespace Apenir.API.Controllers
                 AdminId = user.Id,
                 Email = user.Email ?? string.Empty,
                 BranchId = userBranch?.Id,
-                LabId = userBranch?.LabId
+                LabId = userBranch?.LabId,
+                Role = user.Role.ToString().ToLower()
             };
 
             return Ok(ApiResponse<LoginResponse>.SuccessResult(response, "Login successful"));
