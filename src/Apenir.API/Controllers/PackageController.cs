@@ -30,6 +30,18 @@ public class PackageController : ControllerBase
         _currentUserService = currentUserService;
     }
 
+    [HttpGet]
+    [EndpointSummary("Get all active master packages (for customers)")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<Package>>))]
+    public async Task<IActionResult> GetActivePackages(CancellationToken cancellationToken)
+    {
+        var packages = await _context.Packages
+            .Where(p => p.CreatedByBranchId == null && p.IsActive)
+            .ToListAsync(cancellationToken);
+
+        return Ok(ApiResponse<List<Package>>.SuccessResult(packages, "PACKAGES_RETRIEVED"));
+    }
+
     [HttpPost]
     [AdminOnly]
     [EndpointSummary("Create a new master package (Admin only)")]

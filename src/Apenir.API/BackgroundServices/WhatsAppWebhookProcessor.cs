@@ -420,6 +420,13 @@ namespace Apenir.API.BackgroundServices
             _logger.LogInformation("🧭 Interactive reply received: From={From} | State={State} | ReplyId={ReplyId} | ReplyTitle={ReplyTitle}",
                 to, session.CurrentState, replyId ?? "(null)", replyTitle ?? "(null)");
 
+            if (replyId != null && replyId.StartsWith("cancel_id_"))
+            {
+                var apptId = replyId.Replace("cancel_id_", "");
+                await CancelAppointmentOnWhatsApp(to, apptId, context, httpClientFactory, configuration, cancellationToken);
+                return;
+            }
+
             switch (replyId)
             {
                 case "menu_book":
@@ -431,6 +438,11 @@ namespace Apenir.API.BackgroundServices
 
                 case "menu_bookings":
                     await SendViewBookings(to, context, httpClientFactory, configuration, cancellationToken);
+                    await SendBookingOptionsAfterList(to, context, httpClientFactory, configuration, cancellationToken);
+                    return;
+
+                case "cancel_select_appt":
+                    await SendActiveBookingsForCancellation(to, context, httpClientFactory, configuration, cancellationToken);
                     return;
 
                 case "menu_help":
@@ -1460,6 +1472,154 @@ namespace Apenir.API.BackgroundServices
                 await context.SaveChangesAsync(cancellationToken);
             }
             return session;
+        }
+
+        private async Task SendBookingOptionsAfterList(
+            string to,
+            IApplicationDbContext context,
+            IHttpClientFactory httpClientFactory,
+            IConfiguration configuration,
+            CancellationToken cancellationToken)
+        {
+            var user = await context.Users.FirstOrDefaultAsync(u => u.Phone == to, cancellationToken);
+            if (user == null) return;
+
+            var activeApptsCount = await context.Appointments
+                .CountAsync(a => a.CustomerUserId == user.Id && a.Status != AppointmentStatus.Cancelled && a.Status != AppointmentStatus.Completed, cancellationToken);
+
+            var buttons = new List<object>
+            {
+                new { type = "reply", reply = new { id = "menu_book", title = "📅 Book a test" } }
+            };
+
+            if (activeApptsCount > 0)
+            {
+                buttons.Add(new { type = "reply", reply = new { id = "cancel_select_appt", title = "❌ Cancel Booking" } });
+            }
+
+            buttons.Add(new { type = "reply", reply = new { id = "menu_help", title = "🏠 Main Menu" } });
+
+            var payload = new
+            {
+                messaging_product = "whatsapp",
+                to,
+                type = "interactive",
+                interactive = new
+                {
+                    type = "button",
+                    body = new { text = "What would you like to do next?" },
+                    footer = new { text = "LabCare · Accurate & Fast" },
+                    action = new
+                    {
+                        buttons = buttons.ToArray()
+                    }
+                }
+            };
+
+            await SendWhatsAppMessage(payload, httpClientFactory, configuration);
+        }
+
+        private async Task SendActiveBookingsForCancellation(
+            string to,
+            IApplicationDbContext context,
+            IHttpClientFactory httpClientFactory,
+            IConfiguration configuration,
+            CancellationToken cancellationToken)
+        {
+            var user = await context.Users.FirstOrDefaultAsync(u => u.Phone == to, cancellationToken);
+            if (user == null) return;
+
+            var activeAppts = await context.Appointments
+                .Include(a => a.Branch)
+                .Include(a => a.AppointmentSlot)
+                .Where(a => a.CustomerUserId == user.Id && a.Status != AppointmentStatus.Cancelled && a.Status != AppointmentStatus.Completed)
+                .OrderByDescending(a => a.CreatedAt)
+                .Take(10)
+                .ToListAsync(cancellationToken);
+
+            if (!activeAppts.Any())
+            {
+                await SendTextMessage(to, "❌ You do not have any active bookings that can be cancelled.", httpClientFactory, configuration);
+                return;
+            }
+
+            var rows = activeAppts.Select(a => {
+                var dateStr = a.AppointmentSlot != null ? a.AppointmentSlot.SlotDate.ToString("dd MMM") : "N/A";
+                var timeStr = a.AppointmentSlot != null ? a.AppointmentSlot.StartTime.ToString("hh:mm tt") : "N/A";
+                return new
+                {
+                    id = $"cancel_id_{a.Id}",
+                    title = a.AppointmentNumber,
+                    description = $"{a.Branch?.Name ?? "Lab"} · {dateStr} @ {timeStr}"
+                };
+            }).ToArray();
+
+            var payload = new
+            {
+                messaging_product = "whatsapp",
+                to,
+                type = "interactive",
+                interactive = new
+                {
+                    type = "list",
+                    header = new { type = "text", text = "Cancel Booking" },
+                    body = new { text = "Select the booking you wish to cancel:" },
+                    footer = new { text = "This releases slot capacity" },
+                    action = new
+                    {
+                        button = "Select booking",
+                        sections = new[]
+                        {
+                            new { title = "Active Bookings", rows }
+                        }
+                    }
+                }
+            };
+
+            await SendWhatsAppMessage(payload, httpClientFactory, configuration);
+        }
+
+        private async Task CancelAppointmentOnWhatsApp(
+            string to,
+            string appointmentId,
+            IApplicationDbContext context,
+            IHttpClientFactory httpClientFactory,
+            IConfiguration configuration,
+            CancellationToken cancellationToken)
+        {
+            var appointment = await context.Appointments
+                .Include(a => a.AppointmentSlot)
+                .FirstOrDefaultAsync(a => a.Id == appointmentId, cancellationToken);
+
+            if (appointment == null)
+            {
+                await SendTextMessage(to, "❌ Booking not found.", httpClientFactory, configuration);
+                return;
+            }
+
+            if (appointment.Status == AppointmentStatus.Cancelled)
+            {
+                await SendTextMessage(to, $"⚠️ Booking *{appointment.AppointmentNumber}* is already cancelled.", httpClientFactory, configuration);
+                return;
+            }
+
+            if (appointment.AppointmentSlot != null)
+            {
+                var slot = appointment.AppointmentSlot;
+                slot.BookedCount = Math.Max(0, slot.BookedCount - appointment.MemberCount);
+                slot.IsAvailable = true;
+                context.AppointmentSlots.Update(slot);
+            }
+
+            appointment.Status = AppointmentStatus.Cancelled;
+            context.Appointments.Update(appointment);
+            await context.SaveChangesAsync(cancellationToken);
+
+            await SendTextMessage(to, $"✅ Booking *{appointment.AppointmentNumber}* has been successfully cancelled. The reserved slot has been released.", httpClientFactory, configuration);
+            
+            var session = await GetOrCreateSessionAsync(to, context, cancellationToken);
+            session.CurrentState = WhatsAppState.Start;
+            await SaveSessionAsync(session, context, cancellationToken);
         }
 
         private async Task SaveSessionAsync(WhatsAppSession session, IApplicationDbContext context, CancellationToken cancellationToken)
