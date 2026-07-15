@@ -1103,13 +1103,41 @@ namespace Apenir.API.Controllers.Admin
             var pageCount = (int)Math.Ceiling((double)totalRows / rowsPerPage);
 
             var appointments = await query
-                .Include(a => a.Branch)
-                .Include(a => a.AppointmentSlot)
-                .Include(a => a.AssignedStaff)
                 .OrderByDescending(a => a.CreatedAt)
                 .Skip((pageNumber - 1) * rowsPerPage)
                 .Take(rowsPerPage)
                 .ToListAsync(cancellationToken);
+
+            var branchIds = appointments.Select(a => a.BranchId).Distinct().ToList();
+            var branches = await _context.Branches
+                .Where(b => branchIds.Contains(b.Id))
+                .ToDictionaryAsync(b => b.Id, cancellationToken);
+
+            var slotIds = appointments.Select(a => a.AppointmentSlotId).Distinct().ToList();
+            var slots = await _context.AppointmentSlots
+                .Where(s => slotIds.Contains(s.Id))
+                .ToDictionaryAsync(s => s.Id, cancellationToken);
+
+            var staffIds = appointments.Where(a => a.AssignedStaffId != null).Select(a => a.AssignedStaffId!).Distinct().ToList();
+            var staffUsers = await _context.Users
+                .Where(u => staffIds.Contains(u.Id))
+                .ToDictionaryAsync(u => u.Id, cancellationToken);
+
+            foreach (var appt in appointments)
+            {
+                if (branches.TryGetValue(appt.BranchId, out var branch))
+                {
+                    appt.Branch = branch;
+                }
+                if (slots.TryGetValue(appt.AppointmentSlotId, out var slot))
+                {
+                    appt.AppointmentSlot = slot;
+                }
+                if (appt.AssignedStaffId != null && staffUsers.TryGetValue(appt.AssignedStaffId, out var staff))
+                {
+                    appt.AssignedStaff = staff;
+                }
+            }
 
             var response = new PaginatedList<Appointment>
             {

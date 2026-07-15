@@ -55,11 +55,31 @@ public class BookingController : ControllerBase
         }
 
         var appointments = await _context.Appointments
-            .Include(a => a.Branch)
-            .Include(a => a.AppointmentSlot)
             .Where(a => a.CustomerUserId == currentUserId)
             .OrderByDescending(a => a.CreatedAt)
             .ToListAsync(cancellationToken);
+
+        var branchIds = appointments.Select(a => a.BranchId).Distinct().ToList();
+        var branches = await _context.Branches
+            .Where(b => branchIds.Contains(b.Id))
+            .ToDictionaryAsync(b => b.Id, cancellationToken);
+
+        var slotIds = appointments.Select(a => a.AppointmentSlotId).Distinct().ToList();
+        var slots = await _context.AppointmentSlots
+            .Where(s => slotIds.Contains(s.Id))
+            .ToDictionaryAsync(s => s.Id, cancellationToken);
+
+        foreach (var appt in appointments)
+        {
+            if (branches.TryGetValue(appt.BranchId, out var branch))
+            {
+                appt.Branch = branch;
+            }
+            if (slots.TryGetValue(appt.AppointmentSlotId, out var slot))
+            {
+                appt.AppointmentSlot = slot;
+            }
+        }
 
         return Ok(ApiResponse<List<Appointment>>.SuccessResult(appointments, "APPOINTMENTS_RETRIEVED"));
     }
@@ -380,7 +400,7 @@ public class BookingController : ControllerBase
         var straightLineDistance = CalculateDistanceKm(request.Latitude, request.Longitude, (double)branch.Latitude, (double)branch.Longitude);
         if (straightLineDistance > branch.ServiceRangeKm)
         {
-            return BadRequest(ApiResponse.FailureResult("cannot have a service in that location."));
+            return BadRequest(ApiResponse.FailureResult("Service is not available at your selected location. The coordinates are outside the laboratory branch's service coverage range."));
         }
 
         // Calculate OSRM road distance
@@ -395,6 +415,12 @@ public class BookingController : ControllerBase
         var branchPackages = await _context.BranchPackages
             .Where(bp => bp.BranchId == branch.Id && itemIds.Contains(bp.PackageId) && bp.IsActive)
             .ToListAsync(cancellationToken);
+
+        // Validate that the selected branch offers all requested services and packages
+        if (branchServices.Count + branchPackages.Count < itemIds.Distinct().Count())
+        {
+            return BadRequest(ApiResponse.FailureResult("One or more of the selected diagnostic services or packages are not offered by the chosen laboratory branch."));
+        }
 
         decimal totalBaseAmount = 0m;
         var encodedSelections = new List<string>();

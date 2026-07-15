@@ -915,12 +915,32 @@ namespace Apenir.API.BackgroundServices
             }
 
             var appts = await context.Appointments
-                .Include(a => a.Branch)
-                .Include(a => a.AppointmentSlot)
                 .Where(a => a.CustomerUserId == user.Id)
                 .OrderByDescending(a => a.CreatedAt)
                 .Take(5)
                 .ToListAsync(cancellationToken);
+
+            var branchIds = appts.Select(a => a.BranchId).Distinct().ToList();
+            var branches = await context.Branches
+                .Where(b => branchIds.Contains(b.Id))
+                .ToDictionaryAsync(b => b.Id, cancellationToken);
+
+            var slotIds = appts.Select(a => a.AppointmentSlotId).Distinct().ToList();
+            var slots = await context.AppointmentSlots
+                .Where(s => slotIds.Contains(s.Id))
+                .ToDictionaryAsync(s => s.Id, cancellationToken);
+
+            foreach (var appt in appts)
+            {
+                if (branches.TryGetValue(appt.BranchId, out var branch))
+                {
+                    appt.Branch = branch;
+                }
+                if (slots.TryGetValue(appt.AppointmentSlotId, out var slot))
+                {
+                    appt.AppointmentSlot = slot;
+                }
+            }
 
             if (!appts.Any())
             {
@@ -1530,12 +1550,32 @@ namespace Apenir.API.BackgroundServices
             if (user == null) return;
 
             var activeAppts = await context.Appointments
-                .Include(a => a.Branch)
-                .Include(a => a.AppointmentSlot)
                 .Where(a => a.CustomerUserId == user.Id && a.Status != AppointmentStatus.Cancelled && a.Status != AppointmentStatus.Completed)
                 .OrderByDescending(a => a.CreatedAt)
                 .Take(10)
                 .ToListAsync(cancellationToken);
+
+            var branchIds = activeAppts.Select(a => a.BranchId).Distinct().ToList();
+            var branches = await context.Branches
+                .Where(b => branchIds.Contains(b.Id))
+                .ToDictionaryAsync(b => b.Id, cancellationToken);
+
+            var slotIds = activeAppts.Select(a => a.AppointmentSlotId).Distinct().ToList();
+            var slots = await context.AppointmentSlots
+                .Where(s => slotIds.Contains(s.Id))
+                .ToDictionaryAsync(s => s.Id, cancellationToken);
+
+            foreach (var appt in activeAppts)
+            {
+                if (branches.TryGetValue(appt.BranchId, out var branch))
+                {
+                    appt.Branch = branch;
+                }
+                if (slots.TryGetValue(appt.AppointmentSlotId, out var slot))
+                {
+                    appt.AppointmentSlot = slot;
+                }
+            }
 
             if (!activeAppts.Any())
             {
