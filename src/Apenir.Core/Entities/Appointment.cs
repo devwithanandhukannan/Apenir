@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
 using Apenir.Core.Enums;
@@ -77,7 +78,29 @@ public class Appointment
     [StringLength(500)]
     public string? ReportPdfPath { get; set; }
 
-    // Navigation properties
+    // ─── Phase 3: Multi-Lab Support ───────────────────────────────────────────
+
+    /// <summary>
+    /// True when this booking spans multiple labs (one lab can't handle all items).
+    /// The parent appointment holds the full member list; child appointments each target one lab.
+    /// </summary>
+    public bool IsMultiLab { get; set; } = false;
+
+    /// <summary>
+    /// For child sub-appointments created in a multi-lab booking.
+    /// Null on the parent / single-lab appointments.
+    /// </summary>
+    [StringLength(36)]
+    public string? ParentAppointmentId { get; set; }
+
+    /// <summary>
+    /// Service/Package IDs assigned to this lab in a multi-lab split.
+    /// For single-lab bookings this mirrors the full cart.
+    /// </summary>
+    public List<string> ItemIds { get; set; } = new();
+
+    // ─── Navigation ──────────────────────────────────────────────────────────
+
     [ForeignKey(nameof(CustomerUserId))]
     public virtual User? CustomerUser { get; set; }
 
@@ -90,3 +113,4 @@ public class Appointment
     [ForeignKey(nameof(AssignedStaffId))]
     public virtual User? AssignedStaff { get; set; }
 }
+

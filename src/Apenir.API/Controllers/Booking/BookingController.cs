@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Apenir.Core.Entities;
 using Apenir.Core.Enums;
@@ -29,19 +30,22 @@ public class BookingController : ControllerBase
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IWhatsAppService _whatsAppService;
     private readonly IConfiguration _configuration;
+    private readonly IMemoryCache _cache;
 
     public BookingController(
         IApplicationDbContext context,
         ICurrentUserService currentUserService,
         IHttpClientFactory httpClientFactory,
         IWhatsAppService whatsAppService,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        IMemoryCache cache)
     {
         _context = context;
         _currentUserService = currentUserService;
         _httpClientFactory = httpClientFactory;
         _whatsAppService = whatsAppService;
         _configuration = configuration;
+        _cache = cache;
     }
 
     [HttpGet]
@@ -141,9 +145,107 @@ public class BookingController : ControllerBase
         return Ok(ApiResponse<List<AppointmentSlot>>.SuccessResult(slots, "Available slots retrieved successfully."));
     }
 
+    [HttpGet("region-availability")]
+    [AllowAnonymous]
+    [EndpointSummary("Real-time check: which labs are available near a location for given items")]
+    public async Task<IActionResult> GetRegionAvailability(
+        [FromQuery] double latitude,
+        [FromQuery] double longitude,
+        [FromQuery] string? itemIds,
+        CancellationToken cancellationToken)
+    {
+        // Cache key based on ~500m grid cell (2 decimal places) + item set
+        var lat2 = Math.Round(latitude, 2);
+        var lng2 = Math.Round(longitude, 2);
+        var itemKey = string.IsNullOrEmpty(itemIds) ? "all" : string.Join(",", itemIds.Split(',').OrderBy(x => x));
+        var cacheKey = $"region_avail_{lat2}_{lng2}_{itemKey}";
+
+        if (_cache.TryGetValue(cacheKey, out List<RegionAvailabilityResult>? cached) && cached != null)
+            return Ok(ApiResponse<List<RegionAvailabilityResult>>.SuccessResult(cached, "region_availability_cached"));
+
+        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var allBranches = await _context.Branches.Where(b => b.IsActive).ToListAsync(cancellationToken);
+
+        var ids = string.IsNullOrEmpty(itemIds)
+            ? new List<string>()
+            : itemIds.Split(',').Select(x => x.Trim()).Where(x => !string.IsNullOrEmpty(x)).ToList();
+
+        // Fetch branch services/packages relevant to requested items (or all if no items)
+        var allBranchServices = await _context.BranchServices
+            .Where(bs => bs.IsActive && (ids.Count == 0 || ids.Contains(bs.ServiceId)))
+            .ToListAsync(cancellationToken);
+
+        var allBranchPackages = await _context.BranchPackages
+            .Where(bp => bp.IsActive && (ids.Count == 0 || ids.Contains(bp.PackageId)))
+            .ToListAsync(cancellationToken);
+
+        // Fetch slots for today across all active branches
+        var todaySlots = await _context.AppointmentSlots
+            .Where(s => s.IsAvailable && s.SlotDate == today)
+            .ToListAsync(cancellationToken);
+
+        // Fetch all future slots for next-available calculation
+        var futureSlots = await _context.AppointmentSlots
+            .Where(s => s.IsAvailable && s.SlotDate > today)
+            .OrderBy(s => s.SlotDate).ThenBy(s => s.StartTime)
+            .ToListAsync(cancellationToken);
+
+        var results = new List<RegionAvailabilityResult>();
+
+        foreach (var branch in allBranches)
+        {
+            var distance = CalculateDistanceKm(latitude, longitude, (double)branch.Latitude, (double)branch.Longitude);
+            if (distance > branch.ServiceRangeKm) continue;
+
+            var branchSvcIds = allBranchServices.Where(bs => bs.BranchId == branch.Id).Select(bs => bs.ServiceId).ToHashSet();
+            var branchPkgIds = allBranchPackages.Where(bp => bp.BranchId == branch.Id).Select(bp => bp.PackageId).ToHashSet();
+
+            // Count how many requested items this branch covers
+            int coveredCount = ids.Count == 0
+                ? branchSvcIds.Count + branchPkgIds.Count
+                : ids.Count(id => branchSvcIds.Contains(id) || branchPkgIds.Contains(id));
+
+            bool isFullyEligible = ids.Count == 0 || coveredCount >= ids.Count;
+
+            // Today's available capacity
+            var todayBranchSlots = todaySlots.Where(s => s.BranchId == branch.Id).ToList();
+            bool hasSlotsToday = todayBranchSlots.Any(s => s.BookedCount < s.MaxCapacity);
+
+            // Next available slot after today
+            var nextSlot = futureSlots.FirstOrDefault(s => s.BranchId == branch.Id && s.BookedCount < s.MaxCapacity);
+
+            results.Add(new RegionAvailabilityResult
+            {
+                BranchId = branch.Id,
+                Name = branch.Name,
+                City = branch.City,
+                District = branch.District,
+                Distance = Math.Round(distance, 2),
+                ServicesAvailableCount = branchSvcIds.Count + branchPkgIds.Count,
+                ServicesRequestedCount = ids.Count,
+                ServicesCoveredCount = coveredCount,
+                IsFullyEligible = isFullyEligible,
+                HasAvailableSlotsToday = hasSlotsToday,
+                NextAvailableSlotDate = nextSlot?.SlotDate.ToString("yyyy-MM-dd"),
+                NextAvailableSlotTime = nextSlot?.StartTime.ToString("HH:mm"),
+            });
+        }
+
+        // Sort: fully eligible + has today slots first
+        results = results
+            .OrderByDescending(r => r.IsFullyEligible)
+            .ThenByDescending(r => r.HasAvailableSlotsToday)
+            .ThenBy(r => r.Distance)
+            .ToList();
+
+        _cache.Set(cacheKey, results, TimeSpan.FromMinutes(3));
+
+        return Ok(ApiResponse<List<RegionAvailabilityResult>>.SuccessResult(results, "region_availability"));
+    }
+
     [HttpGet("eligible-labs")]
     [AllowAnonymous]
-    [EndpointSummary("Get eligible labs for a cart of items near coordinates")]
+    [EndpointSummary("Get eligible labs for a cart of items near coordinates. Returns single-lab matches and, if none covers all, a multi-lab split suggestion.")]
     public async Task<IActionResult> GetEligibleLabs(
         [FromQuery] double latitude,
         [FromQuery] double longitude,
@@ -169,59 +271,153 @@ public class BookingController : ControllerBase
             .Where(bp => ids.Contains(bp.PackageId) && bp.IsActive)
             .ToListAsync(cancellationToken);
 
-        var eligibleLabs = new List<object>();
+        // Build per-branch coverage map
+        var branchCoverage = new Dictionary<string, (Branch Branch, HashSet<string> CoveredIds, double RoadDistance, decimal BaseTotal, decimal TravelFee)>();
+        var httpClient = _httpClientFactory.CreateClient();
 
         foreach (var branch in allBranches)
         {
             var distance = CalculateDistanceKm(latitude, longitude, (double)branch.Latitude, (double)branch.Longitude);
-            if (distance > branch.ServiceRangeKm)
-                continue;
+            if (distance > branch.ServiceRangeKm) continue;
 
-            int offeredServicesCount = branchServices.Where(bs => bs.BranchId == branch.Id).Select(bs => bs.ServiceId).Distinct().Count();
-            int offeredPackagesCount = branchPackages.Where(bp => bp.BranchId == branch.Id).Select(bp => bp.PackageId).Distinct().Count();
-            
-            if (offeredServicesCount + offeredPackagesCount >= ids.Count)
+            var svcIds = branchServices.Where(bs => bs.BranchId == branch.Id).Select(bs => bs.ServiceId).ToHashSet();
+            var pkgIds = branchPackages.Where(bp => bp.BranchId == branch.Id).Select(bp => bp.PackageId).ToHashSet();
+            var coveredIds = ids.Where(id => svcIds.Contains(id) || pkgIds.Contains(id)).ToHashSet();
+
+            decimal totalPrice = 0m;
+            foreach (var id in coveredIds)
             {
-                // Calculate pricing
-                decimal totalPrice = 0m;
-                foreach (var id in ids)
+                var bs = branchServices.FirstOrDefault(x => x.BranchId == branch.Id && x.ServiceId == id);
+                if (bs != null) { totalPrice += bs.CustomPrice ?? services.FirstOrDefault(s => s.Id == id)?.BasePrice ?? 0m; }
+                else
                 {
-                    var bs = branchServices.FirstOrDefault(x => x.BranchId == branch.Id && x.ServiceId == id);
-                    if (bs != null)
-                    {
-                        totalPrice += bs.CustomPrice ?? services.FirstOrDefault(s => s.Id == id)?.BasePrice ?? 0m;
-                    }
-                    else
-                    {
-                        var bp = branchPackages.FirstOrDefault(x => x.BranchId == branch.Id && x.PackageId == id);
-                        if (bp != null)
-                        {
-                            totalPrice += bp.CustomPrice ?? packages.FirstOrDefault(p => p.Id == id)?.BasePrice ?? 0m;
-                        }
-                    }
+                    var bp = branchPackages.FirstOrDefault(x => x.BranchId == branch.Id && x.PackageId == id);
+                    if (bp != null) totalPrice += bp.CustomPrice ?? packages.FirstOrDefault(p => p.Id == id)?.BasePrice ?? 0m;
                 }
+            }
 
-                // Calculate OSRM road distance and travel fee
-                var client = _httpClientFactory.CreateClient();
-                var roadDistance = await GetRoadDistanceKm(latitude, longitude, (double)branch.Latitude, (double)branch.Longitude, client);
-                decimal travelCost = (decimal)roadDistance * (branch.PerKmCharge ?? 0m);
+            var roadDistance = await GetRoadDistanceKm(latitude, longitude, (double)branch.Latitude, (double)branch.Longitude, httpClient);
+            decimal travelCost = (decimal)roadDistance * (branch.PerKmCharge ?? 0m);
 
+            branchCoverage[branch.Id] = (branch, coveredIds, roadDistance, totalPrice, Math.Round(travelCost));
+        }
+
+        // ── Single-lab matches (covers all items) ──────────────────────────────
+        var eligibleLabs = new List<object>();
+        foreach (var (branchId, (branch, coveredIds, roadDistance, baseTotal, travelFee)) in branchCoverage)
+        {
+            if (coveredIds.Count >= ids.Count)
+            {
                 eligibleLabs.Add(new
                 {
                     BranchId = branch.Id,
                     Name = branch.Name,
                     City = branch.City,
                     District = branch.District,
-                    Distance = distance,
+                    Distance = CalculateDistanceKm(latitude, longitude, (double)branch.Latitude, (double)branch.Longitude),
                     RoadDistance = roadDistance,
-                    BaseTotal = totalPrice,
-                    TravelFee = Math.Round(travelCost),
-                    GrandTotal = totalPrice + Math.Round(travelCost)
+                    BaseTotal = baseTotal,
+                    TravelFee = travelFee,
+                    GrandTotal = baseTotal + travelFee,
+                    IsMultiLab = false,
+                    SplitSuggestion = (object?)null
                 });
             }
         }
 
-        return Ok(ApiResponse<List<object>>.SuccessResult(eligibleLabs, "Eligible labs retrieved successfully."));
+        // ── Multi-lab split suggestion (when no single lab covers everything) ──
+        object? splitSuggestion = null;
+        if (!eligibleLabs.Any() && branchCoverage.Any())
+        {
+            // Greedy set-cover: iteratively pick the branch covering the most uncovered items
+            var uncovered = ids.ToHashSet();
+            var splits = new List<object>();
+            decimal splitTotalBase = 0m;
+            decimal splitTotalTravel = 0m;
+
+            while (uncovered.Any())
+            {
+                // Pick the nearby branch covering the most uncovered items
+                var best = branchCoverage
+                    .Where(kv => kv.Value.CoveredIds.Intersect(uncovered).Any())
+                    .OrderByDescending(kv => kv.Value.CoveredIds.Intersect(uncovered).Count())
+                    .ThenBy(kv => kv.Value.RoadDistance)
+                    .FirstOrDefault();
+
+                if (best.Key == null) break; // no more branches can help
+
+                var assignedIds = best.Value.CoveredIds.Intersect(uncovered).ToList();
+                uncovered.ExceptWith(assignedIds);
+
+                // Compute price for only the assigned items in this lab
+                decimal labBase = 0m;
+                foreach (var id in assignedIds)
+                {
+                    var bs = branchServices.FirstOrDefault(x => x.BranchId == best.Key && x.ServiceId == id);
+                    if (bs != null) labBase += bs.CustomPrice ?? services.FirstOrDefault(s => s.Id == id)?.BasePrice ?? 0m;
+                    else
+                    {
+                        var bp = branchPackages.FirstOrDefault(x => x.BranchId == best.Key && x.PackageId == id);
+                        if (bp != null) labBase += bp.CustomPrice ?? packages.FirstOrDefault(p => p.Id == id)?.BasePrice ?? 0m;
+                    }
+                }
+
+                var assignedItemNames = services.Where(s => assignedIds.Contains(s.Id)).Select(s => s.Name)
+                    .Concat(packages.Where(p => assignedIds.Contains(p.Id)).Select(p => p.Name)).ToList();
+
+                splitTotalBase += labBase;
+                splitTotalTravel += best.Value.TravelFee;
+
+                splits.Add(new
+                {
+                    BranchId = best.Value.Branch.Id,
+                    Name = best.Value.Branch.Name,
+                    City = best.Value.Branch.City,
+                    District = best.Value.Branch.District,
+                    RoadDistance = best.Value.RoadDistance,
+                    TravelFee = best.Value.TravelFee,
+                    AssignedItemIds = assignedIds,
+                    AssignedItemNames = assignedItemNames,
+                    BaseTotal = labBase,
+                    GrandTotal = labBase + best.Value.TravelFee
+                });
+            }
+
+            if (!uncovered.Any() && splits.Any())
+            {
+                splitSuggestion = new
+                {
+                    Labs = splits,
+                    TotalBase = splitTotalBase,
+                    TotalTravel = splitTotalTravel,
+                    GrandTotal = splitTotalBase + splitTotalTravel,
+                    UncoveredItemIds = (List<string>?)null
+                };
+            }
+            else if (uncovered.Any())
+            {
+                var uncoveredNames = services.Where(s => uncovered.Contains(s.Id)).Select(s => s.Name)
+                    .Concat(packages.Where(p => uncovered.Contains(p.Id)).Select(p => p.Name)).ToList();
+                splitSuggestion = new
+                {
+                    Labs = splits,
+                    TotalBase = splitTotalBase,
+                    TotalTravel = splitTotalTravel,
+                    GrandTotal = splitTotalBase + splitTotalTravel,
+                    UncoveredItemIds = uncovered.ToList(),
+                    UncoveredItemNames = uncoveredNames
+                };
+            }
+        }
+
+        var responseData = new
+        {
+            EligibleLabs = eligibleLabs,
+            SplitSuggestion = splitSuggestion,
+            HasSingleLabOption = eligibleLabs.Any()
+        };
+
+        return Ok(ApiResponse<object>.SuccessResult(responseData, "Eligible labs retrieved successfully."));
     }
 
     [HttpGet("slots/branch/{branchId}")]
@@ -724,6 +920,341 @@ public class BookingController : ControllerBase
 
         return Ok(ApiResponse<LookupMemberResult>.SuccessResult(result, "Member lookup successful."));
     }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Phase 3: Multi-Lab Booking
+    // ──────────────────────────────────────────────────────────────────────────
+
+    [HttpPost("book-multi-lab")]
+    [EndpointSummary("Book a multi-lab appointment where different services are performed by different labs")]
+    public async Task<IActionResult> BookMultiLabAppointment(
+        [FromBody] MultiLabBookingRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request?.LabSplits == null || !request.LabSplits.Any())
+            return BadRequest(ApiResponse.FailureResult("At least one lab split is required."));
+
+        var currentUserId = _currentUserService.UserId?.ToString();
+        if (string.IsNullOrEmpty(currentUserId))
+            return Unauthorized(ApiResponse.FailureResult("User not authenticated."));
+
+        var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+        if (user == null || string.IsNullOrWhiteSpace(user.Phone))
+            return BadRequest(ApiResponse.FailureResult("A registered phone number is required."));
+
+        var memberCount = request.MemberSelections?.Count ?? request.MemberCount;
+        if (memberCount < 1) memberCount = 1;
+
+        // Validate all slots have capacity
+        foreach (var split in request.LabSplits)
+        {
+            var slot = await _context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == split.SlotId, cancellationToken);
+            if (slot == null || !slot.IsAvailable || slot.BookedCount + memberCount > slot.MaxCapacity)
+                return BadRequest(ApiResponse.FailureResult($"Slot for lab split ({split.BranchId}) has insufficient capacity or is unavailable."));
+
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == split.BranchId, cancellationToken);
+            if (branch == null)
+                return NotFound(ApiResponse.FailureResult($"Branch {split.BranchId} not found."));
+
+            // Proximity check
+            var dist = CalculateDistanceKm(request.Latitude, request.Longitude, (double)branch.Latitude, (double)branch.Longitude);
+            if (dist > branch.ServiceRangeKm)
+                return BadRequest(ApiResponse.FailureResult($"Branch {branch.Name} is outside your service range."));
+        }
+
+        // Build master booking ID
+        var bookingId = $"BK-{DateTime.UtcNow:yyyyMMdd}-{new Random().Next(1000, 9999)}";
+        var allItemIds = request.LabSplits.SelectMany(s => s.ItemIds).Distinct().ToList();
+        var services = await _context.Services.AsNoTracking().Where(s => allItemIds.Contains(s.Id)).ToListAsync(cancellationToken);
+        var packages = await _context.Packages.AsNoTracking().Where(p => allItemIds.Contains(p.Id)).ToListAsync(cancellationToken);
+        var locationAddress = $"{request.BuildingDetails}, Floor {request.Floor}, Landmark: {request.Landmark}";
+
+        // ── Create PARENT appointment (single entry point, no branch-specific slot) ──
+        // Parent uses the first split's slot/branch for FK compliance but IsMultiLab=true distinguishes it
+        var firstSplit = request.LabSplits[0];
+        var firstSlot = await _context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == firstSplit.SlotId, cancellationToken);
+        var firstBranch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == firstSplit.BranchId, cancellationToken);
+
+        var parentPasscode = new Random().Next(1000, 9999).ToString();
+        var parentAppointment = new Appointment
+        {
+            Id = Guid.NewGuid().ToString(),
+            AppointmentNumber = bookingId,
+            CustomerUserId = user.Id,
+            BranchId = firstSplit.BranchId,
+            AppointmentSlotId = firstSplit.SlotId,
+            LocationLatitude = (decimal)request.Latitude,
+            LocationLongitude = (decimal)request.Longitude,
+            LocationAddress = locationAddress,
+            BuildingDetails = request.BuildingDetails,
+            Floor = request.Floor,
+            Landmark = request.Landmark,
+            Passcode = parentPasscode,
+            Status = AppointmentStatus.Pending, // Payment pending
+            TotalAmount = 0m, // Will be summed from children
+            PlatformCommission = 0m,
+            LabPayout = 0m,
+            CreatedAt = DateTime.UtcNow,
+            MemberCount = memberCount,
+            IsMultiLab = true,
+            ItemIds = allItemIds
+        };
+        _context.Appointments.Add(parentAppointment);
+
+        // ── Create CHILD sub-appointments per lab split ──────────────────────────
+        decimal totalGrand = 0m;
+        var childPayloads = new List<object>();
+        var httpClient = _httpClientFactory.CreateClient();
+
+        for (int splitIdx = 0; splitIdx < request.LabSplits.Count; splitIdx++)
+        {
+            var split = request.LabSplits[splitIdx];
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == split.BranchId, cancellationToken);
+            var slot = await _context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == split.SlotId, cancellationToken);
+            if (branch == null || slot == null) continue;
+
+            var branchServicesForSplit = await _context.BranchServices
+                .Where(bs => bs.BranchId == split.BranchId && split.ItemIds.Contains(bs.ServiceId) && bs.IsActive)
+                .ToListAsync(cancellationToken);
+            var branchPackagesForSplit = await _context.BranchPackages
+                .Where(bp => bp.BranchId == split.BranchId && split.ItemIds.Contains(bp.PackageId) && bp.IsActive)
+                .ToListAsync(cancellationToken);
+
+            // Price for this split's items
+            decimal splitBase = 0m;
+            decimal commissionPctSum = 0m;
+            int commissionCount = 0;
+            foreach (var itemId in split.ItemIds)
+            {
+                var bs = branchServicesForSplit.FirstOrDefault(x => x.ServiceId == itemId);
+                var svc = services.FirstOrDefault(s => s.Id == itemId);
+                if (bs != null && svc != null) { splitBase += bs.CustomPrice ?? svc.BasePrice; commissionPctSum += bs.CustomCommissionPct ?? svc.PlatformCommissionPct; commissionCount++; }
+                else
+                {
+                    var bp = branchPackagesForSplit.FirstOrDefault(x => x.PackageId == itemId);
+                    var pkg = packages.FirstOrDefault(p => p.Id == itemId);
+                    if (bp != null && pkg != null) { splitBase += bp.CustomPrice ?? pkg.BasePrice; commissionPctSum += bp.CustomCommissionPct ?? pkg.PlatformCommissionPct; commissionCount++; }
+                }
+            }
+            // Apply member discount for additional members
+            decimal splitTotal = splitBase + (memberCount > 1 ? (memberCount - 1) * splitBase * 0.8m : 0m);
+
+            var roadDist = await GetRoadDistanceKm(request.Latitude, request.Longitude, (double)branch.Latitude, (double)branch.Longitude, httpClient);
+            decimal travelCost = (decimal)roadDist * (branch.PerKmCharge ?? 0m);
+            decimal splitGrand = splitTotal + Math.Round(travelCost);
+            totalGrand += splitGrand;
+
+            decimal avgComm = commissionCount > 0 ? commissionPctSum / commissionCount : 15m;
+            var subBookingId = $"{bookingId}-L{splitIdx + 1}";
+
+            var childAppointment = new Appointment
+            {
+                Id = Guid.NewGuid().ToString(),
+                AppointmentNumber = subBookingId,
+                CustomerUserId = user.Id,
+                BranchId = split.BranchId,
+                AppointmentSlotId = split.SlotId,
+                LocationLatitude = (decimal)request.Latitude,
+                LocationLongitude = (decimal)request.Longitude,
+                LocationAddress = locationAddress,
+                BuildingDetails = request.BuildingDetails,
+                Floor = request.Floor,
+                Landmark = request.Landmark,
+                Passcode = parentPasscode, // shared passcode across all labs
+                Status = AppointmentStatus.Pending,
+                TotalAmount = splitGrand,
+                PlatformCommission = splitGrand * (avgComm / 100m),
+                LabPayout = splitGrand * (1m - avgComm / 100m),
+                CreatedAt = DateTime.UtcNow,
+                MemberCount = memberCount,
+                IsMultiLab = true,
+                ParentAppointmentId = parentAppointment.Id,
+                ItemIds = split.ItemIds
+            };
+            _context.Appointments.Add(childAppointment);
+
+            // Update slot capacity
+            slot.BookedCount += memberCount;
+            if (slot.BookedCount >= slot.MaxCapacity) slot.IsAvailable = false;
+            _context.AppointmentSlots.Update(slot);
+
+            // Create members for this child (pointing to child appointment)
+            var parsedSelections = request.MemberSelections ?? new List<MemberServiceSelection>();
+            var splitItemNames = services.Where(s => split.ItemIds.Contains(s.Id)).Select(s => s.Name)
+                .Concat(packages.Where(p => split.ItemIds.Contains(p.Id)).Select(p => p.Name)).ToList();
+            var splitItemNamesStr = string.Join(", ", splitItemNames);
+            var customerName = string.IsNullOrWhiteSpace(user.Name) ? "Patient" : user.Name;
+
+            if (parsedSelections.Any())
+            {
+                for (int mi = 0; mi < parsedSelections.Count; mi++)
+                {
+                    var sel = parsedSelections[mi];
+                    // Only create a member record for this child if they have at least one item from this split
+                    var memberItemsForThisSplit = sel.ItemIds.Where(id => split.ItemIds.Contains(id)).ToList();
+                    if (!memberItemsForThisSplit.Any()) continue;
+
+                    decimal memberAmt = 0m;
+                    foreach (var id in memberItemsForThisSplit)
+                    {
+                        var bs = branchServicesForSplit.FirstOrDefault(x => x.ServiceId == id);
+                        var svc = services.FirstOrDefault(s => s.Id == id);
+                        if (bs != null && svc != null) memberAmt += bs.CustomPrice ?? svc.BasePrice;
+                        else { var bp = branchPackagesForSplit.FirstOrDefault(x => x.PackageId == id); var pkg = packages.FirstOrDefault(p => p.Id == id); if (bp != null && pkg != null) memberAmt += bp.CustomPrice ?? pkg.BasePrice; }
+                    }
+                    if (mi > 0) memberAmt = Math.Round(memberAmt * 0.8m, 2);
+
+                    var memberItemNames2 = services.Where(s => memberItemsForThisSplit.Contains(s.Id)).Select(s => s.Name)
+                        .Concat(packages.Where(p => memberItemsForThisSplit.Contains(p.Id)).Select(p => p.Name)).ToList();
+
+                    _context.AppointmentMembers.Add(new AppointmentMember
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        AppointmentId = childAppointment.Id,
+                        MemberName = string.IsNullOrWhiteSpace(sel.Name) ? (mi == 0 ? customerName : $"Member {mi + 1}") : sel.Name,
+                        Age = 0,
+                        Gender = Gender.Other,
+                        Relationship = mi == 0 ? "Self" : "Family Member",
+                        UniqueNumber = $"MEM-{Guid.NewGuid().ToString("N")[..8].ToUpper()}",
+                        TestName = string.Join(", ", memberItemNames2),
+                        ServiceItemIds = memberItemsForThisSplit,
+                        Amount = memberAmt,
+                        SubAppointmentId = childAppointment.Id
+                    });
+                }
+            }
+            else
+            {
+                for (int mi = 0; mi < memberCount; mi++)
+                {
+                    decimal memberAmt = mi == 0 ? splitBase : Math.Round(splitBase * 0.8m, 2);
+                    _context.AppointmentMembers.Add(new AppointmentMember
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        AppointmentId = childAppointment.Id,
+                        MemberName = mi == 0 ? customerName : $"Member {mi + 1}",
+                        Age = 0,
+                        Gender = Gender.Other,
+                        Relationship = mi == 0 ? "Self" : "Family Member",
+                        UniqueNumber = $"MEM-{Guid.NewGuid().ToString("N")[..8].ToUpper()}",
+                        TestName = splitItemNamesStr,
+                        ServiceItemIds = split.ItemIds,
+                        Amount = memberAmt,
+                        SubAppointmentId = childAppointment.Id
+                    });
+                }
+            }
+
+            // WhatsApp notification to lab
+            if (!string.IsNullOrEmpty(branch.NotificationPhone))
+            {
+                var labMsg = $"🔔 *Multi-Lab Booking: {subBookingId}*\n" +
+                             $"Services: {splitItemNamesStr}\n" +
+                             $"Slot: {slot.SlotDate:dd MMM yyyy} @ {slot.StartTime:hh:mm tt}\n" +
+                             $"Members: {memberCount}\n" +
+                             $"Address: {locationAddress}\n" +
+                             $"Customer: +{user.Phone}";
+                try { await _whatsAppService.SendTextMessageAsync(branch.NotificationPhone, labMsg); } catch { /* non-critical */ }
+            }
+
+            childPayloads.Add(new
+            {
+                SubAppointmentId = childAppointment.Id,
+                AppointmentNumber = subBookingId,
+                BranchId = split.BranchId,
+                BranchName = branch.Name,
+                SlotId = split.SlotId,
+                ItemIds = split.ItemIds,
+                GrandTotal = splitGrand
+            });
+        }
+
+        // Update parent total
+        parentAppointment.TotalAmount = totalGrand;
+        _context.Appointments.Update(parentAppointment);
+
+        await _context.SaveChangesAsync(cancellationToken);
+
+        // Generate combined Razorpay payment link for full amount
+        var rzpKeyId = _configuration["Razorpay:KeyId"];
+        var rzpKeySecret = _configuration["Razorpay:KeySecret"];
+        string paymentUrl = "https://rzp.io/i/example";
+        try
+        {
+            var rzpClient = _httpClientFactory.CreateClient();
+            var authString = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{rzpKeyId}:{rzpKeySecret}"));
+            rzpClient.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Basic", authString);
+
+            var memberSelectionsStr = request.MemberSelections != null
+                ? string.Join(";", request.MemberSelections.Select(ms => $"{ms.Name}:{string.Join(",", ms.ItemIds)}"))
+                : string.Empty;
+
+            var rzpPayload = new
+            {
+                amount = (int)Math.Round(totalGrand) * 100,
+                currency = "INR",
+                accept_partial = false,
+                description = $"Multi-Lab Booking: {bookingId}",
+                customer = new { name = user.Name ?? "Web User", contact = $"+{user.Phone.Trim()}" },
+                notify = new { sms = false, email = false },
+                reminder_enable = false,
+                notes = new
+                {
+                    phone = user.Phone.Trim(),
+                    booking_id = bookingId,
+                    parent_appointment_id = parentAppointment.Id,
+                    is_multi_lab = "true",
+                    member_count = memberCount.ToString(),
+                    building_details = request.BuildingDetails ?? "",
+                    landmark = request.Landmark ?? "",
+                    floor = request.Floor ?? "",
+                    latitude = request.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    longitude = request.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    member_selections = memberSelectionsStr
+                }
+            };
+
+            var content = new StringContent(JsonSerializer.Serialize(rzpPayload), Encoding.UTF8, "application/json");
+            var response = await rzpClient.PostAsync("https://api.razorpay.com/v1/payment_links", content, cancellationToken);
+            if (response.IsSuccessStatusCode)
+            {
+                var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+                using var rzpDoc = JsonDocument.Parse(responseBody);
+                paymentUrl = rzpDoc.RootElement.GetProperty("short_url").GetString() ?? paymentUrl;
+            }
+        }
+        catch { /* Payment link generation failed - return pending without URL */ }
+
+        // Customer WhatsApp notification
+        try
+        {
+            var labNames = request.LabSplits.Select((s, i) =>
+            {
+                var b = _context.Branches.FirstOrDefault(br => br.Id == s.BranchId);
+                return $"  Lab {i + 1}: {b?.Name ?? s.BranchId}";
+            });
+            await _whatsAppService.SendTextMessageAsync(user.Phone,
+                $"📋 *Multi-Lab Booking Initiated!*\n\n" +
+                $"🆔 Booking ID: *{bookingId}*\n" +
+                $"🔐 Shared Passcode: *{parentPasscode}*\n" +
+                $"Your booking spans {request.LabSplits.Count} labs:\n" +
+                string.Join("\n", labNames) + "\n\n" +
+                $"💳 Total: ₹{(int)Math.Round(totalGrand)}\n" +
+                $"Complete payment at: {paymentUrl}");
+        }
+        catch { /* non-critical */ }
+
+        return Ok(ApiResponse<object>.SuccessResult(new
+        {
+            paymentUrl,
+            bookingId,
+            parentAppointmentId = parentAppointment.Id,
+            totalAmount = (int)Math.Round(totalGrand),
+            passcode = parentPasscode,
+            labSplits = childPayloads
+        }, "Multi-lab booking initiated. Complete payment to confirm."));
+    }
 }
 
 public class LookupMemberResult
@@ -763,3 +1294,58 @@ public class WebBookingRequest
     public string Floor { get; set; } = string.Empty;
     public List<MemberServiceSelection>? MemberSelections { get; set; }
 }
+
+public class RegionAvailabilityResult
+{
+    public string BranchId { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string City { get; set; } = string.Empty;
+    public string? District { get; set; }
+    public double Distance { get; set; }
+    public int ServicesAvailableCount { get; set; }
+    public int ServicesRequestedCount { get; set; }
+    public int ServicesCoveredCount { get; set; }
+    public bool IsFullyEligible { get; set; }
+    public bool HasAvailableSlotsToday { get; set; }
+    public string? NextAvailableSlotDate { get; set; }
+    public string? NextAvailableSlotTime { get; set; }
+}
+
+/// <summary>
+/// Phase 3: Describes one lab's slice of a multi-lab booking.
+/// Each LabSplitItem says: "go to this branch, book this slot, and perform these specific items."
+/// </summary>
+public class LabSplitItem
+{
+    public string BranchId { get; set; } = string.Empty;
+    public string SlotId { get; set; } = string.Empty;
+    public List<string> ItemIds { get; set; } = new();
+}
+
+/// <summary>
+/// Phase 3: Full request body for POST /api/appointments/book-multi-lab
+/// </summary>
+public class MultiLabBookingRequest
+{
+    public double Latitude { get; set; }
+    public double Longitude { get; set; }
+    public string BuildingDetails { get; set; } = string.Empty;
+    public string Landmark { get; set; } = string.Empty;
+    public string Floor { get; set; } = string.Empty;
+    public int MemberCount { get; set; } = 1;
+
+    /// <summary>
+    /// One entry per lab, describing which items to perform at that lab and which slot.
+    /// The frontend populates this from the SplitSuggestion returned by eligible-labs,
+    /// after the user picks slots for each sub-lab.
+    /// </summary>
+    public List<LabSplitItem> LabSplits { get; set; } = new();
+
+    /// <summary>
+    /// Optional per-member service assignment (from the Phase 2 matrix UI).
+    /// When provided, each member's ItemIds are cross-referenced against each LabSplitItem.ItemIds
+    /// to create granular member records per child appointment.
+    /// </summary>
+    public List<MemberServiceSelection>? MemberSelections { get; set; }
+}
+

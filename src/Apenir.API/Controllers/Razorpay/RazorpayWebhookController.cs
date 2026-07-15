@@ -363,7 +363,8 @@ public class RazorpayWebhookController : ControllerBase
                 PlatformCommission = total * (avgCommissionPct / 100m),
                 LabPayout = total * (1m - (avgCommissionPct / 100m)),
                 CreatedAt = DateTime.UtcNow,
-                MemberCount = memberCount
+                MemberCount = memberCount,
+                ItemIds = itemIds // Phase 2+3: persist cart items on appointment
             };
             _context.Appointments.Add(appointment);
 
@@ -382,6 +383,16 @@ public class RazorpayWebhookController : ControllerBase
                                             .ToList();
                     var memberTestNamesStr = string.Join(", ", memberItemNames);
 
+                    // Phase 2: calculate per-member price
+                    decimal memberAmount = 0m;
+                    foreach (var itemId in selection.ItemIds)
+                    {
+                        var s = services.FirstOrDefault(x => x.Id == itemId);
+                        if (s != null) { var bs = branchServices.FirstOrDefault(x => x.ServiceId == itemId); memberAmount += bs?.CustomPrice ?? s.BasePrice; }
+                        else { var p = packages.FirstOrDefault(x => x.Id == itemId); if (p != null) { var bp = branchPackages.FirstOrDefault(x => x.PackageId == itemId); memberAmount += bp?.CustomPrice ?? p.BasePrice; } }
+                    }
+                    if (i > 0) memberAmount = Math.Round(memberAmount * 0.8m, 2);
+
                     var member = new AppointmentMember
                     {
                         Id = Guid.NewGuid().ToString(),
@@ -391,15 +402,27 @@ public class RazorpayWebhookController : ControllerBase
                         Gender = Gender.Other,
                         Relationship = relationship,
                         UniqueNumber = $"MEM-{Guid.NewGuid().ToString("N").Substring(0, 8).ToUpper()}",
-                        TestName = memberTestNamesStr
+                        TestName = memberTestNamesStr,
+                        ServiceItemIds = selection.ItemIds, // Phase 2: store per-member services
+                        Amount = memberAmount               // Phase 2: store per-member amount
                     };
                     _context.AppointmentMembers.Add(member);
                 }
             }
             else
             {
+                decimal baseRatePerMember = 0m;
+                var allItemNames2 = services.Select(s => s.Name).Concat(packages.Select(p => p.Name)).ToList();
+                foreach (var itemId in itemIds)
+                {
+                    var s = services.FirstOrDefault(x => x.Id == itemId);
+                    if (s != null) { var bs = branchServices.FirstOrDefault(x => x.ServiceId == itemId); baseRatePerMember += bs?.CustomPrice ?? s.BasePrice; }
+                    else { var p = packages.FirstOrDefault(x => x.Id == itemId); if (p != null) { var bp = branchPackages.FirstOrDefault(x => x.PackageId == itemId); baseRatePerMember += bp?.CustomPrice ?? p.BasePrice; } }
+                }
+
                 for (int i = 0; i < memberCount; i++)
                 {
+                    decimal memberAmount = i == 0 ? baseRatePerMember : Math.Round(baseRatePerMember * 0.8m, 2);
                     var member = new AppointmentMember
                     {
                         Id = Guid.NewGuid().ToString(),
@@ -409,7 +432,9 @@ public class RazorpayWebhookController : ControllerBase
                         Gender = Gender.Other,
                         Relationship = i == 0 ? "Self" : "Family Member",
                         UniqueNumber = $"MEM-{Guid.NewGuid().ToString("N").Substring(0, 8).ToUpper()}",
-                        TestName = itemNamesStr
+                        TestName = itemNamesStr,
+                        ServiceItemIds = itemIds,   // Phase 2: all items for each member
+                        Amount = memberAmount        // Phase 2: per-member amount
                     };
                     _context.AppointmentMembers.Add(member);
                 }

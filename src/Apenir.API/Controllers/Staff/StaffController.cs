@@ -389,18 +389,31 @@ public class StaffController : ControllerBase
             _context.AppointmentMembers.RemoveRange(existingMembers);
         }
 
-        var newMembers = request.Members.Select(m => new AppointmentMember
+        var newMembers = new List<AppointmentMember>();
+        for (int i = 0; i < request.Members.Count; i++)
         {
-            Id = Guid.NewGuid().ToString(),
-            AppointmentId = appointment.Id,
-            MemberName = m.Name,
-            Age = m.Age,
-            Gender = Enum.TryParse<Gender>(m.Gender, true, out var genderEnum) ? genderEnum : Gender.Other,
-            Relationship = m.Relationship ?? "Self",
-            AdditionalNotes = m.AdditionalNotes,
-            UniqueNumber = string.IsNullOrWhiteSpace(m.UniqueNumber) ? $"MEM-{Guid.NewGuid().ToString("N").Substring(0, 8).ToUpper()}" : m.UniqueNumber.Trim(),
-            TestName = m.TestName
-        }).ToList();
+            var m = request.Members[i];
+            
+            // Try to find matching existing member by unique number or index to copy over ServiceItemIds, Amount, and SubAppointmentId
+            var existing = existingMembers.FirstOrDefault(ex => !string.IsNullOrEmpty(m.UniqueNumber) && ex.UniqueNumber == m.UniqueNumber.Trim())
+                           ?? (i < existingMembers.Count ? existingMembers[i] : null);
+
+            newMembers.Add(new AppointmentMember
+            {
+                Id = Guid.NewGuid().ToString(),
+                AppointmentId = appointment.Id,
+                MemberName = m.Name,
+                Age = m.Age,
+                Gender = Enum.TryParse<Gender>(m.Gender, true, out var genderEnum) ? genderEnum : Gender.Other,
+                Relationship = m.Relationship ?? "Self",
+                AdditionalNotes = m.AdditionalNotes,
+                UniqueNumber = string.IsNullOrWhiteSpace(m.UniqueNumber) ? $"MEM-{Guid.NewGuid().ToString("N").Substring(0, 8).ToUpper()}" : m.UniqueNumber.Trim(),
+                TestName = m.TestName,
+                ServiceItemIds = existing?.ServiceItemIds ?? new List<string>(),
+                Amount = existing?.Amount ?? 0m,
+                SubAppointmentId = existing?.SubAppointmentId
+            });
+        }
 
         await _context.AppointmentMembers.AddRangeAsync(newMembers, cancellationToken);
         await _context.SaveChangesAsync(cancellationToken);
