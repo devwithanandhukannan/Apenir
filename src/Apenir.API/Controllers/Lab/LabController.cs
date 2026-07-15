@@ -320,6 +320,7 @@ namespace Apenir.API.Controllers
             branch.Latitude = request.Latitude;
             branch.Longitude = request.Longitude;
             branch.ServiceRangeKm = request.ServiceRangeKm;
+            branch.PerKmCharge = request.PerKmCharge;
 
             _context.Branches.Update(branch);
             await _context.SaveChangesAsync(cancellationToken);
@@ -618,10 +619,19 @@ namespace Apenir.API.Controllers
                 return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch's appointments."));
             }
 
-            var staffExists = await _context.Users.AnyAsync(u => u.Id == request.StaffId && u.Role == UserRole.Staff && !u.IsDeleted, cancellationToken);
-            if (!staffExists)
+            var staffUser = await _context.Users.FirstOrDefaultAsync(u => u.Id == request.StaffId && u.Role == UserRole.Staff && !u.IsDeleted, cancellationToken);
+            if (staffUser == null)
             {
                 return BadRequest(ApiResponse.FailureResult("Invalid or non-existent staff member selected."));
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.BranchId))
+            {
+                var branchExists = await _context.Branches.AnyAsync(b => b.Id == request.BranchId && b.LabUserId == currentUserId, cancellationToken);
+                if (branchExists)
+                {
+                    appointment.BranchId = request.BranchId;
+                }
             }
 
             appointment.AssignedStaffId = request.StaffId;
@@ -630,6 +640,27 @@ namespace Apenir.API.Controllers
 
             _context.Appointments.Update(appointment);
             await _context.SaveChangesAsync(cancellationToken);
+
+            // Fetch detail for WhatsApp notification
+            var customerUser = await _context.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == appointment.CustomerUserId, cancellationToken);
+            var slot = await _context.AppointmentSlots.AsNoTracking().FirstOrDefaultAsync(s => s.Id == appointment.AppointmentSlotId, cancellationToken);
+
+            if (!string.IsNullOrEmpty(staffUser.Phone))
+            {
+                var slotDateStr = slot != null ? slot.SlotDate.ToString("dd-MMM-yyyy") : "N/A";
+                var slotTimeStr = slot != null ? $"{slot.StartTime} - {slot.EndTime}" : "N/A";
+                var staffMsg = $"📋 *New Task Assigned!*\n\nHello {staffUser.Name ?? "Staff"},\n\nYou have been assigned a new collection task.\n\n*Appointment ID:* {appointment.AppointmentNumber}\n*Patient Name:* {customerUser?.Name ?? "Customer"}\n*Address:* {appointment.LocationAddress}\n*Scheduled Slot:* {slotDateStr} ({slotTimeStr})\n\nPlease check your appointments page for details.";
+                
+                try
+                {
+                    await _whatsAppService.SendTextMessageAsync(staffUser.Phone, staffMsg);
+                }
+                catch (Exception ex)
+                {
+                    // Log to console but do not fail the request
+                    Console.WriteLine($"Failed to send WhatsApp alert to staff: {staffUser.Phone}. Error: {ex.Message}");
+                }
+            }
 
             return Ok(ApiResponse.SuccessResult("Staff member assigned to appointment successfully."));
         }
@@ -2416,6 +2447,7 @@ namespace Apenir.API.Controllers
     public class AssignStaffRequest
     {
         public string StaffId { get; set; } = string.Empty;
+        public string? BranchId { get; set; }
     }
 
     public class BranchServiceDto
@@ -2514,6 +2546,7 @@ namespace Apenir.API.Controllers
         public decimal Latitude { get; set; }
         public decimal Longitude { get; set; }
         public double ServiceRangeKm { get; set; }
+        public decimal? PerKmCharge { get; set; }
     }
 
     public class ChangePasswordRequest

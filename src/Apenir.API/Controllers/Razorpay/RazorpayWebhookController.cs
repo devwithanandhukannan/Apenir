@@ -16,6 +16,8 @@ using Apenir.Core.Entities;
 using Apenir.Core.Enums;
 using Apenir.Core.Interfaces;
 
+using System.Net.Http;
+
 namespace Apenir.API.Controllers;
 
 [ApiController]
@@ -28,17 +30,20 @@ public class RazorpayWebhookController : ControllerBase
     private readonly IConfiguration _configuration;
     private readonly IWhatsAppService _whatsAppService;
     private readonly ILogger<RazorpayWebhookController> _logger;
+    private readonly IHttpClientFactory _httpClientFactory;
 
     public RazorpayWebhookController(
         IApplicationDbContext context,
         IConfiguration configuration,
         IWhatsAppService whatsAppService,
-        ILogger<RazorpayWebhookController> logger)
+        ILogger<RazorpayWebhookController> logger,
+        IHttpClientFactory httpClientFactory)
     {
         _context = context;
         _configuration = configuration;
         _whatsAppService = whatsAppService;
         _logger = logger;
+        _httpClientFactory = httpClientFactory;
     }
 
     [HttpPost("webhook")]
@@ -117,11 +122,14 @@ public class RazorpayWebhookController : ControllerBase
                         var paymentId = entity.TryGetProperty("id", out var payIdEl) ? payIdEl.GetString() : $"pay_webhook_{Guid.NewGuid().ToString("N")[..12]}";
                         var orderId = entity.TryGetProperty("order_id", out var ordIdEl) ? ordIdEl.GetString() : $"order_webhook_{Guid.NewGuid().ToString("N")[..12]}";
 
+                        var memberSelections = notes.TryGetProperty("member_selections", out var msEl) ? msEl.GetString() : string.Empty;
+
                         // Handle Booking dynamically
                         await ProcessPaymentBooking(
                             to, testId, labId, slotId, memberCount,
                             building ?? "Not specified", landmark ?? "Not specified", floor ?? "Not specified",
                             (decimal)latitude, (decimal)longitude, paymentId ?? string.Empty, orderId ?? string.Empty,
+                            memberSelections ?? string.Empty,
                             cancellationToken
                         );
                     }
@@ -140,7 +148,7 @@ public class RazorpayWebhookController : ControllerBase
     private async Task ProcessPaymentBooking(
         string to, string testId, string labId, string slotId, int memberCount,
         string building, string landmark, string floor, decimal latitude, decimal longitude,
-        string paymentId, string orderId, CancellationToken cancellationToken)
+        string paymentId, string orderId, string memberSelections, CancellationToken cancellationToken)
     {
         var lockObj = _paymentLocks.GetOrAdd(paymentId, _ => new SemaphoreSlim(1, 1));
         await lockObj.WaitAsync(cancellationToken);
@@ -218,38 +226,109 @@ public class RazorpayWebhookController : ControllerBase
                 .Where(bp => bp.BranchId == labId && itemIds.Contains(bp.PackageId) && bp.IsActive)
                 .ToListAsync(cancellationToken);
 
-            decimal rate = 0m;
-            decimal totalCommissionPct = 0m;
-            int itemsCount = 0;
-
-            foreach (var itemId in itemIds)
+            var parsedSelections = new List<(string Name, List<string> ItemIds)>();
+            if (!string.IsNullOrWhiteSpace(memberSelections))
             {
-                var s = services.FirstOrDefault(x => x.Id == itemId);
-                if (s != null)
+                var parts = memberSelections.Split(';');
+                foreach (var part in parts)
                 {
-                    var bs = branchServices.FirstOrDefault(x => x.ServiceId == itemId);
-                    rate += bs?.CustomPrice ?? s.BasePrice;
-                    totalCommissionPct += bs?.CustomCommissionPct ?? s.PlatformCommissionPct;
-                    itemsCount++;
-                }
-                else
-                {
-                    var p = packages.FirstOrDefault(x => x.Id == itemId);
-                    if (p != null)
+                    if (string.IsNullOrWhiteSpace(part)) continue;
+                    var subparts = part.Split(':');
+                    if (subparts.Length == 2)
                     {
-                        var bp = branchPackages.FirstOrDefault(x => x.PackageId == itemId);
-                        rate += bp?.CustomPrice ?? p.BasePrice;
-                        totalCommissionPct += bp?.CustomCommissionPct ?? p.PlatformCommissionPct;
-                        itemsCount++;
+                        var name = subparts[0];
+                        var items = subparts[1].Split(',').Select(x => x.Trim()).Where(x => !string.IsNullOrEmpty(x)).ToList();
+                        parsedSelections.Add((name, items));
                     }
                 }
             }
 
-            decimal avgCommissionPct = itemsCount > 0 ? (totalCommissionPct / itemsCount) : 15.00m;
+            decimal totalBaseAmount = 0m;
+            decimal totalCommissionPct = 0m;
+            int totalItemsCount = 0;
 
-            int total = (int)rate + (memberCount > 1
-                ? (int)Math.Round((memberCount - 1) * rate * 0.8m)
-                : 0);
+            if (parsedSelections.Any())
+            {
+                for (int i = 0; i < parsedSelections.Count; i++)
+                {
+                    var selection = parsedSelections[i];
+                    decimal memberSum = 0m;
+                    foreach (var itemId in selection.ItemIds)
+                    {
+                        var s = services.FirstOrDefault(x => x.Id == itemId);
+                        if (s != null)
+                        {
+                            var bs = branchServices.FirstOrDefault(x => x.ServiceId == itemId);
+                            memberSum += bs?.CustomPrice ?? s.BasePrice;
+                            totalCommissionPct += bs?.CustomCommissionPct ?? s.PlatformCommissionPct;
+                            totalItemsCount++;
+                        }
+                        else
+                        {
+                            var p = packages.FirstOrDefault(x => x.Id == itemId);
+                            if (p != null)
+                            {
+                                var bp = branchPackages.FirstOrDefault(x => x.PackageId == itemId);
+                                memberSum += bp?.CustomPrice ?? p.BasePrice;
+                                totalCommissionPct += bp?.CustomCommissionPct ?? p.PlatformCommissionPct;
+                                totalItemsCount++;
+                            }
+                        }
+                    }
+
+                    if (i == 0)
+                    {
+                        totalBaseAmount += memberSum;
+                    }
+                    else
+                    {
+                        totalBaseAmount += memberSum * 0.8m;
+                    }
+                }
+            }
+            else
+            {
+                decimal rate = 0m;
+                foreach (var itemId in itemIds)
+                {
+                    var s = services.FirstOrDefault(x => x.Id == itemId);
+                    if (s != null)
+                    {
+                        var bs = branchServices.FirstOrDefault(x => x.ServiceId == itemId);
+                        rate += bs?.CustomPrice ?? s.BasePrice;
+                        totalCommissionPct += bs?.CustomCommissionPct ?? s.PlatformCommissionPct;
+                        totalItemsCount++;
+                    }
+                    else
+                    {
+                        var p = packages.FirstOrDefault(x => x.Id == itemId);
+                        if (p != null)
+                        {
+                            var bp = branchPackages.FirstOrDefault(x => x.PackageId == itemId);
+                            rate += bp?.CustomPrice ?? p.BasePrice;
+                            totalCommissionPct += bp?.CustomCommissionPct ?? p.PlatformCommissionPct;
+                            totalItemsCount++;
+                        }
+                    }
+                }
+
+                totalBaseAmount = rate + (memberCount > 1
+                    ? (memberCount - 1) * rate * 0.8m
+                    : 0);
+            }
+
+            decimal avgCommissionPct = totalItemsCount > 0 ? (totalCommissionPct / totalItemsCount) : 15.00m;
+
+            // Compute OSRM travel cost
+            double roadDistance = 0;
+            if (lab != null)
+            {
+                var client = _httpClientFactory.CreateClient();
+                roadDistance = await GetRoadDistanceKm((double)latitude, (double)longitude, (double)lab.Latitude, (double)lab.Longitude, client);
+            }
+            decimal travelCost = (decimal)roadDistance * (lab?.PerKmCharge ?? 0m);
+
+            int total = (int)Math.Round(totalBaseAmount) + (int)Math.Round(travelCost);
 
             // 3. Update Slot
             slot.BookedCount += memberCount;
@@ -290,20 +369,50 @@ public class RazorpayWebhookController : ControllerBase
 
             // Create Members
             var customerName = string.IsNullOrWhiteSpace(user.Name) ? "Patient" : user.Name;
-            for (int i = 0; i < memberCount; i++)
+            if (parsedSelections.Any())
             {
-                var member = new AppointmentMember
+                for (int i = 0; i < parsedSelections.Count; i++)
                 {
-                    Id = Guid.NewGuid().ToString(),
-                    AppointmentId = appointment.Id,
-                    MemberName = i == 0 ? customerName : $"Member {i + 1}",
-                    Age = 0,
-                    Gender = Gender.Other,
-                    Relationship = i == 0 ? "Self" : "Family Member",
-                    UniqueNumber = $"MEM-{Guid.NewGuid().ToString("N").Substring(0, 8).ToUpper()}",
-                    TestName = itemNamesStr
-                };
-                _context.AppointmentMembers.Add(member);
+                    var selection = parsedSelections[i];
+                    var memberName = string.IsNullOrWhiteSpace(selection.Name) || selection.Name == "Self" ? customerName : selection.Name;
+                    var relationship = i == 0 ? "Self" : "Family Member";
+
+                    var memberItemNames = services.Where(s => selection.ItemIds.Contains(s.Id)).Select(s => s.Name)
+                                            .Concat(packages.Where(p => selection.ItemIds.Contains(p.Id)).Select(p => p.Name))
+                                            .ToList();
+                    var memberTestNamesStr = string.Join(", ", memberItemNames);
+
+                    var member = new AppointmentMember
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        AppointmentId = appointment.Id,
+                        MemberName = memberName,
+                        Age = 0,
+                        Gender = Gender.Other,
+                        Relationship = relationship,
+                        UniqueNumber = $"MEM-{Guid.NewGuid().ToString("N").Substring(0, 8).ToUpper()}",
+                        TestName = memberTestNamesStr
+                    };
+                    _context.AppointmentMembers.Add(member);
+                }
+            }
+            else
+            {
+                for (int i = 0; i < memberCount; i++)
+                {
+                    var member = new AppointmentMember
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        AppointmentId = appointment.Id,
+                        MemberName = i == 0 ? customerName : $"Member {i + 1}",
+                        Age = 0,
+                        Gender = Gender.Other,
+                        Relationship = i == 0 ? "Self" : "Family Member",
+                        UniqueNumber = $"MEM-{Guid.NewGuid().ToString("N").Substring(0, 8).ToUpper()}",
+                        TestName = itemNamesStr
+                    };
+                    _context.AppointmentMembers.Add(member);
+                }
             }
 
             // Create Payment record
@@ -373,7 +482,7 @@ public class RazorpayWebhookController : ControllerBase
             // Notify Lab via WhatsApp NotificationPhone
             if (lab != null && !string.IsNullOrEmpty(lab.NotificationPhone))
             {
-                var labNotification = $"            var labNotification = $\"🔔 *New Diagnostic Request!*\\n\\n\" +\n" +
+                var labNotification = $"🔔 *New Diagnostic Request!*\n\n" +
                                       $"Booking ID: *{bookingId}*\n" +
                                       $"Test: {itemNamesStr}\n" +
                                       $"Slot: {slotDisplay}\n" +
@@ -408,6 +517,59 @@ public class RazorpayWebhookController : ControllerBase
             lockObj.Release();
         }
     }
+
+    private async Task<double> GetRoadDistanceKm(double lat1, double lng1, double lat2, double lng2, HttpClient client)
+    {
+        try
+        {
+            var lon1Str = lng1.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var lat1Str = lat1.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var lon2Str = lng2.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var lat2Str = lat2.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+            var url = $"http://router.project-osrm.org/route/v1/driving/{lon1Str},{lat1Str};{lon2Str},{lat2Str}?overview=false";
+
+            client.Timeout = TimeSpan.FromSeconds(3);
+            var response = await client.GetAsync(url);
+            if (response.IsSuccessStatusCode)
+            {
+                var json = await response.Content.ReadAsStringAsync();
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+                if (root.TryGetProperty("code", out var code) && code.GetString() == "Ok")
+                {
+                    if (root.TryGetProperty("routes", out var routes) && routes.ValueKind == JsonValueKind.Array && routes.GetArrayLength() > 0)
+                    {
+                        var route = routes[0];
+                        if (route.TryGetProperty("distance", out var distanceVal))
+                        {
+                            var distanceMeters = distanceVal.GetDouble();
+                            return distanceMeters / 1000.0;
+                        }
+                    }
+                }
+            }
+        }
+        catch
+        {
+        }
+
+        return CalculateDistanceKm(lat1, lng1, lat2, lng2);
+    }
+
+    private static double CalculateDistanceKm(double lat1, double lng1, double lat2, double lng2)
+    {
+        const double R = 6371.0;
+        var dLat = ToRadians(lat2 - lat1);
+        var dLng = ToRadians(lng2 - lng1);
+        var a = Math.Sin(dLat / 2) * Math.Sin(dLat / 2) +
+                Math.Cos(ToRadians(lat1)) * Math.Cos(ToRadians(lat2)) *
+                Math.Sin(dLng / 2) * Math.Sin(dLng / 2);
+        var c = 2 * Math.Atan2(Math.Sqrt(a), Math.Sqrt(1 - a));
+        return R * c;
+    }
+
+    private static double ToRadians(double val) => (Math.PI / 180) * val;
 
     private static byte[] CreateSimplePdf(string text)
     {

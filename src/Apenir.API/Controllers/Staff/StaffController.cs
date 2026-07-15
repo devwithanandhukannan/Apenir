@@ -647,6 +647,150 @@ public class StaffController : ControllerBase
 
         return Ok(ApiResponse<StaffStatsDto>.SuccessResult(stats, "Stats and history retrieved successfully."));
     }
+
+    [HttpGet("appointments/{id}/services")]
+    [EndpointSummary("Get all diagnostic services and packages offered by the branch of this appointment")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<object>))]
+    [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+    public async Task<IActionResult> GetAppointmentBranchServices(
+        [FromRoute] string id,
+        CancellationToken cancellationToken)
+    {
+        var currentUserId = _currentUserService.UserId?.ToString();
+        var appointment = await _context.Appointments
+            .FirstOrDefaultAsync(a => a.Id == id && a.AssignedStaffId == currentUserId, cancellationToken);
+
+        if (appointment == null)
+        {
+            return NotFound(ApiResponse.FailureResult("Assigned appointment not found."));
+        }
+
+        var allServices = await _context.Services.AsNoTracking()
+            .Where(s => s.IsActive && (s.CreatedByBranchId == null || s.CreatedByBranchId == appointment.BranchId))
+            .ToListAsync(cancellationToken);
+
+        var branchServices = await _context.BranchServices.AsNoTracking()
+            .Where(bs => bs.BranchId == appointment.BranchId && bs.IsActive)
+            .ToListAsync(cancellationToken);
+
+        var branchPackages = await _context.BranchPackages.AsNoTracking()
+            .Where(bp => bp.BranchId == appointment.BranchId && bp.IsActive)
+            .ToListAsync(cancellationToken);
+
+        var packages = await _context.Packages.AsNoTracking()
+            .Where(p => p.IsActive && (p.CreatedByBranchId == null || p.CreatedByBranchId == appointment.BranchId))
+            .ToListAsync(cancellationToken);
+
+        var serviceList = allServices.Select(s => {
+            var bs = branchServices.FirstOrDefault(x => x.ServiceId == s.Id);
+            return new {
+                s.Id,
+                s.Name,
+                s.Category,
+                s.Description,
+                Price = bs?.CustomPrice ?? s.BasePrice,
+                IsPackage = false
+            };
+        }).Where(s => branchServices.Any(x => x.ServiceId == s.Id)).ToList();
+
+        var packageList = packages.Select(p => {
+            var bp = branchPackages.FirstOrDefault(x => x.PackageId == p.Id);
+            return new {
+                p.Id,
+                p.Name,
+                Category = "Package",
+                p.Description,
+                Price = bp?.CustomPrice ?? p.BasePrice,
+                IsPackage = true
+            };
+        }).Where(p => branchPackages.Any(x => x.PackageId == p.Id)).ToList();
+
+        var combined = serviceList.Concat(packageList).ToList();
+
+        return Ok(ApiResponse<object>.SuccessResult(combined, "Branch diagnostic services and packages retrieved successfully."));
+    }
+
+    [HttpGet("members/search")]
+    [EndpointSummary("Search customer and past appointment members by phone number")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<CustomerProfileDto>>))]
+    public async Task<IActionResult> SearchMembersByPhone(
+        [FromQuery] string phone,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(phone))
+        {
+            return BadRequest(ApiResponse.FailureResult("Phone number query is required."));
+        }
+
+        var queryPhone = phone.Trim();
+        var matchedUser = await _context.Users
+            .FirstOrDefaultAsync(u => u.Phone == queryPhone && u.Role == UserRole.Customer, cancellationToken);
+
+        var profiles = new List<CustomerProfileDto>();
+
+        if (matchedUser != null)
+        {
+            var customer = await _context.Customers
+                .Include(c => c.User)
+                .FirstOrDefaultAsync(c => c.UserId == matchedUser.Id, cancellationToken);
+
+            if (customer != null)
+            {
+                profiles.Add(new CustomerProfileDto
+                {
+                    Id = customer.Id,
+                    Name = customer.Name,
+                    Gender = customer.Gender,
+                    Dob = customer.Dob,
+                    Address = customer.Address
+                });
+            }
+        }
+
+        // Also look up any past AppointmentMembers booked under a customer user with this phone
+        var bookedUsers = await _context.Users
+            .Where(u => u.Phone == queryPhone)
+            .Select(u => u.Id)
+            .ToListAsync(cancellationToken);
+
+        if (bookedUsers.Any())
+        {
+            var pastAppointments = await _context.Appointments
+                .Where(a => bookedUsers.Contains(a.CustomerUserId))
+                .Select(a => a.Id)
+                .ToListAsync(cancellationToken);
+
+            if (pastAppointments.Any())
+            {
+                var pastMembers = await _context.AppointmentMembers
+                    .Where(m => pastAppointments.Contains(m.AppointmentId) && !string.IsNullOrWhiteSpace(m.MemberName))
+                    .ToListAsync(cancellationToken);
+
+                var uniquePastMembers = pastMembers
+                    .GroupBy(m => m.MemberName.Trim().ToLower())
+                    .Select(g => g.First())
+                    .ToList();
+
+                foreach (var pm in uniquePastMembers)
+                {
+                    // Avoid adding duplicate profiles by name
+                    if (profiles.Any(p => p.Name != null && p.Name.Trim().ToLower() == pm.MemberName.Trim().ToLower()))
+                        continue;
+
+                    profiles.Add(new CustomerProfileDto
+                    {
+                        Id = pm.Id,
+                        Name = pm.MemberName,
+                        Gender = pm.Gender.ToString(),
+                        Dob = $"Age: {pm.Age}",
+                        Address = profiles.FirstOrDefault()?.Address
+                    });
+                }
+            }
+        }
+
+        return Ok(ApiResponse<List<CustomerProfileDto>>.SuccessResult(profiles, "Matching member profiles retrieved successfully."));
+    }
 }
 
 public class StaffStatsDto

@@ -396,32 +396,84 @@ public class BookingController : ControllerBase
             .Where(bp => bp.BranchId == branch.Id && itemIds.Contains(bp.PackageId) && bp.IsActive)
             .ToListAsync(cancellationToken);
 
-        decimal rate = 0m;
-        foreach (var itemId in itemIds)
+        decimal totalBaseAmount = 0m;
+        var encodedSelections = new List<string>();
+
+        if (request.MemberSelections != null && request.MemberSelections.Any())
         {
-            var s = services.FirstOrDefault(x => x.Id == itemId);
-            if (s != null)
+            for (int i = 0; i < request.MemberSelections.Count; i++)
             {
-                var bs = branchServices.FirstOrDefault(x => x.ServiceId == itemId);
-                rate += bs?.CustomPrice ?? s.BasePrice;
-            }
-            else
-            {
-                var p = packages.FirstOrDefault(x => x.Id == itemId);
-                if (p != null)
+                var selection = request.MemberSelections[i];
+                decimal memberSum = 0m;
+                foreach (var itemId in selection.ItemIds)
                 {
-                    var bp = branchPackages.FirstOrDefault(x => x.PackageId == itemId);
-                    rate += bp?.CustomPrice ?? p.BasePrice;
+                    var s = services.FirstOrDefault(x => x.Id == itemId);
+                    if (s != null)
+                    {
+                        var bs = branchServices.FirstOrDefault(x => x.ServiceId == itemId);
+                        memberSum += bs?.CustomPrice ?? s.BasePrice;
+                    }
+                    else
+                    {
+                        var p = packages.FirstOrDefault(x => x.Id == itemId);
+                        if (p != null)
+                        {
+                            var bp = branchPackages.FirstOrDefault(x => x.PackageId == itemId);
+                            memberSum += bp?.CustomPrice ?? p.BasePrice;
+                        }
+                    }
                 }
+
+                if (i == 0)
+                {
+                    totalBaseAmount += memberSum;
+                }
+                else
+                {
+                    totalBaseAmount += memberSum * 0.8m;
+                }
+
+                var memberNameSanitized = string.IsNullOrWhiteSpace(selection.Name) ? (i == 0 ? "Self" : $"Member {i + 1}") : selection.Name.Replace(":", "").Replace(";", "").Replace(",", "");
+                encodedSelections.Add($"{memberNameSanitized}:{string.Join(",", selection.ItemIds)}");
+            }
+        }
+        else
+        {
+            decimal rate = 0m;
+            foreach (var itemId in itemIds)
+            {
+                var s = services.FirstOrDefault(x => x.Id == itemId);
+                if (s != null)
+                {
+                    var bs = branchServices.FirstOrDefault(x => x.ServiceId == itemId);
+                    rate += bs?.CustomPrice ?? s.BasePrice;
+                }
+                else
+                {
+                    var p = packages.FirstOrDefault(x => x.Id == itemId);
+                    if (p != null)
+                    {
+                        var bp = branchPackages.FirstOrDefault(x => x.PackageId == itemId);
+                        rate += bp?.CustomPrice ?? p.BasePrice;
+                    }
+                }
+            }
+
+            totalBaseAmount = rate + (memberCount > 1
+                ? (memberCount - 1) * rate * 0.8m
+                : 0);
+
+            for (int i = 0; i < memberCount; i++)
+            {
+                encodedSelections.Add($"{(i == 0 ? "Self" : $"Member {i + 1}")}:{string.Join(",", itemIds)}");
             }
         }
 
         // Extra travel cost based on OSRM road distance
         decimal travelCost = (decimal)roadDistance * (branch.PerKmCharge ?? 0m);
 
-        int total = (int)rate + (memberCount > 1
-            ? (int)Math.Round((memberCount - 1) * rate * 0.8m)
-            : 0) + (int)Math.Round(travelCost);
+        int total = (int)Math.Round(totalBaseAmount) + (int)Math.Round(travelCost);
+        var memberSelectionsStr = string.Join(";", encodedSelections);
 
         // Generate Razorpay Payment Link
         var rzpKeyId = _configuration["Razorpay:KeyId"];
@@ -462,7 +514,8 @@ public class BookingController : ControllerBase
                     landmark = request.Landmark ?? "",
                     floor = request.Floor ?? "",
                     latitude = request.Latitude.ToString(System.Globalization.CultureInfo.InvariantCulture),
-                    longitude = request.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                    longitude = request.Longitude.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                    member_selections = memberSelectionsStr
                 }
             };
 
@@ -665,6 +718,12 @@ public class LookupMemberResult
     public string? ReportPdfPath { get; set; }
 }
 
+public class MemberServiceSelection
+{
+    public string Name { get; set; } = string.Empty;
+    public List<string> ItemIds { get; set; } = new();
+}
+
 public class WebBookingRequest
 {
     public double Latitude { get; set; }
@@ -676,4 +735,5 @@ public class WebBookingRequest
     public string BuildingDetails { get; set; } = string.Empty;
     public string Landmark { get; set; } = string.Empty;
     public string Floor { get; set; } = string.Empty;
+    public List<MemberServiceSelection>? MemberSelections { get; set; }
 }
