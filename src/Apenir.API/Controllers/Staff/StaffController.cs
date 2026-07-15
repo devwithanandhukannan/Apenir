@@ -252,8 +252,11 @@ public class StaffController : ControllerBase
         if (matchedUser != null)
         {
             mainCustomer = await _context.Customers
-                .Include(c => c.User)
                 .FirstOrDefaultAsync(c => c.UserId == matchedUser.Id, cancellationToken);
+            if (mainCustomer != null)
+            {
+                mainCustomer.User = matchedUser;
+            }
         }
 
         var existingProfiles = new List<CustomerProfileDto>();
@@ -431,13 +434,15 @@ public class StaffController : ControllerBase
     {
         var currentUserId = _currentUserService.UserId?.ToString();
         var appointment = await _context.Appointments
-            .Include(a => a.CustomerUser)
             .FirstOrDefaultAsync(a => a.Id == id && a.AssignedStaffId == currentUserId, cancellationToken);
 
         if (appointment == null)
         {
             return NotFound(ApiResponse.FailureResult("Assigned appointment not found."));
         }
+
+        appointment.CustomerUser = await _context.Users
+            .FirstOrDefaultAsync(u => u.Id == appointment.CustomerUserId, cancellationToken);
 
         // 1. Calculate Birth Date fallback from Age
         DateOnly? dateOfBirth = null;
@@ -744,11 +749,11 @@ public class StaffController : ControllerBase
         if (matchedUser != null)
         {
             var customer = await _context.Customers
-                .Include(c => c.User)
                 .FirstOrDefaultAsync(c => c.UserId == matchedUser.Id, cancellationToken);
 
             if (customer != null)
             {
+                customer.User = matchedUser;
                 profiles.Add(new CustomerProfileDto
                 {
                     Id = customer.Id,
