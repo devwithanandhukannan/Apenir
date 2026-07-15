@@ -84,7 +84,7 @@ public class Appointment
     /// True when this booking spans multiple labs (one lab can't handle all items).
     /// The parent appointment holds the full member list; child appointments each target one lab.
     /// </summary>
-    public bool IsMultiLab { get; set; } = false;
+    public bool? IsMultiLab { get; set; } = false;
 
     /// <summary>
     /// For child sub-appointments created in a multi-lab booking.
@@ -97,7 +97,7 @@ public class Appointment
     /// Service/Package IDs assigned to this lab in a multi-lab split.
     /// For single-lab bookings this mirrors the full cart.
     /// </summary>
-    public List<string> ItemIds { get; set; } = new();
+    public List<string>? ItemIds { get; set; } = new();
 
     // ─── Navigation ──────────────────────────────────────────────────────────
 
