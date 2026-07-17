@@ -595,8 +595,10 @@ namespace Apenir.API.Controllers.Admin
                     Category = s.Category,
                     Description = s.Description,
                     BasePrice = s.BasePrice,
+                    OriginalPrice = s.OriginalPrice,
                     DefaultCommissionPct = s.PlatformCommissionPct,
                     CustomPrice = bs?.CustomPrice,
+                    CustomOriginalPrice = bs?.CustomOriginalPrice,
                     CustomCommissionPct = bs?.CustomCommissionPct,
                     IsEnrolled = bs != null,
                     IsActive = bs?.IsActive ?? false,
@@ -632,6 +634,9 @@ namespace Apenir.API.Controllers.Admin
 
             if (request.BasePrice.HasValue && request.BasePrice.Value >= 0)
                 service.BasePrice = request.BasePrice.Value;
+
+            if (request.OriginalPrice.HasValue)
+                service.OriginalPrice = request.OriginalPrice.Value >= 0 ? request.OriginalPrice.Value : null;
 
             if (request.PlatformCommissionPct.HasValue &&
                 request.PlatformCommissionPct.Value >= 0 &&
@@ -744,6 +749,7 @@ namespace Apenir.API.Controllers.Admin
                     BranchId = branchId,
                     ServiceId = serviceId,
                     CustomPrice = request.CustomPrice,
+                    CustomOriginalPrice = request.CustomOriginalPrice,
                     CustomCommissionPct = request.CustomCommissionPct,
                     IsActive = request.IsActive
                 };
@@ -752,6 +758,7 @@ namespace Apenir.API.Controllers.Admin
             else
             {
                 branchService.CustomPrice = request.CustomPrice;
+                branchService.CustomOriginalPrice = request.CustomOriginalPrice;
                 branchService.CustomCommissionPct = request.CustomCommissionPct;
                 branchService.IsActive = request.IsActive;
                 _context.BranchServices.Update(branchService);
@@ -759,6 +766,111 @@ namespace Apenir.API.Controllers.Admin
 
             await _context.SaveChangesAsync(cancellationToken);
             return Ok(ApiResponse.SuccessResult("Branch service override saved successfully by Admin."));
+        }
+
+        [HttpGet("branches/{branchId}/packages")]
+        [EndpointSummary("Get all packages for a branch with override details")]
+        [EndpointDescription("Returns all master packages and custom packages for a branch, merged with branch-specific price, original price, commission, and active status overrides.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<AdminBranchPackageDto>>))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetBranchPackagesAdmin(
+            [FromRoute] string branchId,
+            CancellationToken cancellationToken)
+        {
+            var branchExists = await _context.Branches.AnyAsync(b => b.Id == branchId, cancellationToken);
+            if (!branchExists)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            var allPackages = await _context.Packages.AsNoTracking()
+                .Where(p => p.IsActive && (p.CreatedByBranchId == null || p.CreatedByBranchId == branchId))
+                .ToListAsync(cancellationToken);
+
+            var branchPackages = await _context.BranchPackages.AsNoTracking()
+                .Where(bp => bp.BranchId == branchId)
+                .ToListAsync(cancellationToken);
+
+            var result = allPackages.Select(p =>
+            {
+                var bp = branchPackages.FirstOrDefault(x => x.PackageId == p.Id);
+                return new AdminBranchPackageDto
+                {
+                    BranchPackageId = bp?.Id,
+                    PackageId = p.Id,
+                    Name = p.Name,
+                    Description = p.Description,
+                    BasePrice = p.BasePrice,
+                    OriginalPrice = p.OriginalPrice,
+                    DefaultCommissionPct = p.PlatformCommissionPct,
+                    CustomPrice = bp?.CustomPrice,
+                    CustomOriginalPrice = bp?.CustomOriginalPrice,
+                    CustomCommissionPct = bp?.CustomCommissionPct,
+                    IsEnrolled = bp != null,
+                    IsActive = bp?.IsActive ?? false
+                };
+            }).ToList();
+
+            return Ok(ApiResponse<List<AdminBranchPackageDto>>.SuccessResult(result, "Branch packages retrieved successfully."));
+        }
+
+        [HttpPut("branches/{branchId}/packages/{packageId}")]
+        [EndpointSummary("Admin override of a specific branch's package pricing, commission, or active status")]
+        [EndpointDescription("Allows administrators to customize the price, original price, commission, or active status of a package for a specific branch.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> AdminOverrideBranchPackage(
+            [FromRoute] string branchId,
+            [FromRoute] string packageId,
+            [FromBody] AdminOverrideBranchPackageRequest request,
+            CancellationToken cancellationToken)
+        {
+            if (request == null)
+            {
+                return BadRequest(ApiResponse.FailureResult("Request body is required."));
+            }
+
+            var branchExists = await _context.Branches.AnyAsync(b => b.Id == branchId, cancellationToken);
+            if (!branchExists)
+            {
+                return NotFound(ApiResponse.FailureResult("Branch not found."));
+            }
+
+            var branchPackage = await _context.BranchPackages
+                .FirstOrDefaultAsync(bp => bp.BranchId == branchId && bp.PackageId == packageId, cancellationToken);
+
+            if (branchPackage == null)
+            {
+                var packageExists = await _context.Packages.AnyAsync(p => p.Id == packageId, cancellationToken);
+                if (!packageExists)
+                {
+                    return NotFound(ApiResponse.FailureResult("Master package not found."));
+                }
+
+                branchPackage = new BranchPackage
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    BranchId = branchId,
+                    PackageId = packageId,
+                    CustomPrice = request.CustomPrice,
+                    CustomOriginalPrice = request.CustomOriginalPrice,
+                    CustomCommissionPct = request.CustomCommissionPct,
+                    IsActive = request.IsActive
+                };
+                _context.BranchPackages.Add(branchPackage);
+            }
+            else
+            {
+                branchPackage.CustomPrice = request.CustomPrice;
+                branchPackage.CustomOriginalPrice = request.CustomOriginalPrice;
+                branchPackage.CustomCommissionPct = request.CustomCommissionPct;
+                branchPackage.IsActive = request.IsActive;
+                _context.BranchPackages.Update(branchPackage);
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+            return Ok(ApiResponse.SuccessResult("Branch package override saved successfully by Admin."));
         }
 
         [HttpPost("finance/payments")]
@@ -1575,6 +1687,14 @@ namespace Apenir.API.Controllers.Admin
 
     public record AdminOverrideBranchServiceRequest(
         decimal? CustomPrice,
+        decimal? CustomOriginalPrice,
+        decimal? CustomCommissionPct,
+        bool IsActive
+    );
+
+    public record AdminOverrideBranchPackageRequest(
+        decimal? CustomPrice,
+        decimal? CustomOriginalPrice,
         decimal? CustomCommissionPct,
         bool IsActive
     );
@@ -1584,6 +1704,7 @@ namespace Apenir.API.Controllers.Admin
         string? Description,
         string? Category,
         decimal? BasePrice,
+        decimal? OriginalPrice,
         decimal? PlatformCommissionPct,
         bool? IsActive
     );
@@ -1600,12 +1721,30 @@ namespace Apenir.API.Controllers.Admin
         public string Category { get; set; } = string.Empty;
         public string? Description { get; set; }
         public decimal BasePrice { get; set; }
+        public decimal? OriginalPrice { get; set; }
         public decimal DefaultCommissionPct { get; set; }
         public decimal? CustomPrice { get; set; }
+        public decimal? CustomOriginalPrice { get; set; }
         public decimal? CustomCommissionPct { get; set; }
         public bool IsEnrolled { get; set; }
         public bool IsActive { get; set; }
         public bool IsCustom { get; set; }
+    }
+
+    public class AdminBranchPackageDto
+    {
+        public string? BranchPackageId { get; set; }
+        public string PackageId { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public string? Description { get; set; }
+        public decimal BasePrice { get; set; }
+        public decimal? OriginalPrice { get; set; }
+        public decimal DefaultCommissionPct { get; set; }
+        public decimal? CustomPrice { get; set; }
+        public decimal? CustomOriginalPrice { get; set; }
+        public decimal? CustomCommissionPct { get; set; }
+        public bool IsEnrolled { get; set; }
+        public bool IsActive { get; set; }
     }
 
     public record InviteLabRequest(

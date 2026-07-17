@@ -251,11 +251,32 @@ namespace Apenir.API.BackgroundServices
                 await SendGreeting(to, httpClientFactory, configuration);
                 return;
             }
-
             switch (session.CurrentState)
             {
                 case WhatsAppState.Start:
                     await SendGreeting(to, httpClientFactory, configuration);
+                    break;
+
+                case WhatsAppState.AwaitingItemQuantity:
+                    if (int.TryParse(text.Trim(), out int q) && q >= 1 && q <= 6)
+                    {
+                        var itemId = session.SelectedTestId;
+                        if (!string.IsNullOrEmpty(itemId))
+                        {
+                            if (session.CartItemIds == null) session.CartItemIds = new List<string>();
+                            session.CartItemIds.RemoveAll(id => id.StartsWith(itemId + ":"));
+                            session.CartItemIds.Add($"{itemId}:{q}");
+                            session.SelectedTestId = null;
+                        }
+                        session.CurrentState = WhatsAppState.ChoosingTest;
+                        await SaveSessionAsync(session, context, cancellationToken);
+                        await SendCartOptions(to, session, context, httpClientFactory, configuration, cancellationToken);
+                    }
+                    else
+                    {
+                        var name = await GetItemNameById(session.SelectedTestId, context, cancellationToken);
+                        await SendItemQuantityPrompt(to, name ?? "selected service", httpClientFactory, configuration);
+                    }
                     break;
 
                 case WhatsAppState.AwaitingAddressDetails:
@@ -269,7 +290,6 @@ namespace Apenir.API.BackgroundServices
 
                     await SendLabList(to, session, context, httpClientFactory, configuration, cancellationToken);
                     break;
-
                 case WhatsAppState.MemberCount:
                     if (int.TryParse(text.Trim(), out int count) && count >= 1 && count <= 6)
                     {
@@ -518,19 +538,43 @@ namespace Apenir.API.BackgroundServices
 
                     if (selectedService != null || selectedPackage != null)
                     {
-                        if (session.CartItemIds == null) session.CartItemIds = new List<string>();
-                        if (!session.CartItemIds.Contains(replyId))
-                        {
-                            session.CartItemIds.Add(replyId);
-                        }
+                        var name = selectedService?.Name ?? selectedPackage?.Name ?? "Item";
+                        session.SelectedTestId = replyId;
+                        session.CurrentState = WhatsAppState.AwaitingItemQuantity;
                         await SaveSessionAsync(session, context, cancellationToken);
-                        await SendCartOptions(to, session, context, httpClientFactory, configuration, cancellationToken);
+                        await SendItemQuantityPrompt(to, name, httpClientFactory, configuration);
                     }
                     else
                     {
                         session.CurrentState = WhatsAppState.Start;
                         await SaveSessionAsync(session, context, cancellationToken);
                         await SendGreeting(to, httpClientFactory, configuration);
+                    }
+                    break;
+
+                case WhatsAppState.AwaitingItemQuantity:
+                    if (replyId.StartsWith("qty_count_"))
+                    {
+                        var qtyStr = replyId.Replace("qty_count_", "");
+                        if (int.TryParse(qtyStr, out int qty) && qty >= 1 && qty <= 6)
+                        {
+                            var itemId = session.SelectedTestId;
+                            if (!string.IsNullOrEmpty(itemId))
+                            {
+                                if (session.CartItemIds == null) session.CartItemIds = new List<string>();
+                                session.CartItemIds.RemoveAll(id => id.StartsWith(itemId + ":"));
+                                session.CartItemIds.Add($"{itemId}:{qty}");
+                                session.SelectedTestId = null;
+                            }
+                            session.CurrentState = WhatsAppState.ChoosingTest;
+                            await SaveSessionAsync(session, context, cancellationToken);
+                            await SendCartOptions(to, session, context, httpClientFactory, configuration, cancellationToken);
+                        }
+                    }
+                    else
+                    {
+                        var name = await GetItemNameById(session.SelectedTestId, context, cancellationToken);
+                        await SendItemQuantityPrompt(to, name ?? "selected service", httpClientFactory, configuration);
                     }
                     break;
 
@@ -562,9 +606,25 @@ namespace Apenir.API.BackgroundServices
                         else
                         {
                             session.SelectedSlot = slot.Id;
-                            session.CurrentState = WhatsAppState.MemberCount;
+                            
+                            // Auto-compute memberCount from maximum service quantity
+                            var maxCount = 1;
+                            if (session.CartItemIds != null && session.CartItemIds.Any())
+                            {
+                                var qtys = session.CartItemIds
+                                    .Select(id => id.Split(':'))
+                                    .Select(parts => parts.Length > 1 && int.TryParse(parts[1], out var q) ? q : 1);
+                                maxCount = qtys.Any() ? qtys.Max() : 1;
+                            }
+
+                            session.MemberCount = maxCount;
+                            session.CurrentState = WhatsAppState.Confirm;
                             await SaveSessionAsync(session, context, cancellationToken);
-                            await SendPersonCountPrompt(to, session, context, httpClientFactory, configuration, cancellationToken);
+                            
+                            var summary = await BuildBookingSummaryAsync(session, context, cancellationToken);
+                            await SendTextMessage(to, $"📅 Slot confirmed!\n\n{summary}\n", httpClientFactory, configuration);
+                            await SendPaymentRequest(to, session, context, httpClientFactory, configuration, cancellationToken);
+                            await SendTextMessage(to, "👉 Once you complete the payment, reply with *DONE* or *PAY* to get your booking confirmation.", httpClientFactory, configuration);
                         }
                     }
                     break;
@@ -674,23 +734,25 @@ namespace Apenir.API.BackgroundServices
             var cartItemIds = session.CartItemIds ?? new List<string>();
             var allServices = await GetCachedServicesAsync(context, cancellationToken);
             var allPackages = await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken);
-
             var cartNames = new List<string>();
-            foreach (var itemId in cartItemIds)
+            foreach (var itemWithQty in cartItemIds)
             {
+                var parts = itemWithQty.Split(':');
+                var itemId = parts[0];
+                var qty = parts.Length > 1 ? parts[1] : "1";
+
                 var s = allServices.FirstOrDefault(x => x.Id == itemId);
-                if (s != null) cartNames.Add(s.Name);
+                if (s != null) cartNames.Add($"{s.Name} * {qty}");
                 else
                 {
                     var p = allPackages.FirstOrDefault(x => x.Id == itemId);
-                    if (p != null) cartNames.Add(p.Name);
+                    if (p != null) cartNames.Add($"{p.Name} * {qty}");
                 }
             }
 
             var text = $"🛒 *Shopping Cart* ({cartItemIds.Count} items):\n" +
                        (cartItemIds.Any() ? string.Join("\n", cartNames.Select(n => "• " + n)) : "_Empty_") + "\n\n" +
                        "Choose an option below to proceed:";
-
             var payload = new
             {
                 messaging_product = "whatsapp",
@@ -975,7 +1037,8 @@ namespace Apenir.API.BackgroundServices
             IApplicationDbContext context,
             CancellationToken cancellationToken)
         {
-            var itemIds = (session.SelectedTestId ?? "").Split(',').Select(id => id.Trim()).ToList();
+            var itemIdsWithQty = (session.SelectedTestId ?? "").Split(',').Select(id => id.Trim()).ToList();
+            var itemIds = itemIdsWithQty.Select(id => id.Split(':')[0]).ToList();
             var allServices = await GetCachedServicesAsync(context, cancellationToken);
             var allPackages = await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken);
 
@@ -1001,35 +1064,59 @@ namespace Apenir.API.BackgroundServices
                 .ToListAsync(cancellationToken);
 
             decimal rate = 0m;
-            foreach (var itemId in itemIds)
+            var serviceLinesSummary = new List<string>();
+
+            foreach (var itemWithQty in itemIdsWithQty)
             {
+                var parts = itemWithQty.Split(':');
+                var itemId = parts[0];
+                var qty = parts.Length > 1 && int.TryParse(parts[1], out var q) ? q : 1;
+
                 var s = services.FirstOrDefault(x => x.Id == itemId);
+                decimal basePrice = 0m;
+                decimal? originalPrice = null;
+                string name = "Item";
+
                 if (s != null)
                 {
+                    name = s.Name;
                     var bs = branchServices.FirstOrDefault(x => x.ServiceId == itemId);
-                    rate += bs?.CustomPrice ?? s.BasePrice;
+                    basePrice = bs?.CustomPrice ?? s.BasePrice;
+                    originalPrice = bs?.CustomOriginalPrice ?? s.OriginalPrice;
                 }
                 else
                 {
                     var p = packages.FirstOrDefault(x => x.Id == itemId);
                     if (p != null)
                     {
+                        name = p.Name;
                         var bp = branchPackages.FirstOrDefault(x => x.PackageId == itemId);
-                        rate += bp?.CustomPrice ?? p.BasePrice;
+                        basePrice = bp?.CustomPrice ?? p.BasePrice;
+                        originalPrice = bp?.CustomOriginalPrice ?? p.OriginalPrice;
                     }
+                }
+
+                // First copy pays full basePrice, subsequent copies get 20% discount (i.e. 80% price)
+                var cost = basePrice + (qty > 1 ? (qty - 1) * basePrice * 0.8m : 0m);
+                rate += cost;
+
+                if (originalPrice.HasValue && originalPrice.Value > basePrice)
+                {
+                    var totalOrig = originalPrice.Value * qty;
+                    serviceLinesSummary.Add($"• {name} * {qty} = ~₹{Math.Round(totalOrig)}~ ₹{Math.Round(cost)}");
+                }
+                else
+                {
+                    serviceLinesSummary.Add($"• {name} * {qty} = ₹{Math.Round(cost)}");
                 }
             }
 
-            int     total = (int)rate + (session.MemberCount > 1
-                ? (int)Math.Round((session.MemberCount - 1) * rate * 0.8m)
-                : 0);
-
-            var itemNames = services.Select(s => s.Name).Concat(packages.Select(p => p.Name)).ToList();
-            var itemNamesStr = string.Join(", ", itemNames);
+            int total = (int)Math.Round(rate);
+            var itemNamesStr = string.Join("\n", serviceLinesSummary);
 
             return
-                $"📋 *Booking Summary*\n" +
-                $"🩸 Services: {itemNamesStr}\n" +
+                $"📋 *Booking Summary*\n\n" +
+                $"🧪 *Services:*\n{itemNamesStr}\n\n" +
                 $"🏥 Lab: {labName}\n" +
                 (!string.IsNullOrEmpty(labAddress) ? $"📍 {labAddress}\n" : "") +
                 $"📅 Date & Time: {slotDisplay}\n" +
@@ -1041,7 +1128,8 @@ namespace Apenir.API.BackgroundServices
 
         private async Task GenerateSlotsForNext7Days(string branchId, IApplicationDbContext context, CancellationToken cancellationToken)
         {
-            var today = DateOnly.FromDateTime(DateTime.UtcNow);
+            var nowIst = DateTime.UtcNow.AddHours(5).AddMinutes(30);
+            var today = DateOnly.FromDateTime(nowIst);
             var configs = await context.BranchSlotConfigurations
                 .Where(c => c.BranchId == branchId)
                 .ToListAsync(cancellationToken);
@@ -1106,15 +1194,21 @@ namespace Apenir.API.BackgroundServices
             IConfiguration configuration,
             CancellationToken cancellationToken)
         {
-            var today = DateOnly.FromDateTime(DateTime.UtcNow);
+            var nowIst = DateTime.UtcNow.AddHours(5).AddMinutes(30);
+            var todayIst = DateOnly.FromDateTime(nowIst);
+            var timeOnlyIst = TimeOnly.FromDateTime(nowIst);
 
             await GenerateSlotsForNext7Days(labId, context, cancellationToken);
 
-            var slots = await context.AppointmentSlots
-                .Where(s => s.BranchId == labId && s.IsAvailable && s.SlotDate >= today)
+            var rawSlots = await context.AppointmentSlots
+                .Where(s => s.BranchId == labId && s.IsAvailable && s.SlotDate >= todayIst)
                 .OrderBy(s => s.SlotDate).ThenBy(s => s.StartTime)
-                .Take(10)
                 .ToListAsync(cancellationToken);
+
+            var slots = rawSlots
+                .Where(s => s.SlotDate > todayIst || (s.SlotDate == todayIst && s.StartTime > timeOnlyIst))
+                .Take(10)
+                .ToList();
 
             if (!slots.Any())
             {
@@ -1229,7 +1323,8 @@ namespace Apenir.API.BackgroundServices
             var rzpKeyId     = configuration["Razorpay:KeyId"];
             var rzpKeySecret = configuration["Razorpay:KeySecret"];
 
-            var itemIds = (session.SelectedTestId ?? "").Split(',').Select(id => id.Trim()).ToList();
+            var itemIdsWithQty = (session.SelectedTestId ?? "").Split(',').Select(id => id.Trim()).ToList();
+            var itemIds = itemIdsWithQty.Select(id => id.Split(':')[0]).ToList();
             var allServices = await GetCachedServicesAsync(context, cancellationToken);
             var allPackages = await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken);
 
@@ -1245,13 +1340,18 @@ namespace Apenir.API.BackgroundServices
                 .ToListAsync(cancellationToken);
 
             decimal rate = 0m;
-            foreach (var itemId in itemIds)
+            foreach (var itemWithQty in itemIdsWithQty)
             {
+                var parts = itemWithQty.Split(':');
+                var itemId = parts[0];
+                var qty = parts.Length > 1 && int.TryParse(parts[1], out var q) ? q : 1;
+
                 var s = services.FirstOrDefault(x => x.Id == itemId);
+                decimal basePrice = 0m;
                 if (s != null)
                 {
                     var bs = branchServices.FirstOrDefault(x => x.ServiceId == itemId);
-                    rate += bs?.CustomPrice ?? s.BasePrice;
+                    basePrice = bs?.CustomPrice ?? s.BasePrice;
                 }
                 else
                 {
@@ -1259,9 +1359,13 @@ namespace Apenir.API.BackgroundServices
                     if (p != null)
                     {
                         var bp = branchPackages.FirstOrDefault(x => x.PackageId == itemId);
-                        rate += bp?.CustomPrice ?? p.BasePrice;
+                        basePrice = bp?.CustomPrice ?? p.BasePrice;
                     }
                 }
+
+                // First copy pays full basePrice, subsequent copies get 20% discount (i.e. 80% price)
+                var cost = basePrice + (qty > 1 ? (qty - 1) * basePrice * 0.8m : 0m);
+                rate += cost;
             }
 
             var allBranches = await GetCachedBranchesAsync(context, cancellationToken);
@@ -1271,9 +1375,7 @@ namespace Apenir.API.BackgroundServices
             var user         = await context.Users.FirstOrDefaultAsync(u => u.Phone == to, cancellationToken);
             var customerName = user?.Name ?? "Customer";
 
-            int total = (int)rate + (session.MemberCount > 1
-                ? (int)Math.Round((session.MemberCount - 1) * rate * 0.8m)
-                : 0);
+            int total = (int)Math.Round(rate);
 
             var itemNames = services.Select(s => s.Name).Concat(packages.Select(p => p.Name)).ToList();
             var itemNamesStr = string.Join(", ", itemNames);
@@ -1307,6 +1409,7 @@ namespace Apenir.API.BackgroundServices
                         selected_lab_id  = session.SelectedLabId ?? "",
                         selected_slot_id = session.SelectedSlot ?? "",
                         member_count     = session.MemberCount.ToString(),
+                        member_selections = BuildMemberSelectionsNote(session),
                         building_details = session.BuildingDetails ?? "",
                         landmark         = session.Landmark ?? "",
                         floor            = session.Floor ?? "",
@@ -1660,6 +1763,83 @@ namespace Apenir.API.BackgroundServices
             var session = await GetOrCreateSessionAsync(to, context, cancellationToken);
             session.CurrentState = WhatsAppState.Start;
             await SaveSessionAsync(session, context, cancellationToken);
+        }
+
+        private async Task SendItemQuantityPrompt(
+            string to,
+            string itemName,
+            IHttpClientFactory httpClientFactory,
+            IConfiguration configuration)
+        {
+            var rows = new System.Collections.Generic.List<object>();
+            for(int i = 1; i <= 6; i++)
+            {
+                rows.Add(new {
+                    id = $"qty_count_{i}",
+                    title = $"{i} Person{(i > 1 ? "s" : "")}",
+                    description = $"{i} person{(i > 1 ? "s" : "")} need this test"
+                });
+            }
+
+            var payload = new
+            {
+                messaging_product = "whatsapp",
+                to,
+                type = "interactive",
+                interactive = new
+                {
+                    type = "list",
+                    header = new { type = "text", text = "Select Quantity" },
+                    body = new { text = $"👥 *How many people need {itemName}?*\n\nYou can book this test/package for up to 6 persons." },
+                    action = new
+                    {
+                        button = "Choose count",
+                        sections = new[]
+                        {
+                            new { title = "Select count", rows = rows.ToArray() }
+                        }
+                    }
+                }
+            };
+            await SendWhatsAppMessage(payload, httpClientFactory, configuration);
+        }
+
+        private async Task<string?> GetItemNameById(string? itemId, IApplicationDbContext context, CancellationToken cancellationToken)
+        {
+            if (string.IsNullOrEmpty(itemId)) return null;
+            var services = await GetCachedServicesAsync(context, cancellationToken);
+            var s = services.FirstOrDefault(x => x.Id == itemId);
+            if (s != null) return s.Name;
+            var p = await context.Packages.AsNoTracking().FirstOrDefaultAsync(x => x.Id == itemId, cancellationToken);
+            return p?.Name;
+        }
+
+        private string BuildMemberSelectionsNote(WhatsAppSession session)
+        {
+            var cartItemIds = session.CartItemIds ?? new List<string>();
+            if (!cartItemIds.Any()) return string.Empty;
+
+            var qtys = cartItemIds
+                .Select(id => id.Split(':'))
+                .Select(parts => new {
+                    Id = parts[0],
+                    Qty = parts.Length > 1 && int.TryParse(parts[1], out var q) ? q : 1
+                }).ToList();
+
+            var maxCount = qtys.Any() ? qtys.Max(x => x.Qty) : 1;
+            var selections = new List<string>();
+
+            for (int i = 0; i < maxCount; i++)
+            {
+                var name = i == 0 ? "Self" : $"Member {i + 1}";
+                var memberItems = qtys.Where(x => x.Qty > i).Select(x => x.Id).ToList();
+                if (memberItems.Any())
+                {
+                    selections.Add($"{name}:{string.Join(",", memberItems)}");
+                }
+            }
+
+            return string.Join(";", selections);
         }
 
         private async Task SaveSessionAsync(WhatsAppSession session, IApplicationDbContext context, CancellationToken cancellationToken)

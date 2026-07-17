@@ -136,11 +136,18 @@ public class BookingController : ControllerBase
         }
 
         // 3. Fetch slots for those branches
+        var indianTime = DateTime.UtcNow.AddHours(5).AddMinutes(30);
+        var today = DateOnly.FromDateTime(indianTime);
+        var currentTime = TimeOnly.FromDateTime(indianTime);
+
         var slots = await _context.AppointmentSlots
-            .Where(s => branchServices.Contains(s.BranchId) && s.IsAvailable && s.SlotDate >= DateOnly.FromDateTime(DateTime.Today))
+            .Where(s => branchServices.Contains(s.BranchId) && s.IsAvailable && s.SlotDate >= today)
             .OrderBy(s => s.SlotDate)
             .ThenBy(s => s.StartTime)
             .ToListAsync(cancellationToken);
+
+        // Filter out past slots for today
+        slots = slots.Where(s => s.SlotDate > today || s.StartTime > currentTime).ToList();
 
         return Ok(ApiResponse<List<AppointmentSlot>>.SuccessResult(slots, "Available slots retrieved successfully."));
     }
@@ -163,7 +170,9 @@ public class BookingController : ControllerBase
         if (_cache.TryGetValue(cacheKey, out List<RegionAvailabilityResult>? cached) && cached != null)
             return Ok(ApiResponse<List<RegionAvailabilityResult>>.SuccessResult(cached, "region_availability_cached"));
 
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var indianTime = DateTime.UtcNow.AddHours(5).AddMinutes(30);
+        var today = DateOnly.FromDateTime(indianTime);
+        var currentTime = TimeOnly.FromDateTime(indianTime);
         var allBranches = await _context.Branches.Where(b => b.IsActive).ToListAsync(cancellationToken);
 
         var ids = string.IsNullOrEmpty(itemIds)
@@ -183,6 +192,8 @@ public class BookingController : ControllerBase
         var todaySlots = await _context.AppointmentSlots
             .Where(s => s.IsAvailable && s.SlotDate == today)
             .ToListAsync(cancellationToken);
+        // Filter out past slots for today
+        todaySlots = todaySlots.Where(s => s.StartTime > currentTime).ToList();
 
         // Fetch all future slots for next-available calculation
         var futureSlots = await _context.AppointmentSlots
@@ -221,6 +232,8 @@ public class BookingController : ControllerBase
                 City = branch.City,
                 District = branch.District,
                 Distance = Math.Round(distance, 2),
+                Latitude = (double)branch.Latitude,
+                Longitude = (double)branch.Longitude,
                 ServicesAvailableCount = branchSvcIds.Count + branchPkgIds.Count,
                 ServicesRequestedCount = ids.Count,
                 ServicesCoveredCount = coveredCount,
@@ -241,6 +254,138 @@ public class BookingController : ControllerBase
         _cache.Set(cacheKey, results, TimeSpan.FromMinutes(3));
 
         return Ok(ApiResponse<List<RegionAvailabilityResult>>.SuccessResult(results, "region_availability"));
+    }
+
+    [HttpGet("location-catalog")]
+    [AllowAnonymous]
+    [EndpointSummary("Get all diagnostic services/packages and their branch custom pricing within range of a location")]
+    public async Task<IActionResult> GetLocationCatalog(
+        [FromQuery] double latitude,
+        [FromQuery] double longitude,
+        CancellationToken cancellationToken)
+    {
+        var allBranches = await _context.Branches.Where(b => b.IsActive).ToListAsync(cancellationToken);
+        var nearbyBranches = new List<Branch>();
+        var branchCoverage = new List<RegionAvailabilityResult>();
+
+        var indianTime = DateTime.UtcNow.AddHours(5).AddMinutes(30);
+        var today = DateOnly.FromDateTime(indianTime);
+        var currentTime = TimeOnly.FromDateTime(indianTime);
+
+        var activeSlots = await _context.AppointmentSlots
+            .Where(s => s.IsAvailable && s.SlotDate >= today)
+            .OrderBy(s => s.SlotDate).ThenBy(s => s.StartTime)
+            .ToListAsync(cancellationToken);
+
+        activeSlots = activeSlots.Where(s => s.SlotDate > today || s.StartTime > currentTime).ToList();
+
+        foreach (var branch in allBranches)
+        {
+            var distance = CalculateDistanceKm(latitude, longitude, (double)branch.Latitude, (double)branch.Longitude);
+            if (distance > branch.ServiceRangeKm) continue;
+
+            nearbyBranches.Add(branch);
+
+            var branchSlots = activeSlots.Where(s => s.BranchId == branch.Id && s.BookedCount < s.MaxCapacity).ToList();
+            var hasSlotsToday = branchSlots.Any(s => s.SlotDate == today);
+            var nextSlot = branchSlots.FirstOrDefault();
+
+            branchCoverage.Add(new RegionAvailabilityResult
+            {
+                BranchId = branch.Id,
+                Name = branch.Name,
+                City = branch.City,
+                District = branch.District,
+                Distance = Math.Round(distance, 2),
+                Latitude = (double)branch.Latitude,
+                Longitude = (double)branch.Longitude,
+                ServicesAvailableCount = 0,
+                ServicesRequestedCount = 0,
+                ServicesCoveredCount = 0,
+                IsFullyEligible = true,
+                HasAvailableSlotsToday = hasSlotsToday,
+                NextAvailableSlotDate = nextSlot?.SlotDate.ToString("yyyy-MM-dd"),
+                NextAvailableSlotTime = nextSlot?.StartTime.ToString("HH:mm")
+            });
+        }
+
+        if (!nearbyBranches.Any())
+        {
+            return Ok(ApiResponse<LocationCatalogResponse>.SuccessResult(new LocationCatalogResponse(), "No labs found near this location."));
+        }
+
+        var branchIds = nearbyBranches.Select(b => b.Id).ToList();
+
+        var branchServices = await _context.BranchServices
+            .Where(bs => bs.IsActive && branchIds.Contains(bs.BranchId))
+            .ToListAsync(cancellationToken);
+
+        var branchPackages = await _context.BranchPackages
+            .Where(bp => bp.IsActive && branchIds.Contains(bp.BranchId))
+            .ToListAsync(cancellationToken);
+
+        var serviceIds = branchServices.Select(bs => bs.ServiceId).Distinct().ToList();
+        var packageIds = branchPackages.Select(bp => bp.PackageId).Distinct().ToList();
+
+        var services = await _context.Services
+            .Where(s => s.IsActive && serviceIds.Contains(s.Id))
+            .ToListAsync(cancellationToken);
+
+        var packages = await _context.Packages
+            .Where(p => p.IsActive && packageIds.Contains(p.Id))
+            .ToListAsync(cancellationToken);
+
+        foreach (var coverage in branchCoverage)
+        {
+            var svcsCount = branchServices.Count(bs => bs.BranchId == coverage.BranchId && services.Any(s => s.Id == bs.ServiceId));
+            var pkgsCount = branchPackages.Count(bp => bp.BranchId == coverage.BranchId && packages.Any(p => p.Id == bp.PackageId));
+            coverage.ServicesAvailableCount = svcsCount + pkgsCount;
+        }
+
+        var branchServiceMapping = branchServices
+            .Select(bs => {
+                var s = services.FirstOrDefault(x => x.Id == bs.ServiceId);
+                return new BranchServiceMappingDto
+                {
+                    BranchId = bs.BranchId,
+                    ServiceId = bs.ServiceId,
+                    Price = bs.CustomPrice ?? s?.BasePrice ?? 0m,
+                    OriginalPrice = bs.CustomOriginalPrice ?? s?.OriginalPrice
+                };
+            })
+            .Where(x => x.Price > 0)
+            .ToList();
+
+        var branchPackageMapping = branchPackages
+            .Select(bp => {
+                var p = packages.FirstOrDefault(x => x.Id == bp.PackageId);
+                return new BranchPackageMappingDto
+                {
+                    BranchId = bp.BranchId,
+                    PackageId = bp.PackageId,
+                    Price = bp.CustomPrice ?? p?.BasePrice ?? 0m,
+                    OriginalPrice = bp.CustomOriginalPrice ?? p?.OriginalPrice
+                };
+            })
+            .Where(x => x.Price > 0)
+            .ToList();
+
+        var activeServiceIds = branchServiceMapping.Select(x => x.ServiceId).ToHashSet();
+        var activePackageIds = branchPackageMapping.Select(x => x.PackageId).ToHashSet();
+
+        services = services.Where(s => activeServiceIds.Contains(s.Id)).ToList();
+        packages = packages.Where(p => activePackageIds.Contains(p.Id)).ToList();
+
+        var response = new LocationCatalogResponse
+        {
+            Branches = branchCoverage.OrderBy(b => b.Distance).ToList(),
+            Services = services,
+            Packages = packages,
+            BranchServices = branchServiceMapping,
+            BranchPackages = branchPackageMapping
+        };
+
+        return Ok(ApiResponse<LocationCatalogResponse>.SuccessResult(response, "Location catalog retrieved successfully."));
     }
 
     [HttpGet("eligible-labs")]
@@ -427,7 +572,9 @@ public class BookingController : ControllerBase
         [FromRoute] string branchId,
         CancellationToken cancellationToken)
     {
-        var today = DateOnly.FromDateTime(DateTime.UtcNow);
+        var indianTime = DateTime.UtcNow.AddHours(5).AddMinutes(30);
+        var today = DateOnly.FromDateTime(indianTime);
+        var currentTime = TimeOnly.FromDateTime(indianTime);
         var configs = await _context.BranchSlotConfigurations
             .Where(c => c.BranchId == branchId)
             .ToListAsync(cancellationToken);
@@ -489,6 +636,8 @@ public class BookingController : ControllerBase
             .Where(s => s.BranchId == branchId && s.IsAvailable && s.SlotDate >= today)
             .OrderBy(s => s.SlotDate).ThenBy(s => s.StartTime)
             .ToListAsync(cancellationToken);
+
+        slots = slots.Where(s => s.SlotDate > today || s.StartTime > currentTime).ToList();
 
         return Ok(ApiResponse<List<AppointmentSlot>>.SuccessResult(slots, "Slots retrieved successfully."));
     }
@@ -1302,6 +1451,8 @@ public class RegionAvailabilityResult
     public string City { get; set; } = string.Empty;
     public string? District { get; set; }
     public double Distance { get; set; }
+    public double Latitude { get; set; }
+    public double Longitude { get; set; }
     public int ServicesAvailableCount { get; set; }
     public int ServicesRequestedCount { get; set; }
     public int ServicesCoveredCount { get; set; }
@@ -1309,6 +1460,31 @@ public class RegionAvailabilityResult
     public bool HasAvailableSlotsToday { get; set; }
     public string? NextAvailableSlotDate { get; set; }
     public string? NextAvailableSlotTime { get; set; }
+}
+
+public class LocationCatalogResponse
+{
+    public List<RegionAvailabilityResult> Branches { get; set; } = new();
+    public List<Service> Services { get; set; } = new();
+    public List<Package> Packages { get; set; } = new();
+    public List<BranchServiceMappingDto> BranchServices { get; set; } = new();
+    public List<BranchPackageMappingDto> BranchPackages { get; set; } = new();
+}
+
+public class BranchServiceMappingDto
+{
+    public string BranchId { get; set; } = string.Empty;
+    public string ServiceId { get; set; } = string.Empty;
+    public decimal Price { get; set; }
+    public decimal? OriginalPrice { get; set; }
+}
+
+public class BranchPackageMappingDto
+{
+    public string BranchId { get; set; } = string.Empty;
+    public string PackageId { get; set; } = string.Empty;
+    public decimal Price { get; set; }
+    public decimal? OriginalPrice { get; set; }
 }
 
 /// <summary>

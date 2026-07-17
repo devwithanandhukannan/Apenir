@@ -26,6 +26,7 @@ namespace Apenir.API.Controllers;
 public class RazorpayWebhookController : ControllerBase
 {
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _paymentLocks = new();
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, SemaphoreSlim> _slotLocks = new();
     private readonly IApplicationDbContext _context;
     private readonly IConfiguration _configuration;
     private readonly IWhatsAppService _whatsAppService;
@@ -155,6 +156,10 @@ public class RazorpayWebhookController : ControllerBase
 
         try
         {
+            var slotLock = _slotLocks.GetOrAdd(slotId, _ => new SemaphoreSlim(1, 1));
+            await slotLock.WaitAsync(cancellationToken);
+            try
+            {
             // 1. Fetch related data
             var itemIds = testId.Split(',').Select(id => id.Trim()).ToList();
             var services = await _context.Services.AsNoTracking().Where(s => itemIds.Contains(s.Id)).ToListAsync(cancellationToken);
@@ -360,8 +365,8 @@ public class RazorpayWebhookController : ControllerBase
                 Passcode = new Random().Next(1000, 9999).ToString(),
                 Status = AppointmentStatus.Confirmed,
                 TotalAmount = total,
-                PlatformCommission = total * (avgCommissionPct / 100m),
-                LabPayout = total * (1m - (avgCommissionPct / 100m)),
+                PlatformCommission = Math.Round(totalBaseAmount * (avgCommissionPct / 100m), 2),
+                LabPayout = total - Math.Round(totalBaseAmount * (avgCommissionPct / 100m), 2),
                 CreatedAt = DateTime.UtcNow,
                 MemberCount = memberCount,
                 ItemIds = itemIds // Phase 2+3: persist cart items on appointment
@@ -536,6 +541,11 @@ public class RazorpayWebhookController : ControllerBase
 
             await _whatsAppService.SendTextMessageAsync(to, confirmMsg);
             await _whatsAppService.SendDocumentMessageAsync(to, invoiceUrl, $"Invoice_{bookingId}.pdf");
+            }
+            finally
+            {
+                slotLock.Release();
+            }
         }
         finally
         {

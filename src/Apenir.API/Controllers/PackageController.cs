@@ -86,6 +86,7 @@ public class PackageController : ControllerBase
             Name = request.Name.Trim(),
             Description = request.Description?.Trim(),
             BasePrice = request.BasePrice,
+            OriginalPrice = request.OriginalPrice,
             PlatformCommissionPct = request.PlatformCommissionPct,
             IsActive = true,
             CreatedByBranchId = null,
@@ -183,6 +184,7 @@ public class PackageController : ControllerBase
         package.Name = request.Name.Trim();
         package.Description = request.Description?.Trim();
         package.BasePrice = request.BasePrice;
+        package.OriginalPrice = request.OriginalPrice;
         package.PlatformCommissionPct = request.PlatformCommissionPct;
         package.ServiceIds = request.ServiceIds.Distinct().ToList();
 
@@ -280,7 +282,9 @@ public class PackageController : ControllerBase
                 Name = p.Name,
                 Description = p.Description ?? string.Empty,
                 BasePrice = p.BasePrice,
+                OriginalPrice = p.OriginalPrice,
                 CustomPrice = bp?.CustomPrice,
+                CustomOriginalPrice = bp?.CustomOriginalPrice,
                 PlatformCommissionPct = p.PlatformCommissionPct,
                 CustomCommissionPct = bp?.CustomCommissionPct,
                 IsActive = isActive,
@@ -415,6 +419,7 @@ public class PackageController : ControllerBase
                 BranchId = branch.Id,
                 PackageId = packageId,
                 CustomPrice = request.CustomPrice,
+                CustomOriginalPrice = request.CustomOriginalPrice,
                 CustomCommissionPct = null,
                 IsActive = true
             };
@@ -423,6 +428,7 @@ public class PackageController : ControllerBase
         else
         {
             bp.CustomPrice = request.CustomPrice;
+            bp.CustomOriginalPrice = request.CustomOriginalPrice;
             _context.BranchPackages.Update(bp);
         }
 
@@ -479,6 +485,7 @@ public class PackageController : ControllerBase
             Name = request.Name.Trim(),
             Description = request.Description?.Trim(),
             BasePrice = request.CustomPrice,
+            OriginalPrice = request.CustomOriginalPrice,
             PlatformCommissionPct = 15.00m,
             IsActive = true,
             CreatedByBranchId = branch.Id,
@@ -492,6 +499,7 @@ public class PackageController : ControllerBase
             BranchId = branch.Id,
             PackageId = package.Id,
             CustomPrice = request.CustomPrice,
+            CustomOriginalPrice = request.CustomOriginalPrice,
             CustomCommissionPct = null,
             IsActive = true
         };
@@ -557,6 +565,7 @@ public class PackageController : ControllerBase
         package.Name = request.Name.Trim();
         package.Description = request.Description?.Trim();
         package.BasePrice = request.CustomPrice;
+        package.OriginalPrice = request.CustomOriginalPrice;
         package.ServiceIds = request.ServiceIds.Distinct().ToList();
 
         _context.Packages.Update(package);
@@ -567,6 +576,7 @@ public class PackageController : ControllerBase
         if (bp != null)
         {
             bp.CustomPrice = request.CustomPrice;
+            bp.CustomOriginalPrice = request.CustomOriginalPrice;
             _context.BranchPackages.Update(bp);
         }
 
@@ -638,18 +648,21 @@ public record CreatePackageRequest(
     string Name,
     string? Description,
     decimal BasePrice,
+    decimal? OriginalPrice,
     decimal PlatformCommissionPct,
     List<string> ServiceIds
 );
 
 public record UpdatePackageOverrideRequest(
-    decimal CustomPrice
+    decimal CustomPrice,
+    decimal? CustomOriginalPrice
 );
 
 public record CreateLabPackageRequest(
     string Name,
     string? Description,
     decimal CustomPrice,
+    decimal? CustomOriginalPrice,
     List<string> ServiceIds
 );
 
@@ -659,7 +672,9 @@ public class BranchPackageDto
     public string Name { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public decimal BasePrice { get; set; }
+    public decimal? OriginalPrice { get; set; }
     public decimal? CustomPrice { get; set; }
+    public decimal? CustomOriginalPrice { get; set; }
     public decimal PlatformCommissionPct { get; set; }
     public decimal? CustomCommissionPct { get; set; }
     public bool IsActive { get; set; }

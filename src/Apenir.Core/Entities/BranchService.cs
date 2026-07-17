@@ -22,6 +22,8 @@ public class BranchService
 
     public decimal? CustomPrice { get; set; }
 
+    public decimal? CustomOriginalPrice { get; set; }
+
     public decimal? CustomCommissionPct { get; set; }
 
     [Required]

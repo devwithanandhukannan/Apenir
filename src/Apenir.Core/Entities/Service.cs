@@ -25,6 +25,8 @@ public class Service
     [Required]
     public decimal BasePrice { get; set; }
 
+    public decimal? OriginalPrice { get; set; }
+
     [Required]
     public decimal PlatformCommissionPct { get; set; } = 15.00m;
 
