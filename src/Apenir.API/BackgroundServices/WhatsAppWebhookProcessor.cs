@@ -285,10 +285,86 @@ namespace Apenir.API.BackgroundServices
                     session.BuildingDetails = text.Trim();
                     session.Landmark = "Indicated in address details";
                     session.Floor = "Not specified";
-                    session.CurrentState = WhatsAppState.ChoosingLab;
+
+                    // Auto-select closest eligible branch
+                    var cartItemIds = (session.SelectedTestId ?? "").Split(',').Select(id => id.Trim()).ToList();
+                    var allServices = await GetCachedServicesAsync(context, cancellationToken);
+                    var allPackages = await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken);
+
+                    var branchServices = await context.BranchServices
+                        .Where(bs => cartItemIds.Contains(bs.ServiceId) && bs.IsActive)
+                        .ToListAsync(cancellationToken);
+
+                    var branchPackages = await context.BranchPackages
+                        .Where(bp => cartItemIds.Contains(bp.PackageId) && bp.IsActive)
+                        .ToListAsync(cancellationToken);
+
+                    var allBranches = await GetCachedBranchesAsync(context, cancellationToken);
+
+                    double userLat = session.Latitude ?? 0.0;
+                    double userLng = session.Longitude ?? 0.0;
+
+                    var nearbyBranches = allBranches
+                        .Where(b => b.IsActive)
+                        .Select(b => new { Branch = b, Distance = CalculateDistanceKm(userLat, userLng, (double)b.Latitude, (double)b.Longitude) })
+                        .Where(x => x.Distance <= x.Branch.ServiceRangeKm)
+                        .ToList();
+
+                    var eligibleBranches = new List<dynamic>();
+                    foreach (var item in nearbyBranches)
+                    {
+                        var b = item.Branch;
+                        int offeredServicesCount = branchServices.Where(bs => bs.BranchId == b.Id).Select(bs => bs.ServiceId).Distinct().Count();
+                        int offeredPackagesCount = branchPackages.Where(bp => bp.BranchId == b.Id).Select(bp => bp.PackageId).Distinct().Count();
+                        
+                        int totalOfferedInCart = offeredServicesCount + offeredPackagesCount;
+                        if (totalOfferedInCart >= cartItemIds.Count)
+                        {
+                            decimal totalPriceForBranch = 0m;
+                            foreach (var itemId in cartItemIds)
+                            {
+                                var bs = branchServices.FirstOrDefault(x => x.BranchId == b.Id && x.ServiceId == itemId);
+                                if (bs != null)
+                                {
+                                    totalPriceForBranch += bs.CustomPrice ?? allServices.FirstOrDefault(s => s.Id == itemId)?.BasePrice ?? 0m;
+                                }
+                                else
+                                {
+                                    var bp = branchPackages.FirstOrDefault(x => x.BranchId == b.Id && x.PackageId == itemId);
+                                    if (bp != null)
+                                    {
+                                        totalPriceForBranch += bp.CustomPrice ?? allPackages.FirstOrDefault(p => p.Id == itemId)?.BasePrice ?? 0m;
+                                    }
+                                }
+                            }
+
+                            eligibleBranches.Add(new
+                            {
+                                Branch = b,
+                                Distance = item.Distance,
+                                Price = totalPriceForBranch
+                            });
+                        }
+                    }
+
+                    if (!eligibleBranches.Any())
+                    {
+                        await SendTextMessage(to, "❌ Sorry, no labs offering your selected items are within range of your location. Please select different items.", httpClientFactory, configuration);
+                        session.CurrentState = WhatsAppState.Start;
+                        await SaveSessionAsync(session, context, cancellationToken);
+                        await SendGreeting(to, httpClientFactory, configuration);
+                        break;
+                    }
+
+                    // Auto-select the closest branch
+                    var closest = eligibleBranches.OrderBy(x => x.Distance).First();
+                    session.SelectedLabId = closest.Branch.Id;
+                    session.SelectedLabName = closest.Branch.Name;
+                    session.CurrentState = WhatsAppState.ChoosingSlot;
                     await SaveSessionAsync(session, context, cancellationToken);
 
-                    await SendLabList(to, session, context, httpClientFactory, configuration, cancellationToken);
+                    await SendTextMessage(to, $"🏥 Selected Laboratory: {closest.Branch.Name} ({closest.Distance:F1} km away)", httpClientFactory, configuration);
+                    await SendSlotList(to, closest.Branch.Id, closest.Branch.Name, context, httpClientFactory, configuration, cancellationToken);
                     break;
                 case WhatsAppState.MemberCount:
                     if (int.TryParse(text.Trim(), out int count) && count >= 1 && count <= 6)
