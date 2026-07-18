@@ -873,6 +873,44 @@ namespace Apenir.API.Controllers.Admin
             return Ok(ApiResponse.SuccessResult("Branch package override saved successfully by Admin."));
         }
 
+        [HttpPost("clear-database")]
+        [AdminOnly]
+        [EndpointSummary("Clear all database records except SuperAdmin users (Admin only)")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> ClearDatabase(CancellationToken cancellationToken)
+        {
+            // 1. Remove non-SuperAdmin users
+            var nonAdmins = await _context.Users.Where(u => u.Role != UserRole.SuperAdmin).ToListAsync(cancellationToken);
+            _context.Users.RemoveRange(nonAdmins);
+
+            // 2. Remove all other collections/DbSets
+            _context.Customers.RemoveRange(await _context.Customers.ToListAsync(cancellationToken));
+            _context.Branches.RemoveRange(await _context.Branches.ToListAsync(cancellationToken));
+            _context.Services.RemoveRange(await _context.Services.ToListAsync(cancellationToken));
+            _context.BranchServices.RemoveRange(await _context.BranchServices.ToListAsync(cancellationToken));
+            _context.Packages.RemoveRange(await _context.Packages.ToListAsync(cancellationToken));
+            _context.BranchPackages.RemoveRange(await _context.BranchPackages.ToListAsync(cancellationToken));
+            _context.BranchSlotConfigurations.RemoveRange(await _context.BranchSlotConfigurations.ToListAsync(cancellationToken));
+            _context.AppointmentSlots.RemoveRange(await _context.AppointmentSlots.ToListAsync(cancellationToken));
+            _context.Appointments.RemoveRange(await _context.Appointments.ToListAsync(cancellationToken));
+            _context.AppointmentMembers.RemoveRange(await _context.AppointmentMembers.ToListAsync(cancellationToken));
+            _context.Reports.RemoveRange(await _context.Reports.ToListAsync(cancellationToken));
+            _context.Payments.RemoveRange(await _context.Payments.ToListAsync(cancellationToken));
+            _context.PaymentBatches.RemoveRange(await _context.PaymentBatches.ToListAsync(cancellationToken));
+            _context.Payrolls.RemoveRange(await _context.Payrolls.ToListAsync(cancellationToken));
+            _context.StaffOrderLogs.RemoveRange(await _context.StaffOrderLogs.ToListAsync(cancellationToken));
+            _context.OtpCodes.RemoveRange(await _context.OtpCodes.ToListAsync(cancellationToken));
+            _context.WhatsAppSessions.RemoveRange(await _context.WhatsAppSessions.ToListAsync(cancellationToken));
+            _context.RefreshTokens.RemoveRange(await _context.RefreshTokens.ToListAsync(cancellationToken));
+            _context.BranchInvites.RemoveRange(await _context.BranchInvites.ToListAsync(cancellationToken));
+            _context.StaffInvites.RemoveRange(await _context.StaffInvites.ToListAsync(cancellationToken));
+            _context.SystemSettings.RemoveRange(await _context.SystemSettings.ToListAsync(cancellationToken));
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Database cleared successfully except SuperAdmin accounts."));
+        }
+
         [HttpPost("finance/payments")]
         [EndpointSummary("Search and Filter Customer Payments")]
         [EndpointDescription("Returns a paginated list of customer payments to the company, with optional filters.")]
