@@ -2028,7 +2028,270 @@ namespace Apenir.API.Controllers
             _context.PaymentBatches.Update(batch);
             await _context.SaveChangesAsync(cancellationToken);
 
+            // Notify Admin of settlement
+            var adminUser = await _context.Users.AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Role == UserRole.SuperAdmin, cancellationToken);
+
+            if (adminUser != null && !string.IsNullOrEmpty(adminUser.Phone))
+            {
+                var adminMsg = $"✅ *Payout Settlement Confirmed!*\n\n" +
+                               $"Lab: *{branch.Name}*\n" +
+                               $"Batch ID: {batch.Id[..8].ToUpper()}\n" +
+                               $"Amount: ₹{batch.TotalNetPayout}\n" +
+                               $"Status: Settled.";
+
+                try { await _whatsAppService.SendTextMessageAsync(adminUser.Phone, adminMsg); } catch { }
+            }
+
             return Ok(ApiResponse.SuccessResult("Batch payment receipt confirmed successfully."));
+        }
+
+        [HttpGet("unbatched-payments")]
+        [Authorize]
+        [EndpointSummary("Get unbatched payments for the lab")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<LabBatchPaymentItemDto>>))]
+        [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetUnbatchedPayments(CancellationToken cancellationToken)
+        {
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch == null)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied. No branch configured for this lab owner."));
+            }
+
+            // Find all appointments for this branch
+            var appointments = await _context.Appointments.AsNoTracking()
+                .Where(a => a.BranchId == branch.Id)
+                .ToListAsync(cancellationToken);
+
+            var appointmentIds = appointments.Select(a => a.Id).ToList();
+            if (appointmentIds.Count == 0)
+            {
+                return Ok(ApiResponse<List<LabBatchPaymentItemDto>>.SuccessResult(new List<LabBatchPaymentItemDto>(), "No unbatched payments found."));
+            }
+
+            // Find all paid payments for these appointments that have no BatchId
+            var payments = await _context.Payments.AsNoTracking()
+                .Where(p => appointmentIds.Contains(p.AppointmentId) && p.Status == PaymentStatus.Paid && p.BatchId == null)
+                .ToListAsync(cancellationToken);
+
+            if (payments.Count == 0)
+            {
+                return Ok(ApiResponse<List<LabBatchPaymentItemDto>>.SuccessResult(new List<LabBatchPaymentItemDto>(), "No unbatched payments found."));
+            }
+
+            // Fetch customer details
+            var customerUserIds = appointments
+                .Select(a => a.CustomerUserId)
+                .Where(id => !string.IsNullOrEmpty(id))
+                .Distinct()
+                .ToList();
+
+            var customerUsers = await _context.Users.AsNoTracking()
+                .Where(u => customerUserIds.Contains(u.Id))
+                .ToListAsync(cancellationToken);
+
+            var appointmentDict = appointments.ToDictionary(a => a.Id);
+            var customerDict = customerUsers.ToDictionary(u => u.Id);
+
+            var result = payments.Select(p =>
+            {
+                appointmentDict.TryGetValue(p.AppointmentId, out var appt);
+                var customerName = string.Empty;
+                if (appt != null && !string.IsNullOrEmpty(appt.CustomerUserId))
+                {
+                    customerDict.TryGetValue(appt.CustomerUserId, out var cust);
+                    customerName = cust?.Name ?? string.Empty;
+                }
+
+                return new LabBatchPaymentItemDto
+                {
+                    PaymentId = p.Id,
+                    AppointmentId = p.AppointmentId,
+                    AppointmentNumber = appt?.AppointmentNumber ?? string.Empty,
+                    CustomerName = customerName,
+                    TotalAmount = appt?.TotalAmount ?? 0,
+                    PlatformCommission = appt?.PlatformCommission ?? 0,
+                    LabPayout = appt?.LabPayout ?? 0,
+                    PaidAt = p.PaidAt,
+                    PaymentMethod = p.PaymentMethod
+                };
+            }).ToList();
+
+            return Ok(ApiResponse<List<LabBatchPaymentItemDto>>.SuccessResult(result, "Unbatched payments retrieved successfully."));
+        }
+
+        [HttpPost("payment-batches")]
+        [Authorize]
+        [EndpointSummary("Request a payout batch")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<PaymentBatch>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> RequestPayout([FromBody] LabCreateBatchRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || request.PaymentIds == null || request.PaymentIds.Count == 0)
+            {
+                return BadRequest(ApiResponse.FailureResult("At least one PaymentId is required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch == null)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied. No branch configured for this lab owner."));
+            }
+
+            // Verify payments exist, belong to this branch, and are paid + unbatched
+            var appointments = await _context.Appointments.AsNoTracking()
+                .Where(a => a.BranchId == branch.Id)
+                .ToListAsync(cancellationToken);
+
+            var appointmentIds = appointments.Select(a => a.Id).ToList();
+
+            var payments = await _context.Payments
+                .Where(p => request.PaymentIds.Contains(p.Id) && appointmentIds.Contains(p.AppointmentId) && p.Status == PaymentStatus.Paid && p.BatchId == null)
+                .ToListAsync(cancellationToken);
+
+            if (payments.Count != request.PaymentIds.Count)
+            {
+                return BadRequest(ApiResponse.FailureResult("One or more selected payments are invalid, already batched, or not fully paid."));
+            }
+
+            var appDict = appointments.ToDictionary(a => a.Id);
+
+            decimal grossTotal = 0;
+            decimal commTotal = 0;
+            decimal payoutTotal = 0;
+            var paymentIds = new List<string>();
+            var appIds = new List<string>();
+
+            foreach (var p in payments)
+            {
+                appDict.TryGetValue(p.AppointmentId, out var app);
+                if (app != null)
+                {
+                    grossTotal += app.TotalAmount;
+                    commTotal += app.PlatformCommission;
+                    payoutTotal += app.LabPayout;
+                    paymentIds.Add(p.Id);
+                    appIds.Add(app.Id);
+                }
+            }
+
+            var batch = new PaymentBatch
+            {
+                Id = Guid.NewGuid().ToString(),
+                BranchId = branch.Id,
+                PaymentIds = paymentIds,
+                AppointmentIds = appIds,
+                PaymentCount = payments.Count,
+                TotalGrossAmount = grossTotal,
+                TotalPlatformCommission = commTotal,
+                TotalNetPayout = payoutTotal,
+                Status = PaymentBatchStatus.Initiated,
+                CreatedBy = currentUserId,
+                Notes = request.Notes ?? "Payout requested by laboratory owner."
+            };
+
+            _context.PaymentBatches.Add(batch);
+
+            // Link payments to the batch
+            foreach (var p in payments)
+            {
+                p.BatchId = batch.Id;
+                _context.Payments.Update(p);
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            // Send WhatsApp notification to Admin!
+            var adminUser = await _context.Users.AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Role == UserRole.SuperAdmin, cancellationToken);
+            
+            if (adminUser != null && !string.IsNullOrEmpty(adminUser.Phone))
+            {
+                var adminMsg = $"🔔 *New Payout Request!*\n\n" +
+                               $"Lab: *{branch.Name}*\n" +
+                               $"Bookings Count: {batch.PaymentCount}\n" +
+                               $"Amount Owed: ₹{batch.TotalNetPayout}\n" +
+                               $"Please pay manually and approve in the console.";
+                
+                try { await _whatsAppService.SendTextMessageAsync(adminUser.Phone, adminMsg); } catch { }
+            }
+
+            return Ok(ApiResponse<PaymentBatch>.SuccessResult(batch, "Payout batch request submitted successfully."));
+        }
+
+        [HttpPost("payment-batches/{batchId}/reject")]
+        [Authorize]
+        [EndpointSummary("Reject batch payment receipt")]
+        [EndpointDescription("Lab owner rejects the payout receipt, releasing payments back to unbatched status. Status becomes Abandoned.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> RejectBatchReceipt([FromRoute] string batchId, CancellationToken cancellationToken)
+        {
+            var batch = await _context.PaymentBatches
+                .FirstOrDefaultAsync(pb => pb.Id == batchId, cancellationToken);
+
+            if (batch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Payment batch not found."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.Id == batch.BranchId, cancellationToken);
+
+            if (branch == null || branch.LabUserId != currentUserId)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this batch."));
+            }
+
+            if (batch.Status != PaymentBatchStatus.Paid && batch.Status != PaymentBatchStatus.Initiated)
+            {
+                return BadRequest(ApiResponse.FailureResult("Only initiated or paid batches can be rejected."));
+            }
+
+            // Release all payments in this batch
+            var payments = await _context.Payments
+                .Where(p => p.BatchId == batchId)
+                .ToListAsync(cancellationToken);
+
+            foreach (var payment in payments)
+            {
+                payment.BatchId = null;
+                _context.Payments.Update(payment);
+            }
+
+            batch.Status = PaymentBatchStatus.Abandoned;
+            batch.Notes = (batch.Notes ?? "") + " [Rejected by Lab]";
+
+            _context.PaymentBatches.Update(batch);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            // Notify Admin of rejection
+            var adminUser = await _context.Users.AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Role == UserRole.SuperAdmin, cancellationToken);
+
+            if (adminUser != null && !string.IsNullOrEmpty(adminUser.Phone))
+            {
+                var adminMsg = $"❌ *Payout Request Rejected by Lab!*\n\n" +
+                               $"Lab: *{branch.Name}*\n" +
+                               $"Batch ID: {batch.Id[..8].ToUpper()}\n" +
+                               $"Amount Owed: ₹{batch.TotalNetPayout}\n" +
+                               $"The payments have been returned to the unbatched pool.";
+
+                try { await _whatsAppService.SendTextMessageAsync(adminUser.Phone, adminMsg); } catch { }
+            }
+
+            return Ok(ApiResponse.SuccessResult("Payment batch receipt rejected and payments released."));
         }
 
         private async Task GenerateSlotsForNext7Days(string branchId, IApplicationDbContext context, CancellationToken cancellationToken)
@@ -2563,5 +2826,11 @@ namespace Apenir.API.Controllers
     public class ConfirmChangeEmailRequest
     {
         public string Code { get; set; } = string.Empty;
+    }
+
+    public class LabCreateBatchRequest
+    {
+        public List<string> PaymentIds { get; set; } = new();
+        public string? Notes { get; set; }
     }
 }

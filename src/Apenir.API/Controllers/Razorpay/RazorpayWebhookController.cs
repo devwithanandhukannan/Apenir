@@ -102,8 +102,19 @@ public class RazorpayWebhookController : ControllerBase
 
                 if (foundEntity && entity.TryGetProperty("notes", out var notes))
                 {
-                    // Check if this notes payload has our booking properties
-                    if (notes.TryGetProperty("phone", out var phoneProp) && notes.TryGetProperty("selected_test_id", out var testProp))
+                    // Check if this is a multi-lab webhook
+                    if (notes.TryGetProperty("is_multi_lab", out var mlProp) && mlProp.GetString() == "true")
+                    {
+                        var parentId = notes.TryGetProperty("parent_appointment_id", out var piEl) ? piEl.GetString() : string.Empty;
+                        var paymentId = entity.TryGetProperty("id", out var payIdEl) ? payIdEl.GetString() : $"pay_webhook_{Guid.NewGuid().ToString("N")[..12]}";
+                        var orderId = entity.TryGetProperty("order_id", out var ordIdEl) ? ordIdEl.GetString() : $"order_webhook_{Guid.NewGuid().ToString("N")[..12]}";
+
+                        if (!string.IsNullOrEmpty(parentId))
+                        {
+                            await ProcessMultiLabPaymentBooking(parentId, paymentId ?? string.Empty, orderId ?? string.Empty, cancellationToken);
+                        }
+                    }
+                    else if (notes.TryGetProperty("phone", out var phoneProp) && notes.TryGetProperty("selected_test_id", out var testProp))
                     {
                         var to = phoneProp.GetString() ?? string.Empty;
                         var testId = testProp.GetString() ?? string.Empty;
@@ -678,6 +689,132 @@ public class RazorpayWebhookController : ControllerBase
         catch
         {
             return false;
+        }
+    }
+
+    private async Task ProcessMultiLabPaymentBooking(
+        string parentAppointmentId, string paymentId, string orderId, CancellationToken cancellationToken)
+    {
+        var lockObj = _paymentLocks.GetOrAdd(parentAppointmentId, _ => new SemaphoreSlim(1, 1));
+        await lockObj.WaitAsync(cancellationToken);
+
+        try
+        {
+            // 1. Fetch parent appointment
+            var parentAppt = await _context.Appointments
+                .FirstOrDefaultAsync(a => a.Id == parentAppointmentId, cancellationToken);
+
+            if (parentAppt == null)
+            {
+                _logger.LogWarning("⚠️ Parent appointment not found for Id: {ParentId}", parentAppointmentId);
+                return;
+            }
+
+            // Check if already processed
+            var paymentExists = await _context.Payments.AnyAsync(p => p.RazorpayPaymentId == paymentId, cancellationToken);
+            if (paymentExists)
+            {
+                _logger.LogInformation("ℹ️ Webhook received for already processed multi-lab payment ID: {PaymentId}", paymentId);
+                return;
+            }
+
+            // 2. Fetch children
+            var childAppts = await _context.Appointments
+                .Where(a => a.ParentAppointmentId == parentAppointmentId)
+                .ToListAsync(cancellationToken);
+
+            // 3. Mark parent as Confirmed
+            parentAppt.Status = AppointmentStatus.Confirmed;
+            _context.Appointments.Update(parentAppt);
+
+            // Create payment record for parent
+            var parentPayment = new Payment
+            {
+                Id = Guid.NewGuid().ToString(),
+                AppointmentId = parentAppt.Id,
+                RazorpayOrderId = orderId,
+                RazorpayPaymentId = paymentId,
+                Status = PaymentStatus.Paid,
+                PaymentMethod = PaymentMethod.UPI,
+                PaidAt = DateTime.UtcNow,
+                CreatedAt = DateTime.UtcNow
+            };
+            _context.Payments.Add(parentPayment);
+
+            // 4. Mark children as Confirmed & create payment records
+            foreach (var child in childAppts)
+            {
+                child.Status = AppointmentStatus.Confirmed;
+                _context.Appointments.Update(child);
+
+                var childPayment = new Payment
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    AppointmentId = child.Id,
+                    RazorpayOrderId = orderId,
+                    RazorpayPaymentId = paymentId, // same payment reference
+                    Status = PaymentStatus.Paid,
+                    PaymentMethod = PaymentMethod.UPI,
+                    PaidAt = DateTime.UtcNow,
+                    CreatedAt = DateTime.UtcNow
+                };
+                _context.Payments.Add(childPayment);
+
+                // Notify each lab!
+                var lab = await _context.Branches.FirstOrDefaultAsync(b => b.Id == child.BranchId, cancellationToken);
+                if (lab != null && !string.IsNullOrEmpty(lab.NotificationPhone))
+                {
+                    var slot = await _context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == child.AppointmentSlotId, cancellationToken);
+                    var slotDisplay = slot != null ? $"{slot.SlotDate:dd MMM yyyy} @ {slot.StartTime:hh:mm tt}" : "Not specified";
+                    
+                    // Fetch service names for child
+                    var serviceNames = await _context.Services.AsNoTracking().Where(s => child.ItemIds.Contains(s.Id)).Select(s => s.Name).ToListAsync(cancellationToken);
+                    var packageNames = await _context.Packages.AsNoTracking().Where(p => child.ItemIds.Contains(p.Id)).Select(p => p.Name).ToListAsync(cancellationToken);
+                    var itemNamesStr = string.Join(", ", serviceNames.Concat(packageNames));
+
+                    var labNotification = $"🔔 *New Diagnostic Request!*\n\n" +
+                                          $"Booking ID: *{child.AppointmentNumber}*\n" +
+                                          $"Test: {itemNamesStr}\n" +
+                                          $"Slot: {slotDisplay}\n" +
+                                          $"Members: {child.MemberCount}\n" +
+                                          $"Place: {child.LocationAddress}";
+
+                    try
+                    {
+                        await _whatsAppService.SendTextMessageAsync(lab.NotificationPhone, labNotification);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Failed to send WhatsApp notification to lab {LabId}", child.BranchId);
+                    }
+                }
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            // Send notification to customer
+            var customer = await _context.Users.FirstOrDefaultAsync(u => u.Id == parentAppt.CustomerUserId, cancellationToken);
+            if (customer != null && !string.IsNullOrEmpty(customer.Phone))
+            {
+                var customerMsg = $"✅ *Payment Confirmed!*\n\n" +
+                                  $"🆔 Booking ID: *{parentAppt.AppointmentNumber}*\n" +
+                                  $"💰 Total Paid: ₹{parentAppt.TotalAmount}\n" +
+                                  $"🔑 Shared Passcode: *{parentAppt.Passcode}*\n\n" +
+                                  $"Your bookings are confirmed with respective labs. They will visit your location as scheduled.";
+
+                try
+                {
+                    await _whatsAppService.SendTextMessageAsync(customer.Phone, customerMsg);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to send WhatsApp notification to customer");
+                }
+            }
+        }
+        finally
+        {
+            lockObj.Release();
         }
     }
 }

@@ -23,13 +23,16 @@ namespace Apenir.API.Controllers
     {
         private readonly IApplicationDbContext _context;
         private readonly ICurrentUserService _currentUserService;
+        private readonly IWhatsAppService _whatsAppService;
 
         public BatchPaymentController(
             IApplicationDbContext context,
-            ICurrentUserService currentUserService)
+            ICurrentUserService currentUserService,
+            IWhatsAppService whatsAppService)
         {
             _context = context;
             _currentUserService = currentUserService;
+            _whatsAppService = whatsAppService;
         }
 
         [HttpGet("labs/{branchId}/unbatched-payments")]
@@ -43,16 +46,25 @@ namespace Apenir.API.Controllers
             [FromQuery] DateOnly? endDate,
             CancellationToken cancellationToken)
         {
-            var branchExists = await _context.Branches.AsNoTracking()
-                .AnyAsync(b => b.Id == branchId, cancellationToken);
+            bool isAll = branchId.Equals("all", StringComparison.OrdinalIgnoreCase);
 
-            if (!branchExists)
+            if (!isAll)
             {
-                return NotFound(ApiResponse.FailureResult("Branch not found."));
+                var branchExists = await _context.Branches.AsNoTracking()
+                    .AnyAsync(b => b.Id == branchId, cancellationToken);
+
+                if (!branchExists)
+                {
+                    return NotFound(ApiResponse.FailureResult("Branch not found."));
+                }
             }
 
-            // Find all appointments for this branch
-            var apptQuery = _context.Appointments.AsNoTracking().Where(a => a.BranchId == branchId);
+            // Find all appointments for this branch (or all branches)
+            var apptQuery = _context.Appointments.AsNoTracking();
+            if (!isAll)
+            {
+                apptQuery = apptQuery.Where(a => a.BranchId == branchId);
+            }
 
             if (startDate.HasValue || endDate.HasValue)
             {
@@ -71,11 +83,10 @@ namespace Apenir.API.Controllers
 
             var appointments = await apptQuery.ToListAsync(cancellationToken);
 
-
             var appointmentIds = appointments.Select(a => a.Id).ToList();
             if (appointmentIds.Count == 0)
             {
-                return Ok(ApiResponse<List<UnbatchedPaymentDto>>.SuccessResult(new List<UnbatchedPaymentDto>(), "No unbatched payments found for this lab."));
+                return Ok(ApiResponse<List<UnbatchedPaymentDto>>.SuccessResult(new List<UnbatchedPaymentDto>(), "No unbatched payments found."));
             }
 
             // Find all paid payments for these appointments that have no BatchId
@@ -85,7 +96,7 @@ namespace Apenir.API.Controllers
 
             if (payments.Count == 0)
             {
-                return Ok(ApiResponse<List<UnbatchedPaymentDto>>.SuccessResult(new List<UnbatchedPaymentDto>(), "No unbatched payments found for this lab."));
+                return Ok(ApiResponse<List<UnbatchedPaymentDto>>.SuccessResult(new List<UnbatchedPaymentDto>(), "No unbatched payments found."));
             }
 
             // Fetch customer details
@@ -99,17 +110,29 @@ namespace Apenir.API.Controllers
                 .Where(u => customerUserIds.Contains(u.Id))
                 .ToListAsync(cancellationToken);
 
+            var branchIds = appointments.Select(a => a.BranchId).Distinct().ToList();
+            var branches = await _context.Branches.AsNoTracking()
+                .Where(b => branchIds.Contains(b.Id))
+                .ToListAsync(cancellationToken);
+
             var appointmentDict = appointments.ToDictionary(a => a.Id);
             var customerDict = customerUsers.ToDictionary(u => u.Id);
+            var branchDict = branches.ToDictionary(b => b.Id);
 
             var result = payments.Select(p =>
             {
                 appointmentDict.TryGetValue(p.AppointmentId, out var appt);
                 var customerName = string.Empty;
-                if (appt != null && !string.IsNullOrEmpty(appt.CustomerUserId))
+                var branchName = string.Empty;
+                if (appt != null)
                 {
-                    customerDict.TryGetValue(appt.CustomerUserId, out var cust);
-                    customerName = cust?.Name ?? string.Empty;
+                    if (!string.IsNullOrEmpty(appt.CustomerUserId))
+                    {
+                        customerDict.TryGetValue(appt.CustomerUserId, out var cust);
+                        customerName = cust?.Name ?? string.Empty;
+                    }
+                    branchDict.TryGetValue(appt.BranchId, out var br);
+                    branchName = br?.Name ?? string.Empty;
                 }
 
                 return new UnbatchedPaymentDto
@@ -118,6 +141,8 @@ namespace Apenir.API.Controllers
                     AppointmentId = p.AppointmentId,
                     AppointmentNumber = appt?.AppointmentNumber ?? string.Empty,
                     CustomerName = customerName,
+                    BranchId = appt?.BranchId ?? string.Empty,
+                    BranchName = branchName,
                     TotalAmount = appt?.TotalAmount ?? 0,
                     PlatformCommission = appt?.PlatformCommission ?? 0,
                     LabPayout = appt?.LabPayout ?? 0,
@@ -439,6 +464,21 @@ namespace Apenir.API.Controllers
             _context.PaymentBatches.Update(batch);
             await _context.SaveChangesAsync(cancellationToken);
 
+            // Send WhatsApp Notification to the Lab!
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.Id == batch.BranchId, cancellationToken);
+
+            if (branch != null && !string.IsNullOrEmpty(branch.NotificationPhone))
+            {
+                var labMsg = $"💰 *Payout Approved & Paid!*\n\n" +
+                             $"Reference: *BAT-{batch.Id[..8].ToUpper()}*\n" +
+                             $"Amount Sent: ₹{batch.TotalNetPayout}\n" +
+                             $"Notes: {batch.Notes ?? "No notes"}\n\n" +
+                             $"Please check your account and confirm receipt in the Lab Console.";
+
+                try { await _whatsAppService.SendTextMessageAsync(branch.NotificationPhone, labMsg); } catch { }
+            }
+
             return Ok(ApiResponse.SuccessResult("Payment batch marked as Paid successfully."));
         }
     }
@@ -449,6 +489,8 @@ namespace Apenir.API.Controllers
         public string AppointmentId { get; set; } = string.Empty;
         public string AppointmentNumber { get; set; } = string.Empty;
         public string CustomerName { get; set; } = string.Empty;
+        public string BranchId { get; set; } = string.Empty;
+        public string BranchName { get; set; } = string.Empty;
         public decimal TotalAmount { get; set; }
         public decimal PlatformCommission { get; set; }
         public decimal LabPayout { get; set; }
