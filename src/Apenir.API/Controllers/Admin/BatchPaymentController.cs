@@ -115,9 +115,16 @@ namespace Apenir.API.Controllers
                 .Where(b => branchIds.Contains(b.Id))
                 .ToListAsync(cancellationToken);
 
+            var appointmentMembers = await _context.AppointmentMembers.AsNoTracking()
+                .Where(am => appointmentIds.Contains(am.AppointmentId))
+                .ToListAsync(cancellationToken);
+
             var appointmentDict = appointments.ToDictionary(a => a.Id);
             var customerDict = customerUsers.ToDictionary(u => u.Id);
             var branchDict = branches.ToDictionary(b => b.Id);
+            var memberDict = appointmentMembers
+                .GroupBy(am => am.AppointmentId)
+                .ToDictionary(g => g.Key, g => g.First().MemberName);
 
             var result = payments.Select(p =>
             {
@@ -130,6 +137,15 @@ namespace Apenir.API.Controllers
                     {
                         customerDict.TryGetValue(appt.CustomerUserId, out var cust);
                         customerName = cust?.Name ?? string.Empty;
+                    }
+                    if (string.IsNullOrEmpty(customerName))
+                    {
+                        memberDict.TryGetValue(appt.Id, out var memName);
+                        customerName = memName ?? string.Empty;
+                    }
+                    if (string.IsNullOrEmpty(customerName))
+                    {
+                        customerName = "WhatsApp User";
                     }
                     branchDict.TryGetValue(appt.BranchId, out var br);
                     branchName = br?.Name ?? string.Empty;
@@ -152,6 +168,131 @@ namespace Apenir.API.Controllers
             }).ToList();
 
             return Ok(ApiResponse<List<UnbatchedPaymentDto>>.SuccessResult(result, "Unbatched payments retrieved successfully."));
+        }
+
+        [HttpGet("all-payouts")]
+        [EndpointSummary("Get all completed payouts with their batch status")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<AllPayoutsDto>>))]
+        public async Task<IActionResult> GetAllPayouts(
+            [FromQuery] DateOnly? startDate,
+            [FromQuery] DateOnly? endDate,
+            [FromQuery] string? branchId,
+            CancellationToken cancellationToken)
+        {
+            var apptQuery = _context.Appointments.AsNoTracking();
+            
+            if (!string.IsNullOrEmpty(branchId) && !branchId.Equals("all", StringComparison.OrdinalIgnoreCase))
+            {
+                apptQuery = apptQuery.Where(a => a.BranchId == branchId);
+            }
+
+            if (startDate.HasValue || endDate.HasValue)
+            {
+                var slotQuery = _context.AppointmentSlots.AsNoTracking();
+                if (startDate.HasValue)
+                {
+                    slotQuery = slotQuery.Where(s => s.SlotDate >= startDate.Value);
+                }
+                if (endDate.HasValue)
+                {
+                    slotQuery = slotQuery.Where(s => s.SlotDate <= endDate.Value);
+                }
+                var matchingSlotIds = await slotQuery.Select(s => s.Id).ToListAsync(cancellationToken);
+                apptQuery = apptQuery.Where(a => matchingSlotIds.Contains(a.AppointmentSlotId));
+            }
+
+            var appointments = await apptQuery.ToListAsync(cancellationToken);
+            var appointmentIds = appointments.Select(a => a.Id).ToList();
+
+            if (appointmentIds.Count == 0)
+            {
+                return Ok(ApiResponse<List<AllPayoutsDto>>.SuccessResult(new List<AllPayoutsDto>(), "No payouts found."));
+            }
+
+            var payments = await _context.Payments.AsNoTracking()
+                .Where(p => appointmentIds.Contains(p.AppointmentId) && p.Status == PaymentStatus.Paid)
+                .ToListAsync(cancellationToken);
+
+            if (payments.Count == 0)
+            {
+                return Ok(ApiResponse<List<AllPayoutsDto>>.SuccessResult(new List<AllPayoutsDto>(), "No payouts found."));
+            }
+
+            var customerUserIds = appointments.Select(a => a.CustomerUserId).Where(id => !string.IsNullOrEmpty(id)).Distinct().ToList();
+            var customerUsers = await _context.Users.AsNoTracking().Where(u => customerUserIds.Contains(u.Id)).ToListAsync(cancellationToken);
+
+            var branchIds = appointments.Select(a => a.BranchId).Distinct().ToList();
+            var branches = await _context.Branches.AsNoTracking().Where(b => branchIds.Contains(b.Id)).ToListAsync(cancellationToken);
+
+            var batchIds = payments.Select(p => p.BatchId).Where(id => !string.IsNullOrEmpty(id)).Distinct().ToList();
+            var batches = await _context.PaymentBatches.AsNoTracking().Where(b => batchIds.Contains(b.Id)).ToListAsync(cancellationToken);
+
+            var appointmentMembers = await _context.AppointmentMembers.AsNoTracking()
+                .Where(am => appointmentIds.Contains(am.AppointmentId))
+                .ToListAsync(cancellationToken);
+
+            var appointmentDict = appointments.ToDictionary(a => a.Id);
+            var customerDict = customerUsers.ToDictionary(u => u.Id);
+            var branchDict = branches.ToDictionary(b => b.Id);
+            var batchDict = batches.ToDictionary(b => b.Id);
+            var memberDict = appointmentMembers
+                .GroupBy(am => am.AppointmentId)
+                .ToDictionary(g => g.Key, g => g.First().MemberName);
+
+            var result = payments.Select(p =>
+            {
+                appointmentDict.TryGetValue(p.AppointmentId, out var appt);
+                var customerName = string.Empty;
+                var branchName = string.Empty;
+                string batchStatusStr = "Unbatched";
+                string? batchNumber = null;
+
+                if (appt != null)
+                {
+                    if (!string.IsNullOrEmpty(appt.CustomerUserId))
+                    {
+                        customerDict.TryGetValue(appt.CustomerUserId, out var cust);
+                        customerName = cust?.Name ?? string.Empty;
+                    }
+                    if (string.IsNullOrEmpty(customerName))
+                    {
+                        memberDict.TryGetValue(appt.Id, out var memName);
+                        customerName = memName ?? string.Empty;
+                    }
+                    if (string.IsNullOrEmpty(customerName))
+                    {
+                        customerName = "WhatsApp User";
+                    }
+                    branchDict.TryGetValue(appt.BranchId, out var br);
+                    branchName = br?.Name ?? string.Empty;
+                }
+
+                if (!string.IsNullOrEmpty(p.BatchId) && batchDict.TryGetValue(p.BatchId, out var batch))
+                {
+                    batchStatusStr = batch.Status.ToString();
+                    batchNumber = batch.Id[..8].ToUpper();
+                }
+
+                return new AllPayoutsDto
+                {
+                    PaymentId = p.Id,
+                    AppointmentId = p.AppointmentId,
+                    AppointmentNumber = appt?.AppointmentNumber ?? string.Empty,
+                    CustomerName = customerName,
+                    BranchId = appt?.BranchId ?? string.Empty,
+                    BranchName = branchName,
+                    TotalAmount = appt?.TotalAmount ?? 0,
+                    PlatformCommission = appt?.PlatformCommission ?? 0,
+                    LabPayout = appt?.LabPayout ?? 0,
+                    PaidAt = p.PaidAt,
+                    PaymentMethod = p.PaymentMethod,
+                    BatchId = p.BatchId,
+                    BatchNumber = batchNumber,
+                    BatchStatus = batchStatusStr
+                };
+            }).OrderByDescending(p => p.PaidAt).ToList();
+
+            return Ok(ApiResponse<List<AllPayoutsDto>>.SuccessResult(result, "All payouts retrieved successfully."));
         }
 
         [HttpPost]
@@ -558,5 +699,23 @@ namespace Apenir.API.Controllers
         public decimal LabPayout { get; set; }
         public DateTime? PaidAt { get; set; }
         public PaymentMethod? PaymentMethod { get; set; }
+    }
+
+    public class AllPayoutsDto
+    {
+        public string PaymentId { get; set; } = string.Empty;
+        public string AppointmentId { get; set; } = string.Empty;
+        public string AppointmentNumber { get; set; } = string.Empty;
+        public string CustomerName { get; set; } = string.Empty;
+        public string BranchId { get; set; } = string.Empty;
+        public string BranchName { get; set; } = string.Empty;
+        public decimal TotalAmount { get; set; }
+        public decimal PlatformCommission { get; set; }
+        public decimal LabPayout { get; set; }
+        public DateTime? PaidAt { get; set; }
+        public PaymentMethod? PaymentMethod { get; set; }
+        public string? BatchId { get; set; }
+        public string? BatchNumber { get; set; }
+        public string BatchStatus { get; set; } = "Unbatched";
     }
 }

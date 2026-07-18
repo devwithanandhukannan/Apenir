@@ -2094,17 +2094,36 @@ namespace Apenir.API.Controllers
                 .Where(u => customerUserIds.Contains(u.Id))
                 .ToListAsync(cancellationToken);
 
+            var appointmentMembers = await _context.AppointmentMembers.AsNoTracking()
+                .Where(am => appointmentIds.Contains(am.AppointmentId))
+                .ToListAsync(cancellationToken);
+
             var appointmentDict = appointments.ToDictionary(a => a.Id);
             var customerDict = customerUsers.ToDictionary(u => u.Id);
+            var memberDict = appointmentMembers
+                .GroupBy(am => am.AppointmentId)
+                .ToDictionary(g => g.Key, g => g.First().MemberName);
 
             var result = payments.Select(p =>
             {
                 appointmentDict.TryGetValue(p.AppointmentId, out var appt);
                 var customerName = string.Empty;
-                if (appt != null && !string.IsNullOrEmpty(appt.CustomerUserId))
+                if (appt != null)
                 {
-                    customerDict.TryGetValue(appt.CustomerUserId, out var cust);
-                    customerName = cust?.Name ?? string.Empty;
+                    if (!string.IsNullOrEmpty(appt.CustomerUserId))
+                    {
+                        customerDict.TryGetValue(appt.CustomerUserId, out var cust);
+                        customerName = cust?.Name ?? string.Empty;
+                    }
+                    if (string.IsNullOrEmpty(customerName))
+                    {
+                        memberDict.TryGetValue(appt.Id, out var memName);
+                        customerName = memName ?? string.Empty;
+                    }
+                    if (string.IsNullOrEmpty(customerName))
+                    {
+                        customerName = "WhatsApp User";
+                    }
                 }
 
                 return new LabBatchPaymentItemDto
