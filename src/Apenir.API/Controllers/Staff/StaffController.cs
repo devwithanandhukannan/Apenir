@@ -65,22 +65,78 @@ public class StaffController : ControllerBase
             a.AppointmentSlot = slots.FirstOrDefault(s => s.Id == a.AppointmentSlotId);
         }
 
-        var result = appointments.Select(a => new StaffAppointmentDto
+        var appointmentIds = appointments.Select(a => a.Id).ToList();
+        var allMembers = await _context.AppointmentMembers
+            .Where(m => appointmentIds.Contains(m.AppointmentId))
+            .ToListAsync(cancellationToken);
+
+        var allServiceIds = allMembers.Where(m => m.ServiceItemIds != null).SelectMany(m => m.ServiceItemIds!).Distinct().ToList();
+        var allAppItemIds = appointments.Where(a => a.ItemIds != null).SelectMany(a => a.ItemIds!).Distinct().ToList();
+        var unionItemIds = allServiceIds.Union(allAppItemIds).Distinct().ToList();
+
+        var services = await _context.Services.AsNoTracking().Where(s => unionItemIds.Contains(s.Id)).ToListAsync(cancellationToken);
+        var packages = await _context.Packages.AsNoTracking().Where(p => unionItemIds.Contains(p.Id)).ToListAsync(cancellationToken);
+
+        var result = appointments.Select(a =>
         {
-            Id = a.Id,
-            AppointmentNumber = a.AppointmentNumber,
-            CustomerName = a.CustomerUser?.Name ?? "Patient",
-            CustomerPhone = a.CustomerUser?.Phone ?? string.Empty,
-            LocationAddress = a.LocationAddress,
-            LocationLatitude = a.LocationLatitude,
-            LocationLongitude = a.LocationLongitude,
-            Landmark = a.Landmark,
-            BuildingDetails = a.BuildingDetails,
-            Floor = a.Floor,
-            Status = a.Status,
-            MemberCount = a.MemberCount,
-            SlotDate = a.AppointmentSlot?.SlotDate,
-            SlotStartTime = a.AppointmentSlot?.StartTime
+            var appMembers = allMembers.Where(m => m.AppointmentId == a.Id).ToList();
+            var bookedItems = new List<BookedItemDto>();
+
+            var itemGroup = appMembers
+                .Where(m => m.ServiceItemIds != null)
+                .SelectMany(m => m.ServiceItemIds!)
+                .GroupBy(itemId => itemId)
+                .ToList();
+
+            foreach (var g in itemGroup)
+            {
+                var itemId = g.Key;
+                var svc = services.FirstOrDefault(s => s.Id == itemId);
+                var pkg = packages.FirstOrDefault(p => p.Id == itemId);
+
+                bookedItems.Add(new BookedItemDto
+                {
+                    ItemId = itemId,
+                    Name = svc?.Name ?? pkg?.Name ?? "Unknown Test",
+                    Type = svc != null ? "Service" : "Package",
+                    ExpectedCount = g.Count()
+                });
+            }
+
+            if (!bookedItems.Any() && a.ItemIds != null)
+            {
+                foreach (var itemId in a.ItemIds)
+                {
+                    var svc = services.FirstOrDefault(s => s.Id == itemId);
+                    var pkg = packages.FirstOrDefault(p => p.Id == itemId);
+                    bookedItems.Add(new BookedItemDto
+                    {
+                        ItemId = itemId,
+                        Name = svc?.Name ?? pkg?.Name ?? "Unknown Test",
+                        Type = svc != null ? "Service" : "Package",
+                        ExpectedCount = a.MemberCount
+                    });
+                }
+            }
+
+            return new StaffAppointmentDto
+            {
+                Id = a.Id,
+                AppointmentNumber = a.AppointmentNumber,
+                CustomerName = a.CustomerUser?.Name ?? "Patient",
+                CustomerPhone = a.CustomerUser?.Phone ?? string.Empty,
+                LocationAddress = a.LocationAddress,
+                LocationLatitude = a.LocationLatitude,
+                LocationLongitude = a.LocationLongitude,
+                Landmark = a.Landmark,
+                BuildingDetails = a.BuildingDetails,
+                Floor = a.Floor,
+                Status = a.Status,
+                MemberCount = a.MemberCount,
+                SlotDate = a.AppointmentSlot?.SlotDate,
+                SlotStartTime = a.AppointmentSlot?.StartTime,
+                BookedItems = bookedItems
+            };
         }).ToList();
 
         return Ok(ApiResponse<List<StaffAppointmentDto>>.SuccessResult(result, "Assigned tasks retrieved."));
@@ -857,6 +913,15 @@ public class StaffAppointmentDto
     public int MemberCount { get; set; }
     public DateOnly? SlotDate { get; set; }
     public TimeOnly? SlotStartTime { get; set; }
+    public List<BookedItemDto> BookedItems { get; set; } = new();
+}
+
+public class BookedItemDto
+{
+    public string ItemId { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string Type { get; set; } = string.Empty; // "Service" or "Package"
+    public int ExpectedCount { get; set; }
 }
 
 public class UpdateTaskStatusRequest
