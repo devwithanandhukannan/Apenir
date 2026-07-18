@@ -37,10 +37,13 @@ public class WhatsAppService : IWhatsAppService
                 return;
             }
 
+            // Sanitize phone number (remove any non-digit characters like +, spaces, dashes, etc.)
+            var sanitizedPhone = new string(toPhone.Where(char.IsDigit).ToArray());
+
             var payload = new
             {
                 messaging_product = "whatsapp",
-                to = toPhone,
+                to = sanitizedPhone,
                 type = "text",
                 text = new { body = message }
             };
@@ -57,10 +60,16 @@ public class WhatsAppService : IWhatsAppService
             var response = await client.PostAsync(url, content);
             var responseBody = await response.Content.ReadAsStringAsync();
             Console.WriteLine($"[META WHATSAPP SERVICE] 📬 Status: {response.StatusCode} | Body: {responseBody}");
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new Exception($"Meta API error (Status {response.StatusCode}): {responseBody}");
+            }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[META WHATSAPP SERVICE] Exception: {ex.Message}");
+            throw; // Re-throw to propagate exception for settings test trigger and logs
         }
     }
 
@@ -79,11 +88,14 @@ public class WhatsAppService : IWhatsAppService
                 return;
             }
 
+            // Sanitize phone number (remove any non-digit characters like +, spaces, dashes, etc.)
+            var sanitizedPhone = new string(toPhone.Where(char.IsDigit).ToArray());
+
             var payload = new
             {
                 messaging_product = "whatsapp",
                 recipient_type = "individual",
-                to = toPhone,
+                to = sanitizedPhone,
                 type = "document",
                 document = new
                 {
@@ -104,10 +116,16 @@ public class WhatsAppService : IWhatsAppService
             var response = await client.PostAsync(targetUrl, content);
             var responseBody = await response.Content.ReadAsStringAsync();
             Console.WriteLine($"[META WHATSAPP SERVICE] 📬 Status: {response.StatusCode} | Body: {responseBody}");
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new Exception($"Meta API error (Status {response.StatusCode}): {responseBody}");
+            }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[META WHATSAPP SERVICE] Exception: {ex.Message}");
+            throw; // Re-throw to propagate exception for settings test trigger and logs
         }
     }
 

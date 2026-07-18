@@ -55,6 +55,62 @@ public class SettingsService : ISettingsService
             _context.SystemSettings.Add(settings);
             await _context.SaveChangesAsync();
         }
+        else
+        {
+            bool updated = false;
+
+            var configWaToken = _configuration["WhatsApp:AccessToken"];
+            if (!string.IsNullOrEmpty(configWaToken))
+            {
+                string? decryptedToken = null;
+                try { decryptedToken = settings.WhatsAppAccessToken != null ? EncryptionHelper.Decrypt(settings.WhatsAppAccessToken, _encryptionKey) : null; } catch { decryptedToken = settings.WhatsAppAccessToken; }
+                if (decryptedToken != configWaToken)
+                {
+                    settings.WhatsAppAccessToken = EncryptionHelper.Encrypt(configWaToken, _encryptionKey);
+                    updated = true;
+                }
+            }
+
+            var configWaPhone = _configuration["WhatsApp:PhoneNumberId"];
+            if (!string.IsNullOrEmpty(configWaPhone) && settings.WhatsAppPhoneNumberId != configWaPhone)
+            {
+                settings.WhatsAppPhoneNumberId = configWaPhone;
+                updated = true;
+            }
+
+            var configWaApi = _configuration["WhatsApp:ApiVersion"];
+            if (!string.IsNullOrEmpty(configWaApi) && settings.WhatsAppApiVersion != configWaApi)
+            {
+                settings.WhatsAppApiVersion = configWaApi;
+                updated = true;
+            }
+
+            var configRzpKey = _configuration["Razorpay:KeyId"];
+            if (!string.IsNullOrEmpty(configRzpKey) && settings.RazorpayKeyId != configRzpKey)
+            {
+                settings.RazorpayKeyId = configRzpKey;
+                updated = true;
+            }
+
+            var configRzpSecret = _configuration["Razorpay:KeySecret"];
+            if (!string.IsNullOrEmpty(configRzpSecret))
+            {
+                string? decryptedSecret = null;
+                try { decryptedSecret = settings.RazorpayKeySecret != null ? EncryptionHelper.Decrypt(settings.RazorpayKeySecret, _encryptionKey) : null; } catch { decryptedSecret = settings.RazorpayKeySecret; }
+                if (decryptedSecret != configRzpSecret)
+                {
+                    settings.RazorpayKeySecret = EncryptionHelper.Encrypt(configRzpSecret, _encryptionKey);
+                    updated = true;
+                }
+            }
+
+            if (updated)
+            {
+                _context.SystemSettings.Update(settings);
+                await _context.SaveChangesAsync();
+                Console.WriteLine("[DB INITIALIZATION] SystemSettings auto-synced with appsettings.json configurations.");
+            }
+        }
 
         return settings;
     }
