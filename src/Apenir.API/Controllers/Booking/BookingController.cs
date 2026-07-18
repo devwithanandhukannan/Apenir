@@ -31,6 +31,7 @@ public class BookingController : ControllerBase
     private readonly IWhatsAppService _whatsAppService;
     private readonly IConfiguration _configuration;
     private readonly IMemoryCache _cache;
+    private readonly ISettingsService _settingsService;
 
     public BookingController(
         IApplicationDbContext context,
@@ -38,7 +39,8 @@ public class BookingController : ControllerBase
         IHttpClientFactory httpClientFactory,
         IWhatsAppService whatsAppService,
         IConfiguration configuration,
-        IMemoryCache cache)
+        IMemoryCache cache,
+        ISettingsService settingsService)
     {
         _context = context;
         _currentUserService = currentUserService;
@@ -46,6 +48,7 @@ public class BookingController : ControllerBase
         _whatsAppService = whatsAppService;
         _configuration = configuration;
         _cache = cache;
+        _settingsService = settingsService;
     }
 
     [HttpGet]
@@ -847,8 +850,8 @@ public class BookingController : ControllerBase
         var memberSelectionsStr = string.Join(";", encodedSelections);
 
         // Generate Razorpay Payment Link
-        var rzpKeyId = _configuration["Razorpay:KeyId"];
-        var rzpKeySecret = _configuration["Razorpay:KeySecret"];
+        var rzpKeyId = await _settingsService.GetRazorpayKeyIdAsync();
+        var rzpKeySecret = await _settingsService.GetRazorpayKeySecretAsync();
         var itemNames = services.Select(s => s.Name).Concat(packages.Select(p => p.Name)).ToList();
         var itemNamesStr = string.Join(", ", itemNames);
         
@@ -1325,8 +1328,8 @@ public class BookingController : ControllerBase
         await _context.SaveChangesAsync(cancellationToken);
 
         // Generate combined Razorpay payment link for full amount
-        var rzpKeyId = _configuration["Razorpay:KeyId"];
-        var rzpKeySecret = _configuration["Razorpay:KeySecret"];
+        var rzpKeyId = await _settingsService.GetRazorpayKeyIdAsync();
+        var rzpKeySecret = await _settingsService.GetRazorpayKeySecretAsync();
         string paymentUrl = "https://rzp.io/i/example";
         try
         {

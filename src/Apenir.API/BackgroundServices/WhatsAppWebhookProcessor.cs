@@ -16,6 +16,7 @@ using Apenir.Core.Entities;
 using Apenir.Core.Enums;
 using Apenir.Core.Interfaces;
 using Apenir.API.Controllers;
+using Apenir.Application.Common.Interfaces;
 
 namespace Apenir.API.BackgroundServices
 {
@@ -114,7 +115,9 @@ namespace Apenir.API.BackgroundServices
             using var scope = _serviceProvider.CreateScope();
             var context           = scope.ServiceProvider.GetRequiredService<IApplicationDbContext>();
             var httpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
-            var configuration     = scope.ServiceProvider.GetRequiredService<IConfiguration>();
+            var innerConfiguration = scope.ServiceProvider.GetRequiredService<IConfiguration>();
+            var settingsService    = scope.ServiceProvider.GetRequiredService<ISettingsService>();
+            var configuration      = new DynamicConfigurationWrapper(innerConfiguration, settingsService);
 
             try
             {
@@ -1924,5 +1927,54 @@ namespace Apenir.API.BackgroundServices
             context.WhatsAppSessions.Update(session);
             await context.SaveChangesAsync(cancellationToken);
         }
+    }
+
+    public class DynamicConfigurationWrapper : IConfiguration
+    {
+        private readonly IConfiguration _inner;
+        private readonly ISettingsService _settingsService;
+
+        public DynamicConfigurationWrapper(IConfiguration inner, ISettingsService settingsService)
+        {
+            _inner = inner;
+            _settingsService = settingsService;
+        }
+
+        public string? this[string key]
+        {
+            get
+            {
+                if (key == "WhatsApp:AccessToken")
+                {
+                    return _settingsService.GetWhatsAppAccessTokenAsync().GetAwaiter().GetResult();
+                }
+                if (key == "WhatsApp:PhoneNumberId")
+                {
+                    return _settingsService.GetWhatsAppPhoneNumberIdAsync().GetAwaiter().GetResult();
+                }
+                if (key == "WhatsApp:ApiVersion")
+                {
+                    return _settingsService.GetWhatsAppApiVersionAsync().GetAwaiter().GetResult();
+                }
+                if (key == "Razorpay:KeyId")
+                {
+                    return _settingsService.GetRazorpayKeyIdAsync().GetAwaiter().GetResult();
+                }
+                if (key == "Razorpay:KeySecret")
+                {
+                    return _settingsService.GetRazorpayKeySecretAsync().GetAwaiter().GetResult();
+                }
+                if (key == "Razorpay:WebhookSecret")
+                {
+                    return _settingsService.GetRazorpayWebhookSecretAsync().GetAwaiter().GetResult();
+                }
+                return _inner[key];
+            }
+            set => _inner[key] = value;
+        }
+
+        public IEnumerable<IConfigurationSection> GetChildren() => _inner.GetChildren();
+        public Microsoft.Extensions.Primitives.IChangeToken GetReloadToken() => _inner.GetReloadToken();
+        public IConfigurationSection GetSection(string key) => _inner.GetSection(key);
     }
 }

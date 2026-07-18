@@ -54,6 +54,7 @@ namespace Apenir.Infrastructure
             services.AddScoped<IJwtTokenService, JwtTokenService>();
             services.AddScoped<ICurrentUserService, CurrentUserService>();
             services.AddScoped<IEmailService, EmailService>();
+            services.AddScoped<ISettingsService, SettingsService>();
 
 
 

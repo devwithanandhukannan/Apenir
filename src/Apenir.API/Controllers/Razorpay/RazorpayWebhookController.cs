@@ -17,6 +17,7 @@ using Apenir.Core.Enums;
 using Apenir.Core.Interfaces;
 
 using System.Net.Http;
+using Apenir.Application.Common.Interfaces;
 
 namespace Apenir.API.Controllers;
 
@@ -32,19 +33,22 @@ public class RazorpayWebhookController : ControllerBase
     private readonly IWhatsAppService _whatsAppService;
     private readonly ILogger<RazorpayWebhookController> _logger;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ISettingsService _settingsService;
 
     public RazorpayWebhookController(
         IApplicationDbContext context,
         IConfiguration configuration,
         IWhatsAppService whatsAppService,
         ILogger<RazorpayWebhookController> logger,
-        IHttpClientFactory httpClientFactory)
+        IHttpClientFactory httpClientFactory,
+        ISettingsService settingsService)
     {
         _context = context;
         _configuration = configuration;
         _whatsAppService = whatsAppService;
         _logger = logger;
         _httpClientFactory = httpClientFactory;
+        _settingsService = settingsService;
     }
 
     [HttpPost("webhook")]
@@ -58,7 +62,7 @@ public class RazorpayWebhookController : ControllerBase
 
         // 2. Validate Signature
         var signature = Request.Headers["X-Razorpay-Signature"].ToString();
-        var secret = _configuration["Razorpay:WebhookSecret"] ?? string.Empty;
+        var secret = await _settingsService.GetRazorpayWebhookSecretAsync() ?? string.Empty;
 
         if (!string.IsNullOrEmpty(secret) && !VerifySignature(rawBody, signature, secret))
         {

@@ -7,16 +7,18 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
 using Apenir.Core.Interfaces;
 
+using Apenir.Application.Common.Interfaces;
+
 namespace Apenir.Infrastructure.Services;
 
 public class WhatsAppService : IWhatsAppService
 {
-    private readonly IConfiguration _configuration;
+    private readonly ISettingsService _settingsService;
     private readonly IHttpClientFactory _httpClientFactory;
 
-    public WhatsAppService(IConfiguration configuration, IHttpClientFactory httpClientFactory)
+    public WhatsAppService(ISettingsService settingsService, IHttpClientFactory httpClientFactory)
     {
-        _configuration = configuration;
+        _settingsService = settingsService;
         _httpClientFactory = httpClientFactory;
     }
 
@@ -24,9 +26,9 @@ public class WhatsAppService : IWhatsAppService
     {
         try
         {
-            var accessToken = _configuration["WhatsApp:AccessToken"];
-            var phoneNumberId = _configuration["WhatsApp:PhoneNumberId"];
-            var apiVersion = _configuration["WhatsApp:ApiVersion"] ?? "v25.0";
+            var accessToken = await _settingsService.GetWhatsAppAccessTokenAsync();
+            var phoneNumberId = await _settingsService.GetWhatsAppPhoneNumberIdAsync();
+            var apiVersion = await _settingsService.GetWhatsAppApiVersionAsync() ?? "v25.0";
 
             if (string.IsNullOrEmpty(accessToken) || string.IsNullOrEmpty(phoneNumberId))
             {
@@ -66,9 +68,9 @@ public class WhatsAppService : IWhatsAppService
     {
         try
         {
-            var accessToken = _configuration["WhatsApp:AccessToken"];
-            var phoneNumberId = _configuration["WhatsApp:PhoneNumberId"];
-            var apiVersion = _configuration["WhatsApp:ApiVersion"] ?? "v25.0";
+            var accessToken = await _settingsService.GetWhatsAppAccessTokenAsync();
+            var phoneNumberId = await _settingsService.GetWhatsAppPhoneNumberIdAsync();
+            var apiVersion = await _settingsService.GetWhatsAppApiVersionAsync() ?? "v25.0";
 
             if (string.IsNullOrEmpty(accessToken) || string.IsNullOrEmpty(phoneNumberId))
             {
