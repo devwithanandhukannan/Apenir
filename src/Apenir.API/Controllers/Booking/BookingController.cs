@@ -846,9 +846,12 @@ public class BookingController : ControllerBase
         var itemNames = services.Select(s => s.Name).Concat(packages.Select(p => p.Name)).ToList();
         var itemNamesStr = string.Join(", ", itemNames);
         
-        string paymentUrl = "https://rzp.io/i/example";
+        string? paymentUrl = null;
         try
         {
+            var cleanPhone = user.Phone.Trim().Replace("+", "").Replace(" ", "").Replace("-", "");
+            var contactStr = cleanPhone.StartsWith("91") ? $"+{cleanPhone}" : $"+91{cleanPhone}";
+
             var rzpClient = _httpClientFactory.CreateClient();
             var authString = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{rzpKeyId}:{rzpKeySecret}"));
             rzpClient.DefaultRequestHeaders.Authorization =
@@ -863,7 +866,7 @@ public class BookingController : ControllerBase
                 customer = new
                 {
                     name = user.Name ?? "Web User",
-                    contact = $"+{user.Phone.Trim()}",
+                    contact = contactStr,
                 },
                 notify = new { sms = false, email = false },
                 reminder_enable = false,
@@ -891,7 +894,7 @@ public class BookingController : ControllerBase
             {
                 var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
                 using var rzpDoc = JsonDocument.Parse(responseBody);
-                paymentUrl = rzpDoc.RootElement.GetProperty("short_url").GetString() ?? paymentUrl;
+                paymentUrl = rzpDoc.RootElement.GetProperty("short_url").GetString();
             }
             else
             {
@@ -1321,9 +1324,12 @@ public class BookingController : ControllerBase
         // Generate combined Razorpay payment link for full amount
         var rzpKeyId = await _settingsService.GetRazorpayKeyIdAsync();
         var rzpKeySecret = await _settingsService.GetRazorpayKeySecretAsync();
-        string paymentUrl = "https://rzp.io/i/example";
+        string? paymentUrl = null;
         try
         {
+            var cleanPhone = user.Phone.Trim().Replace("+", "").Replace(" ", "").Replace("-", "");
+            var contactStr = cleanPhone.StartsWith("91") ? $"+{cleanPhone}" : $"+91{cleanPhone}";
+
             var rzpClient = _httpClientFactory.CreateClient();
             var authString = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{rzpKeyId}:{rzpKeySecret}"));
             rzpClient.DefaultRequestHeaders.Authorization =
@@ -1339,7 +1345,7 @@ public class BookingController : ControllerBase
                 currency = "INR",
                 accept_partial = false,
                 description = $"Multi-Lab Booking: {bookingId}",
-                customer = new { name = user.Name ?? "Web User", contact = $"+{user.Phone.Trim()}" },
+                customer = new { name = user.Name ?? "Web User", contact = contactStr },
                 notify = new { sms = false, email = false },
                 reminder_enable = false,
                 notes = new
@@ -1364,10 +1370,10 @@ public class BookingController : ControllerBase
             {
                 var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
                 using var rzpDoc = JsonDocument.Parse(responseBody);
-                paymentUrl = rzpDoc.RootElement.GetProperty("short_url").GetString() ?? paymentUrl;
+                paymentUrl = rzpDoc.RootElement.GetProperty("short_url").GetString();
             }
         }
-        catch { /* Payment link generation failed - return pending without URL */ }
+        catch { /* Payment link generation failed */ }
 
         // Customer WhatsApp notification
         try

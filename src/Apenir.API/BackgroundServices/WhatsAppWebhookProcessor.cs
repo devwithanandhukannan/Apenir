@@ -1497,9 +1497,12 @@ namespace Apenir.API.BackgroundServices
             var itemNames = services.Select(s => s.Name).Concat(packages.Select(p => p.Name)).ToList();
             var itemNamesStr = string.Join(", ", itemNames);
 
-            string paymentUrl = "https://rzp.io/i/example";
+            string? paymentUrl = null;
             try
             {
+                var cleanPhone = to.Trim().Replace("+", "").Replace(" ", "").Replace("-", "");
+                var contactStr = cleanPhone.StartsWith("91") ? $"+{cleanPhone}" : $"+91{cleanPhone}";
+
                 var client     = httpClientFactory.CreateClient();
                 var authString = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{rzpKeyId}:{rzpKeySecret}"));
                 client.DefaultRequestHeaders.Authorization =
@@ -1514,7 +1517,7 @@ namespace Apenir.API.BackgroundServices
                     customer       = new
                     {
                         name    = customerName,
-                        contact = $"+{to}",
+                        contact = contactStr,
                     },
                     notify = new { sms = false, email = false },
                     reminder_enable = false,
@@ -1542,7 +1545,7 @@ namespace Apenir.API.BackgroundServices
                 {
                     var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
                     using var rzpDoc = JsonDocument.Parse(responseBody);
-                    paymentUrl = rzpDoc.RootElement.GetProperty("short_url").GetString() ?? paymentUrl;
+                    paymentUrl = rzpDoc.RootElement.GetProperty("short_url").GetString();
                 }
                 else
                 {
@@ -1553,6 +1556,12 @@ namespace Apenir.API.BackgroundServices
             catch (Exception ex)
             {
                 _logger.LogError(ex, "Failed to create Razorpay payment link");
+            }
+
+            if (string.IsNullOrEmpty(paymentUrl))
+            {
+                await SendTextMessage(to, $"❌ Failed to generate payment link for ₹{total}. Please verify your Razorpay API settings or try again.", httpClientFactory, configuration);
+                return;
             }
 
             var waPayload = new
