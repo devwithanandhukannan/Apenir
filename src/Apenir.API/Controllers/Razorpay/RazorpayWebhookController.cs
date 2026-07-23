@@ -296,14 +296,7 @@ public class RazorpayWebhookController : ControllerBase
                         }
                     }
 
-                    if (i == 0)
-                    {
-                        totalBaseAmount += memberSum;
-                    }
-                    else
-                    {
-                        totalBaseAmount += memberSum * 0.8m;
-                    }
+                    totalBaseAmount += memberSum;
                 }
             }
             else
@@ -332,9 +325,7 @@ public class RazorpayWebhookController : ControllerBase
                     }
                 }
 
-                totalBaseAmount = rate + (memberCount > 1
-                    ? (memberCount - 1) * rate * 0.8m
-                    : 0);
+                totalBaseAmount = rate * memberCount;
             }
 
             decimal avgCommissionPct = totalItemsCount > 0 ? (totalCommissionPct / totalItemsCount) : 15.00m;
@@ -411,8 +402,7 @@ public class RazorpayWebhookController : ControllerBase
                         if (s != null) { var bs = branchServices.FirstOrDefault(x => x.ServiceId == itemId); memberAmount += bs?.CustomPrice ?? s.BasePrice; }
                         else { var p = packages.FirstOrDefault(x => x.Id == itemId); if (p != null) { var bp = branchPackages.FirstOrDefault(x => x.PackageId == itemId); memberAmount += bp?.CustomPrice ?? p.BasePrice; } }
                     }
-                    if (i > 0) memberAmount = Math.Round(memberAmount * 0.8m, 2);
-
+                    // No member discount applied
                     var member = new AppointmentMember
                     {
                         Id = Guid.NewGuid().ToString(),
@@ -442,7 +432,7 @@ public class RazorpayWebhookController : ControllerBase
 
                 for (int i = 0; i < memberCount; i++)
                 {
-                    decimal memberAmount = i == 0 ? baseRatePerMember : Math.Round(baseRatePerMember * 0.8m, 2);
+                    decimal memberAmount = baseRatePerMember;
                     var member = new AppointmentMember
                     {
                         Id = Guid.NewGuid().ToString(),

@@ -562,8 +562,37 @@ namespace Apenir.API.BackgroundServices
                         .ToList();
                     var nearbyBranchIds = nearbyBranches.Select(x => x.Branch.Id).ToHashSet();
                     
-                    var bsIds = await context.BranchServices.Where(bs => bs.IsActive && nearbyBranchIds.Contains(bs.BranchId)).Select(bs => bs.ServiceId).Distinct().ToListAsync(cancellationToken);
-                    var bpIds = await context.BranchPackages.Where(bp => bp.IsActive && nearbyBranchIds.Contains(bp.BranchId)).Select(bp => bp.PackageId).Distinct().ToListAsync(cancellationToken);
+                    var cartRawItems = session.CartItemIds ?? new List<string>();
+                    var currentItemIds = cartRawItems.Select(id => id.Split(':')[0]).Distinct().ToList();
+
+                    List<string> eligibleBranchIds;
+                    if (currentItemIds.Any())
+                    {
+                        var branchServicesForCart = await context.BranchServices
+                            .Where(bs => bs.IsActive && nearbyBranchIds.Contains(bs.BranchId) && currentItemIds.Contains(bs.ServiceId))
+                            .ToListAsync(cancellationToken);
+
+                        var branchPackagesForCart = await context.BranchPackages
+                            .Where(bp => bp.IsActive && nearbyBranchIds.Contains(bp.BranchId) && currentItemIds.Contains(bp.PackageId))
+                            .ToListAsync(cancellationToken);
+
+                        eligibleBranchIds = nearbyBranches
+                            .Where(x =>
+                            {
+                                int sCount = branchServicesForCart.Where(bs => bs.BranchId == x.Branch.Id).Select(bs => bs.ServiceId).Distinct().Count();
+                                int pCount = branchPackagesForCart.Where(bp => bp.BranchId == x.Branch.Id).Select(bp => bp.PackageId).Distinct().Count();
+                                return (sCount + pCount) >= currentItemIds.Count;
+                            })
+                            .Select(x => x.Branch.Id)
+                            .ToList();
+                    }
+                    else
+                    {
+                        eligibleBranchIds = nearbyBranchIds.ToList();
+                    }
+
+                    var bsIds = await context.BranchServices.Where(bs => bs.IsActive && eligibleBranchIds.Contains(bs.BranchId)).Select(bs => bs.ServiceId).Distinct().ToListAsync(cancellationToken);
+                    var bpIds = await context.BranchPackages.Where(bp => bp.IsActive && eligibleBranchIds.Contains(bp.BranchId)).Select(bp => bp.PackageId).Distinct().ToListAsync(cancellationToken);
 
                     var svcs = (await GetCachedServicesAsync(context, cancellationToken)).Where(s => bsIds.Contains(s.Id)).ToList();
                     var pkgs = (await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken)).Where(p => bpIds.Contains(p.Id)).ToList();
@@ -1175,8 +1204,7 @@ namespace Apenir.API.BackgroundServices
                     }
                 }
 
-                // First copy pays full basePrice, subsequent copies get 20% discount (i.e. 80% price)
-                var cost = basePrice + (qty > 1 ? (qty - 1) * basePrice * 0.8m : 0m);
+                var cost = basePrice * qty;
                 rate += cost;
 
                 if (originalPrice.HasValue && originalPrice.Value > basePrice)
@@ -1442,8 +1470,7 @@ namespace Apenir.API.BackgroundServices
                     }
                 }
 
-                // First copy pays full basePrice, subsequent copies get 20% discount (i.e. 80% price)
-                var cost = basePrice + (qty > 1 ? (qty - 1) * basePrice * 0.8m : 0m);
+                var cost = basePrice * qty;
                 rate += cost;
             }
 

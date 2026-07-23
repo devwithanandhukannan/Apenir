@@ -798,15 +798,8 @@ public class BookingController : ControllerBase
                     }
                 }
 
-                if (i == 0)
-                {
-                    totalBaseAmount += memberSum;
-                }
-                else
-                {
-                    totalBaseAmount += memberSum * 0.8m;
-                }
-
+                totalBaseAmount += memberSum;
+ 
                 var memberNameSanitized = string.IsNullOrWhiteSpace(selection.Name) ? (i == 0 ? "Self" : $"Member {i + 1}") : selection.Name.Replace(":", "").Replace(";", "").Replace(",", "");
                 encodedSelections.Add($"{memberNameSanitized}:{string.Join(",", selection.ItemIds)}");
             }
@@ -833,9 +826,7 @@ public class BookingController : ControllerBase
                 }
             }
 
-            totalBaseAmount = rate + (memberCount > 1
-                ? (memberCount - 1) * rate * 0.8m
-                : 0);
+            totalBaseAmount = rate * memberCount;
 
             for (int i = 0; i < memberCount; i++)
             {
@@ -1188,8 +1179,8 @@ public class BookingController : ControllerBase
                     if (bp != null && pkg != null) { splitBase += bp.CustomPrice ?? pkg.BasePrice; commissionPctSum += bp.CustomCommissionPct ?? pkg.PlatformCommissionPct; commissionCount++; }
                 }
             }
-            // Apply member discount for additional members
-            decimal splitTotal = splitBase + (memberCount > 1 ? (memberCount - 1) * splitBase * 0.8m : 0m);
+            // No member discount applied for additional members
+            decimal splitTotal = splitBase * memberCount;
 
             var roadDist = await GetRoadDistanceKm(request.Latitude, request.Longitude, (double)branch.Latitude, (double)branch.Longitude, httpClient);
             decimal travelCost = (decimal)roadDist * (branch.PerKmCharge ?? 0m);
@@ -1254,7 +1245,7 @@ public class BookingController : ControllerBase
                         if (bs != null && svc != null) memberAmt += bs.CustomPrice ?? svc.BasePrice;
                         else { var bp = branchPackagesForSplit.FirstOrDefault(x => x.PackageId == id); var pkg = packages.FirstOrDefault(p => p.Id == id); if (bp != null && pkg != null) memberAmt += bp.CustomPrice ?? pkg.BasePrice; }
                     }
-                    if (mi > 0) memberAmt = Math.Round(memberAmt * 0.8m, 2);
+                    // No member discount applied
 
                     var memberItemNames2 = services.Where(s => memberItemsForThisSplit.Contains(s.Id)).Select(s => s.Name)
                         .Concat(packages.Where(p => memberItemsForThisSplit.Contains(p.Id)).Select(p => p.Name)).ToList();
@@ -1279,7 +1270,7 @@ public class BookingController : ControllerBase
             {
                 for (int mi = 0; mi < memberCount; mi++)
                 {
-                    decimal memberAmt = mi == 0 ? splitBase : Math.Round(splitBase * 0.8m, 2);
+                    decimal memberAmt = splitBase;
                     _context.AppointmentMembers.Add(new AppointmentMember
                     {
                         Id = Guid.NewGuid().ToString(),
