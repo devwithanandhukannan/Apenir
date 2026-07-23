@@ -1145,10 +1145,11 @@ namespace Apenir.API.BackgroundServices
             await SendTextMessage(to, text, httpClientFactory, configuration);
         }
 
+        private static readonly System.Text.RegularExpressions.Regex GreetingRegex =
+            new System.Text.RegularExpressions.Regex(@"\b(hi|hello|hey|hii|helo|hai|start|menu|namaste|good morning|good evening|howdy)\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.Compiled);
+
         private static bool IsGreeting(string text) =>
-            new[] { "hi", "hello", "hey", "hii", "helo", "hai", "start", "menu",
-                    "namaste", "good morning", "good evening", "howdy" }
-            .Any(g => text.Contains(g));
+            !string.IsNullOrWhiteSpace(text) && GreetingRegex.IsMatch(text.Trim());
 
         private async Task<string> BuildBookingSummaryAsync(
             WhatsAppSession session,
