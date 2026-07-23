@@ -290,7 +290,8 @@ namespace Apenir.API.BackgroundServices
                     session.Floor = "Not specified";
 
                     // Auto-select closest eligible branch
-                    var cartItemIds = (session.SelectedTestId ?? "").Split(',').Select(id => id.Trim()).ToList();
+                    var cartItemIdsWithQty = (session.SelectedTestId ?? "").Split(',').Select(id => id.Trim()).Where(id => !string.IsNullOrEmpty(id)).ToList();
+                    var cartItemIds = cartItemIdsWithQty.Select(id => id.Split(':')[0]).Distinct().ToList();
                     var allServices = await GetCachedServicesAsync(context, cancellationToken);
                     var allPackages = await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken);
 
@@ -324,19 +325,23 @@ namespace Apenir.API.BackgroundServices
                         if (totalOfferedInCart >= cartItemIds.Count)
                         {
                             decimal totalPriceForBranch = 0m;
-                            foreach (var itemId in cartItemIds)
+                            foreach (var itemWithQty in cartItemIdsWithQty)
                             {
+                                var parts = itemWithQty.Split(':');
+                                var itemId = parts[0];
+                                var qty = parts.Length > 1 && int.TryParse(parts[1], out var itemQty) ? itemQty : 1;
+
                                 var bs = branchServices.FirstOrDefault(x => x.BranchId == b.Id && x.ServiceId == itemId);
                                 if (bs != null)
                                 {
-                                    totalPriceForBranch += bs.CustomPrice ?? allServices.FirstOrDefault(s => s.Id == itemId)?.BasePrice ?? 0m;
+                                    totalPriceForBranch += (bs.CustomPrice ?? allServices.FirstOrDefault(s => s.Id == itemId)?.BasePrice ?? 0m) * qty;
                                 }
                                 else
                                 {
                                     var bp = branchPackages.FirstOrDefault(x => x.BranchId == b.Id && x.PackageId == itemId);
                                     if (bp != null)
                                     {
-                                        totalPriceForBranch += bp.CustomPrice ?? allPackages.FirstOrDefault(p => p.Id == itemId)?.BasePrice ?? 0m;
+                                        totalPriceForBranch += (bp.CustomPrice ?? allPackages.FirstOrDefault(p => p.Id == itemId)?.BasePrice ?? 0m) * qty;
                                     }
                                 }
                             }
@@ -959,7 +964,8 @@ namespace Apenir.API.BackgroundServices
             IConfiguration configuration,
             CancellationToken cancellationToken)
         {
-            var cartItemIds = (session.SelectedTestId ?? "").Split(',').Select(id => id.Trim()).ToList();
+            var cartItemIdsWithQty = (session.SelectedTestId ?? "").Split(',').Select(id => id.Trim()).Where(id => !string.IsNullOrEmpty(id)).ToList();
+            var cartItemIds = cartItemIdsWithQty.Select(id => id.Split(':')[0]).Distinct().ToList();
 
             var allServices = await GetCachedServicesAsync(context, cancellationToken);
             var allPackages = await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken);
@@ -994,19 +1000,23 @@ namespace Apenir.API.BackgroundServices
                 if (totalOfferedInCart >= cartItemIds.Count)
                 {
                     decimal totalPriceForBranch = 0m;
-                    foreach (var itemId in cartItemIds)
+                    foreach (var itemWithQty in cartItemIdsWithQty)
                     {
+                        var parts = itemWithQty.Split(':');
+                        var itemId = parts[0];
+                        var qty = parts.Length > 1 && int.TryParse(parts[1], out var q) ? q : 1;
+
                         var bs = branchServices.FirstOrDefault(x => x.BranchId == b.Id && x.ServiceId == itemId);
                         if (bs != null)
                         {
-                            totalPriceForBranch += bs.CustomPrice ?? allServices.FirstOrDefault(s => s.Id == itemId)?.BasePrice ?? 0m;
+                            totalPriceForBranch += (bs.CustomPrice ?? allServices.FirstOrDefault(s => s.Id == itemId)?.BasePrice ?? 0m) * qty;
                         }
                         else
                         {
                             var bp = branchPackages.FirstOrDefault(x => x.BranchId == b.Id && x.PackageId == itemId);
                             if (bp != null)
                             {
-                                totalPriceForBranch += bp.CustomPrice ?? allPackages.FirstOrDefault(p => p.Id == itemId)?.BasePrice ?? 0m;
+                                totalPriceForBranch += (bp.CustomPrice ?? allPackages.FirstOrDefault(p => p.Id == itemId)?.BasePrice ?? 0m) * qty;
                             }
                         }
                     }
