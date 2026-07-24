@@ -1,4 +1,4 @@
-name: Build and Push Backend to Docker Hub
+name: Build and Push Backend to Docker Hub & Update ECS
 
 on:
   push:
@@ -32,3 +32,14 @@ jobs:
           tags: |
             kneazllle/apenir-backend:latest
             kneazllle/apenir-backend:${{ github.sha }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-south-1
+
+      - name: Force new ECS deployment
+        run: |
+          aws ecs update-service --cluster default --service apenir-backend-3cd6 --force-new-deployment
