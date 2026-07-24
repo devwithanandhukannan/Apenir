@@ -20,8 +20,18 @@ public class CustomerOnlyAttribute : Attribute, IAuthorizationFilter
             return;
         }
 
-        var roleClaim = user.FindFirst(ClaimTypes.Role);
-        if (roleClaim == null || roleClaim.Value != "Customer")
+        var roleClaims = System.Linq.Enumerable.Where(user.Claims, c => c.Type == ClaimTypes.Role || c.Type.Equals("role", StringComparison.OrdinalIgnoreCase));
+        bool isCustomer = false;
+        foreach (var claim in roleClaims)
+        {
+            if (claim.Value.Equals("Customer", StringComparison.OrdinalIgnoreCase))
+            {
+                isCustomer = true;
+                break;
+            }
+        }
+
+        if (!isCustomer)
         {
             context.Result = new JsonResult(new { code = "FORBIDDEN", message = "Insufficient permissions" })
             {

@@ -51,6 +51,34 @@ namespace Apenir.API.Controllers
             _jwtSettings = jwtSettings.Value;
         }
 
+        /// <summary>
+        /// Returns the Branch for the currently authenticated user.
+        /// Works for both Lab users (matched via LabUserId) and Staff users (matched via their LabId).
+        /// </summary>
+        private async Task<Branch?> GetCurrentBranchAsync(CancellationToken cancellationToken)
+        {
+            var currentUserId = _currentUserService.UserId?.ToString();
+            if (string.IsNullOrEmpty(currentUserId)) return null;
+
+            // Primary lookup: the logged-in user is the lab owner
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch != null) return branch;
+
+            // Fallback: the logged-in user is a Staff member – find the branch via their LabId
+            var user = await _context.Users.AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+
+            if (user != null && user.Role == UserRole.Staff && !string.IsNullOrEmpty(user.LabId))
+            {
+                branch = await _context.Branches.AsNoTracking()
+                    .FirstOrDefaultAsync(b => b.LabId == user.LabId, cancellationToken);
+            }
+
+            return branch;
+        }
+
         [HttpPost("login")]
         [AllowAnonymous]
         [EndpointSummary("Lab Portal Login")]
@@ -108,7 +136,7 @@ namespace Apenir.API.Controllers
             await _context.SaveChangesAsync(cancellationToken);
 
             // Set secure cookie
-            CookieHelper.SetRefreshTokenCookie(HttpContext, refreshTokenString, "/api/auth/refresh");
+            CookieHelper.SetRefreshTokenCookie(HttpContext, refreshTokenString, "/");
 
             // Retrieve associated Branch details
             Branch? userBranch = null;
@@ -129,7 +157,8 @@ namespace Apenir.API.Controllers
                 AdminId = user.Id,
                 Email = user.Email ?? string.Empty,
                 BranchId = userBranch?.Id,
-                LabId = userBranch?.LabId
+                LabId = userBranch?.LabId,
+                Role = user.Role.ToString().ToLower()
             };
 
             return Ok(ApiResponse<LoginResponse>.SuccessResult(response, "Login successful"));
@@ -143,9 +172,7 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
         public async Task<IActionResult> GetBranchStaff(CancellationToken cancellationToken)
         {
-            var currentUserId = _currentUserService.UserId?.ToString();
-            var branch = await _context.Branches.AsNoTracking()
-                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            var branch = await GetCurrentBranchAsync(cancellationToken);
 
             if (branch == null)
             {
@@ -169,9 +196,7 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
         public async Task<IActionResult> GetBranchAppointments(CancellationToken cancellationToken)
         {
-            var currentUserId = _currentUserService.UserId?.ToString();
-            var branch = await _context.Branches.AsNoTracking()
-                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            var branch = await GetCurrentBranchAsync(cancellationToken);
 
             if (branch == null)
             {
@@ -295,6 +320,7 @@ namespace Apenir.API.Controllers
             branch.Latitude = request.Latitude;
             branch.Longitude = request.Longitude;
             branch.ServiceRangeKm = request.ServiceRangeKm;
+            branch.PerKmCharge = request.PerKmCharge;
 
             _context.Branches.Update(branch);
             await _context.SaveChangesAsync(cancellationToken);
@@ -323,12 +349,17 @@ namespace Apenir.API.Controllers
                 branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
                 if (branch != null && branch.LabUserId != currentUserId)
                 {
-                    return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                    // Allow staff who belong to this branch
+                    var currentUser = await _context.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+                    if (currentUser == null || currentUser.Role != UserRole.Staff || currentUser.LabId != branch.LabId)
+                    {
+                        return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                    }
                 }
             }
             else
             {
-                branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+                branch = await GetCurrentBranchAsync(cancellationToken);
             }
 
             if (branch == null)
@@ -501,12 +532,17 @@ namespace Apenir.API.Controllers
                 branch = await _context.Branches.AsNoTracking().FirstOrDefaultAsync(b => b.Id == branchId, cancellationToken);
                 if (branch != null && branch.LabUserId != currentUserId)
                 {
-                    return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                    // Allow staff who belong to this branch
+                    var currentUser = await _context.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+                    if (currentUser == null || currentUser.Role != UserRole.Staff || currentUser.LabId != branch.LabId)
+                    {
+                        return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch."));
+                    }
                 }
             }
             else
             {
-                branch = await _context.Branches.AsNoTracking().FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+                branch = await GetCurrentBranchAsync(cancellationToken);
             }
 
             if (branch == null)
@@ -583,10 +619,19 @@ namespace Apenir.API.Controllers
                 return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this branch's appointments."));
             }
 
-            var staffExists = await _context.Users.AnyAsync(u => u.Id == request.StaffId && u.Role == UserRole.Staff && !u.IsDeleted, cancellationToken);
-            if (!staffExists)
+            var staffUser = await _context.Users.FirstOrDefaultAsync(u => u.Id == request.StaffId && u.Role == UserRole.Staff && !u.IsDeleted, cancellationToken);
+            if (staffUser == null)
             {
                 return BadRequest(ApiResponse.FailureResult("Invalid or non-existent staff member selected."));
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.BranchId))
+            {
+                var branchExists = await _context.Branches.AnyAsync(b => b.Id == request.BranchId && b.LabUserId == currentUserId, cancellationToken);
+                if (branchExists)
+                {
+                    appointment.BranchId = request.BranchId;
+                }
             }
 
             appointment.AssignedStaffId = request.StaffId;
@@ -595,6 +640,27 @@ namespace Apenir.API.Controllers
 
             _context.Appointments.Update(appointment);
             await _context.SaveChangesAsync(cancellationToken);
+
+            // Fetch detail for WhatsApp notification
+            var customerUser = await _context.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == appointment.CustomerUserId, cancellationToken);
+            var slot = await _context.AppointmentSlots.AsNoTracking().FirstOrDefaultAsync(s => s.Id == appointment.AppointmentSlotId, cancellationToken);
+
+            if (!string.IsNullOrEmpty(staffUser.Phone))
+            {
+                var slotDateStr = slot != null ? slot.SlotDate.ToString("dd-MMM-yyyy") : "N/A";
+                var slotTimeStr = slot != null ? $"{slot.StartTime} - {slot.EndTime}" : "N/A";
+                var staffMsg = $"📋 *New Task Assigned!*\n\nHello {staffUser.Name ?? "Staff"},\n\nYou have been assigned a new collection task.\n\n*Appointment ID:* {appointment.AppointmentNumber}\n*Patient Name:* {customerUser?.Name ?? "Customer"}\n*Address:* {appointment.LocationAddress}\n*Scheduled Slot:* {slotDateStr} ({slotTimeStr})\n\nPlease check your appointments page for details.";
+                
+                try
+                {
+                    await _whatsAppService.SendTextMessageAsync(staffUser.Phone, staffMsg);
+                }
+                catch (Exception ex)
+                {
+                    // Log to console but do not fail the request
+                    Console.WriteLine($"Failed to send WhatsApp alert to staff: {staffUser.Phone}. Error: {ex.Message}");
+                }
+            }
 
             return Ok(ApiResponse.SuccessResult("Staff member assigned to appointment successfully."));
         }
@@ -607,9 +673,7 @@ namespace Apenir.API.Controllers
         [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
         public async Task<IActionResult> GetBranchServices(CancellationToken cancellationToken)
         {
-            var currentUserId = _currentUserService.UserId?.ToString();
-            var branch = await _context.Branches.AsNoTracking()
-                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            var branch = await GetCurrentBranchAsync(cancellationToken);
 
             if (branch == null)
             {
@@ -917,6 +981,7 @@ namespace Apenir.API.Controllers
                 
                 user = existingUser;
                 user.Name = request.Name.Trim();
+                user.LabId = ownerBranch.LabId;
                 user.CreatedAt = DateTime.UtcNow;
                 _context.Users.Update(user);
             }
@@ -928,6 +993,7 @@ namespace Apenir.API.Controllers
                     Name = request.Name.Trim(),
                     Email = request.Email.Trim(),
                     Role = UserRole.Staff,
+                    LabId = ownerBranch.LabId,
                     IsActive = true,
                     IsDeleted = false,
                     Status = "notverified",
@@ -955,7 +1021,7 @@ namespace Apenir.API.Controllers
 
             var config = HttpContext.RequestServices.GetService(typeof(Microsoft.Extensions.Configuration.IConfiguration)) as Microsoft.Extensions.Configuration.IConfiguration;
             var frontendUrl = config?["FrontendUrl"] ?? "https://admin.anandhu-kannan.in";
-            var verifyUrl = $"{frontendUrl.TrimEnd('/')}/staff/register?token={token}";
+            var verifyUrl = $"{frontendUrl.TrimEnd('/')}/register/staff?token={token}";
 
             var emailSubject = $"Welcome to Apenir - Complete Registration for {request.Name}";
             var emailBody = $@"
@@ -1687,6 +1753,60 @@ namespace Apenir.API.Controllers
             return Ok(ApiResponse.SuccessResult("Staff member updated successfully."));
         }
 
+        [HttpDelete("staff/{staffId}")]
+        [Authorize]
+        [EndpointSummary("Delete staff member")]
+        [EndpointDescription("Marks a staff member as deleted and removes them from all active assigned cases.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> DeleteStaff([FromRoute] string staffId, CancellationToken cancellationToken)
+        {
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Lab/branch configuration not found for this user."));
+            }
+
+            var staff = await _context.Users
+                .FirstOrDefaultAsync(u => u.Id == staffId && u.Role == UserRole.Staff && u.LabId == branch.LabId && !u.IsDeleted, cancellationToken);
+
+            if (staff == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Staff member not found under this lab."));
+            }
+
+            // Mark staff as deleted
+            staff.IsDeleted = true;
+            staff.IsActive = false;
+            staff.Status = "Deleted";
+            staff.UpdatedAt = DateTime.UtcNow;
+
+            _context.Users.Update(staff);
+
+            // Revert assigned cases/appointments that are not completed/cancelled
+            var activeAppointments = await _context.Appointments
+                .Where(a => a.AssignedStaffId == staffId && a.Status != AppointmentStatus.Completed && a.Status != AppointmentStatus.Cancelled)
+                .ToListAsync(cancellationToken);
+
+            foreach (var app in activeAppointments)
+            {
+                app.AssignedStaffId = null;
+                if (app.Status == AppointmentStatus.Assigned || app.Status == AppointmentStatus.Collected)
+                {
+                    app.Status = AppointmentStatus.Confirmed;
+                }
+                app.UpdatedAt = DateTime.UtcNow;
+                _context.Appointments.Update(app);
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Staff member deleted successfully."));
+        }
+
         [HttpPost("payment-batches/list")]
         [Authorize]
         [EndpointSummary("List payment batches for the lab")]
@@ -1896,9 +2016,9 @@ namespace Apenir.API.Controllers
                 return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this batch."));
             }
 
-            if (batch.Status != PaymentBatchStatus.Initiated)
+            if (batch.Status != PaymentBatchStatus.Paid)
             {
-                return BadRequest(ApiResponse.FailureResult("Only batches with 'Initiated' status can be confirmed."));
+                return BadRequest(ApiResponse.FailureResult("Only batches with 'Paid' status can be confirmed."));
             }
 
             batch.Status = PaymentBatchStatus.Settled;
@@ -1908,7 +2028,289 @@ namespace Apenir.API.Controllers
             _context.PaymentBatches.Update(batch);
             await _context.SaveChangesAsync(cancellationToken);
 
+            // Notify Admin of settlement
+            var adminUser = await _context.Users.AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Role == UserRole.SuperAdmin, cancellationToken);
+
+            if (adminUser != null && !string.IsNullOrEmpty(adminUser.Phone))
+            {
+                var adminMsg = $"✅ *Payout Settlement Confirmed!*\n\n" +
+                               $"Lab: *{branch.Name}*\n" +
+                               $"Batch ID: {batch.Id[..8].ToUpper()}\n" +
+                               $"Amount: ₹{batch.TotalNetPayout}\n" +
+                               $"Status: Settled.";
+
+                try { await _whatsAppService.SendTextMessageAsync(adminUser.Phone, adminMsg); } catch { }
+            }
+
             return Ok(ApiResponse.SuccessResult("Batch payment receipt confirmed successfully."));
+        }
+
+        [HttpGet("unbatched-payments")]
+        [Authorize]
+        [EndpointSummary("Get unbatched payments for the lab")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<LabBatchPaymentItemDto>>))]
+        [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> GetUnbatchedPayments(CancellationToken cancellationToken)
+        {
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch == null)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied. No branch configured for this lab owner."));
+            }
+
+            // Find all appointments for this branch
+            var appointments = await _context.Appointments.AsNoTracking()
+                .Where(a => a.BranchId == branch.Id)
+                .ToListAsync(cancellationToken);
+
+            var appointmentIds = appointments.Select(a => a.Id).ToList();
+            if (appointmentIds.Count == 0)
+            {
+                return Ok(ApiResponse<List<LabBatchPaymentItemDto>>.SuccessResult(new List<LabBatchPaymentItemDto>(), "No unbatched payments found."));
+            }
+
+            // Find all paid payments for these appointments that have no BatchId
+            var payments = await _context.Payments.AsNoTracking()
+                .Where(p => appointmentIds.Contains(p.AppointmentId) && p.Status == PaymentStatus.Paid && p.BatchId == null)
+                .ToListAsync(cancellationToken);
+
+            if (payments.Count == 0)
+            {
+                return Ok(ApiResponse<List<LabBatchPaymentItemDto>>.SuccessResult(new List<LabBatchPaymentItemDto>(), "No unbatched payments found."));
+            }
+
+            // Fetch customer details
+            var customerUserIds = appointments
+                .Select(a => a.CustomerUserId)
+                .Where(id => !string.IsNullOrEmpty(id))
+                .Distinct()
+                .ToList();
+
+            var customerUsers = await _context.Users.AsNoTracking()
+                .Where(u => customerUserIds.Contains(u.Id))
+                .ToListAsync(cancellationToken);
+
+            var appointmentMembers = await _context.AppointmentMembers.AsNoTracking()
+                .Where(am => appointmentIds.Contains(am.AppointmentId))
+                .ToListAsync(cancellationToken);
+
+            var appointmentDict = appointments.ToDictionary(a => a.Id);
+            var customerDict = customerUsers.ToDictionary(u => u.Id);
+            var memberDict = appointmentMembers
+                .GroupBy(am => am.AppointmentId)
+                .ToDictionary(g => g.Key, g => g.First().MemberName);
+
+            var result = payments.Select(p =>
+            {
+                appointmentDict.TryGetValue(p.AppointmentId, out var appt);
+                var customerName = string.Empty;
+                if (appt != null)
+                {
+                    if (!string.IsNullOrEmpty(appt.CustomerUserId))
+                    {
+                        customerDict.TryGetValue(appt.CustomerUserId, out var cust);
+                        customerName = cust?.Name ?? string.Empty;
+                    }
+                    if (string.IsNullOrEmpty(customerName))
+                    {
+                        memberDict.TryGetValue(appt.Id, out var memName);
+                        customerName = memName ?? string.Empty;
+                    }
+                    if (string.IsNullOrEmpty(customerName))
+                    {
+                        customerName = "WhatsApp User";
+                    }
+                }
+
+                return new LabBatchPaymentItemDto
+                {
+                    PaymentId = p.Id,
+                    AppointmentId = p.AppointmentId,
+                    AppointmentNumber = appt?.AppointmentNumber ?? string.Empty,
+                    CustomerName = customerName,
+                    TotalAmount = appt?.TotalAmount ?? 0,
+                    PlatformCommission = appt?.PlatformCommission ?? 0,
+                    LabPayout = appt?.LabPayout ?? 0,
+                    PaidAt = p.PaidAt,
+                    PaymentMethod = p.PaymentMethod
+                };
+            }).ToList();
+
+            return Ok(ApiResponse<List<LabBatchPaymentItemDto>>.SuccessResult(result, "Unbatched payments retrieved successfully."));
+        }
+
+        [HttpPost("payment-batches")]
+        [Authorize]
+        [EndpointSummary("Request a payout batch")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<PaymentBatch>))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> RequestPayout([FromBody] LabCreateBatchRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || request.PaymentIds == null || request.PaymentIds.Count == 0)
+            {
+                return BadRequest(ApiResponse.FailureResult("At least one PaymentId is required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+
+            if (branch == null)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied. No branch configured for this lab owner."));
+            }
+
+            // Verify payments exist, belong to this branch, and are paid + unbatched
+            var appointments = await _context.Appointments.AsNoTracking()
+                .Where(a => a.BranchId == branch.Id)
+                .ToListAsync(cancellationToken);
+
+            var appointmentIds = appointments.Select(a => a.Id).ToList();
+
+            var payments = await _context.Payments
+                .Where(p => request.PaymentIds.Contains(p.Id) && appointmentIds.Contains(p.AppointmentId) && p.Status == PaymentStatus.Paid && p.BatchId == null)
+                .ToListAsync(cancellationToken);
+
+            if (payments.Count != request.PaymentIds.Count)
+            {
+                return BadRequest(ApiResponse.FailureResult("One or more selected payments are invalid, already batched, or not fully paid."));
+            }
+
+            var appDict = appointments.ToDictionary(a => a.Id);
+
+            decimal grossTotal = 0;
+            decimal commTotal = 0;
+            decimal payoutTotal = 0;
+            var paymentIds = new List<string>();
+            var appIds = new List<string>();
+
+            foreach (var p in payments)
+            {
+                appDict.TryGetValue(p.AppointmentId, out var app);
+                if (app != null)
+                {
+                    grossTotal += app.TotalAmount;
+                    commTotal += app.PlatformCommission;
+                    payoutTotal += app.LabPayout;
+                    paymentIds.Add(p.Id);
+                    appIds.Add(app.Id);
+                }
+            }
+
+            var batch = new PaymentBatch
+            {
+                Id = Guid.NewGuid().ToString(),
+                BranchId = branch.Id,
+                PaymentIds = paymentIds,
+                AppointmentIds = appIds,
+                PaymentCount = payments.Count,
+                TotalGrossAmount = grossTotal,
+                TotalPlatformCommission = commTotal,
+                TotalNetPayout = payoutTotal,
+                Status = PaymentBatchStatus.Initiated,
+                CreatedBy = currentUserId,
+                Notes = request.Notes ?? "Payout requested by laboratory owner."
+            };
+
+            _context.PaymentBatches.Add(batch);
+
+            // Link payments to the batch
+            foreach (var p in payments)
+            {
+                p.BatchId = batch.Id;
+                _context.Payments.Update(p);
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            // Send WhatsApp notification to Admin!
+            var adminUser = await _context.Users.AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Role == UserRole.SuperAdmin, cancellationToken);
+            
+            if (adminUser != null && !string.IsNullOrEmpty(adminUser.Phone))
+            {
+                var adminMsg = $"🔔 *New Payout Request!*\n\n" +
+                               $"Lab: *{branch.Name}*\n" +
+                               $"Bookings Count: {batch.PaymentCount}\n" +
+                               $"Amount Owed: ₹{batch.TotalNetPayout}\n" +
+                               $"Please pay manually and approve in the console.";
+                
+                try { await _whatsAppService.SendTextMessageAsync(adminUser.Phone, adminMsg); } catch { }
+            }
+
+            return Ok(ApiResponse<PaymentBatch>.SuccessResult(batch, "Payout batch request submitted successfully."));
+        }
+
+        [HttpPost("payment-batches/{batchId}/reject")]
+        [Authorize]
+        [EndpointSummary("Reject batch payment receipt")]
+        [EndpointDescription("Lab owner rejects the payout receipt, releasing payments back to unbatched status. Status becomes Abandoned.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status403Forbidden, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> RejectBatchReceipt([FromRoute] string batchId, CancellationToken cancellationToken)
+        {
+            var batch = await _context.PaymentBatches
+                .FirstOrDefaultAsync(pb => pb.Id == batchId, cancellationToken);
+
+            if (batch == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Payment batch not found."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.Id == batch.BranchId, cancellationToken);
+
+            if (branch == null || branch.LabUserId != currentUserId)
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, ApiResponse.FailureResult("Access denied to this batch."));
+            }
+
+            if (batch.Status != PaymentBatchStatus.Paid && batch.Status != PaymentBatchStatus.Initiated)
+            {
+                return BadRequest(ApiResponse.FailureResult("Only initiated or paid batches can be rejected."));
+            }
+
+            // Release all payments in this batch
+            var payments = await _context.Payments
+                .Where(p => p.BatchId == batchId)
+                .ToListAsync(cancellationToken);
+
+            foreach (var payment in payments)
+            {
+                payment.BatchId = null;
+                _context.Payments.Update(payment);
+            }
+
+            batch.Status = PaymentBatchStatus.Abandoned;
+            batch.Notes = (batch.Notes ?? "") + " [Rejected by Lab]";
+
+            _context.PaymentBatches.Update(batch);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            // Notify Admin of rejection
+            var adminUser = await _context.Users.AsNoTracking()
+                .FirstOrDefaultAsync(u => u.Role == UserRole.SuperAdmin, cancellationToken);
+
+            if (adminUser != null && !string.IsNullOrEmpty(adminUser.Phone))
+            {
+                var adminMsg = $"❌ *Payout Request Rejected by Lab!*\n\n" +
+                               $"Lab: *{branch.Name}*\n" +
+                               $"Batch ID: {batch.Id[..8].ToUpper()}\n" +
+                               $"Amount Owed: ₹{batch.TotalNetPayout}\n" +
+                               $"The payments have been returned to the unbatched pool.";
+
+                try { await _whatsAppService.SendTextMessageAsync(adminUser.Phone, adminMsg); } catch { }
+            }
+
+            return Ok(ApiResponse.SuccessResult("Payment batch receipt rejected and payments released."));
         }
 
         private async Task GenerateSlotsForNext7Days(string branchId, IApplicationDbContext context, CancellationToken cancellationToken)
@@ -1969,6 +2371,204 @@ namespace Apenir.API.Controllers
                 context.AppointmentSlots.AddRange(newSlots);
                 await context.SaveChangesAsync(cancellationToken);
             }
+        }
+
+        [HttpPost("change-password")]
+        [Authorize]
+        [EndpointSummary("Change lab user password")]
+        public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.OldPassword) || string.IsNullOrWhiteSpace(request.NewPassword))
+            {
+                return BadRequest(ApiResponse.FailureResult("Old password and new password are required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+            if (user == null)
+            {
+                return NotFound(ApiResponse.FailureResult("User not found."));
+            }
+
+            if (!_passwordHasher.Verify(request.OldPassword, user.PasswordHash ?? string.Empty))
+            {
+                return BadRequest(ApiResponse.FailureResult("Incorrect old password."));
+            }
+
+            user.PasswordHash = _passwordHasher.Hash(request.NewPassword);
+            user.UpdatedAt = DateTime.UtcNow;
+
+            _context.Users.Update(user);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Password changed successfully."));
+        }
+
+        [HttpPost("change-email/request")]
+        [Authorize]
+        [EndpointSummary("Request email change with pre-verification")]
+        public async Task<IActionResult> RequestChangeEmail([FromBody] ChangeEmailRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.NewEmail))
+            {
+                return BadRequest(ApiResponse.FailureResult("New email address is required."));
+            }
+
+            var targetEmail = request.NewEmail.Trim().ToLower();
+
+            // Check if email already in use
+            var emailInUse = await _context.Users.AnyAsync(u => u.Email != null && u.Email.ToLower() == targetEmail && !u.IsDeleted, cancellationToken);
+            if (emailInUse)
+            {
+                return BadRequest(ApiResponse.FailureResult("Email is already in use by another account."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+            if (user == null)
+            {
+                return NotFound(ApiResponse.FailureResult("User not found."));
+            }
+
+            var random = new Random();
+            string verificationCode = random.Next(100000, 999999).ToString();
+
+            user.PendingNewEmail = targetEmail;
+            user.EmailVerificationToken = verificationCode;
+            user.EmailVerificationTokenExpiry = DateTime.UtcNow.AddMinutes(15);
+
+            _context.Users.Update(user);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            // Send verification email
+            var emailSubject = "Apenir Email Verification Code";
+            var emailBody = $"Your code to change your Apenir email to {targetEmail} is: <strong>{verificationCode}</strong>. Valid for 15 minutes.";
+            await _emailService.SendEmailAsync(targetEmail, emailSubject, emailBody);
+
+            return Ok(ApiResponse.SuccessResult("Verification code sent to the new email address successfully."));
+        }
+
+        [HttpPost("change-email/confirm")]
+        [Authorize]
+        [EndpointSummary("Confirm email change")]
+        public async Task<IActionResult> ConfirmChangeEmail([FromBody] ConfirmChangeEmailRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Code))
+            {
+                return BadRequest(ApiResponse.FailureResult("Verification code is required."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var user = await _context.Users.FirstOrDefaultAsync(u => u.Id == currentUserId, cancellationToken);
+            if (user == null)
+            {
+                return NotFound(ApiResponse.FailureResult("User not found."));
+            }
+
+            if (user.EmailVerificationToken != request.Code.Trim() || user.EmailVerificationTokenExpiry < DateTime.UtcNow)
+            {
+                return BadRequest(ApiResponse.FailureResult("Invalid or expired verification code."));
+            }
+
+            if (string.IsNullOrWhiteSpace(user.PendingNewEmail))
+            {
+                return BadRequest(ApiResponse.FailureResult("No pending email change request found."));
+            }
+
+            user.Email = user.PendingNewEmail;
+            user.PendingNewEmail = null;
+            user.EmailVerificationToken = null;
+            user.EmailVerificationTokenExpiry = null;
+            user.UpdatedAt = DateTime.UtcNow;
+
+            _context.Users.Update(user);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("Email updated successfully."));
+        }
+
+        [HttpPost("appointments/upload-report")]
+        [Authorize]
+        [Consumes("multipart/form-data")]
+        [EndpointSummary("Upload diagnostic test report PDF")]
+        public async Task<IActionResult> UploadReport(
+            [FromForm] string? appointmentId,
+            [FromForm] string? memberUniqueNumber,
+            [FromForm] IFormFile file,
+            CancellationToken cancellationToken)
+        {
+            if (file == null || file.Length == 0)
+            {
+                return BadRequest(ApiResponse.FailureResult("PDF report file is required."));
+            }
+
+            if (!file.ContentType.Contains("pdf", StringComparison.OrdinalIgnoreCase))
+            {
+                return BadRequest(ApiResponse.FailureResult("Only PDF files are allowed."));
+            }
+
+            var currentUserId = _currentUserService.UserId?.ToString();
+            var branch = await _context.Branches.FirstOrDefaultAsync(b => b.LabUserId == currentUserId, cancellationToken);
+            if (branch == null)
+            {
+                return BadRequest(ApiResponse.FailureResult("Branch not found for current user."));
+            }
+
+            Appointment? appointment = null;
+
+            if (!string.IsNullOrWhiteSpace(appointmentId))
+            {
+                appointment = await _context.Appointments.FirstOrDefaultAsync(a => a.Id == appointmentId && a.BranchId == branch.Id, cancellationToken);
+            }
+            else if (!string.IsNullOrWhiteSpace(memberUniqueNumber))
+            {
+                var member = await _context.AppointmentMembers.FirstOrDefaultAsync(m => m.UniqueNumber == memberUniqueNumber.Trim(), cancellationToken);
+                if (member != null)
+                {
+                    appointment = await _context.Appointments.FirstOrDefaultAsync(a => a.Id == member.AppointmentId && a.BranchId == branch.Id, cancellationToken);
+                }
+            }
+
+            if (appointment == null)
+            {
+                return NotFound(ApiResponse.FailureResult("Appointment not found. Make sure the ID or member unique ID is correct and belongs to your branch."));
+            }
+
+            // Save file
+            var reportsFolder = Path.Combine(Directory.GetCurrentDirectory(), "wwwroot", "reports");
+            if (!Directory.Exists(reportsFolder))
+            {
+                Directory.CreateDirectory(reportsFolder);
+            }
+
+            var fileName = $"{appointment.AppointmentNumber}_{Guid.NewGuid().ToString("N").Substring(0, 8)}.pdf";
+            var filePath = Path.Combine(reportsFolder, fileName);
+
+            using (var stream = new FileStream(filePath, FileMode.Create))
+            {
+                await file.CopyToAsync(stream, cancellationToken);
+            }
+
+            var baseUrl = $"{Request.Scheme}://{Request.Host}{Request.PathBase}";
+            var reportUrl = $"{baseUrl}/reports/{fileName}";
+
+            appointment.ReportPdfPath = reportUrl;
+            appointment.Status = AppointmentStatus.Completed; // Mark completed when report is uploaded
+            appointment.UpdatedAt = DateTime.UtcNow;
+
+            _context.Appointments.Update(appointment);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            // Send report PDF via WhatsApp to customer
+            var customer = await _context.Users.FirstOrDefaultAsync(u => u.Id == appointment.CustomerUserId, cancellationToken);
+            if (customer != null && !string.IsNullOrEmpty(customer.Phone))
+            {
+                var caption = $"🔬 *Your Lab Reports are Ready!*\n\nHello {customer.Name ?? "Customer"}, your diagnostic reports for booking *{appointment.AppointmentNumber}* have been uploaded. You can download the PDF here.";
+                await _whatsAppService.SendTextMessageAsync(customer.Phone, caption);
+                await _whatsAppService.SendDocumentMessageAsync(customer.Phone, reportUrl, $"{appointment.AppointmentNumber}_Report.pdf");
+            }
+
+            return Ok(ApiResponse<string>.SuccessResult(reportUrl, "Report PDF uploaded and sent to customer successfully."));
         }
     }
 
@@ -2129,6 +2729,7 @@ namespace Apenir.API.Controllers
     public class AssignStaffRequest
     {
         public string StaffId { get; set; } = string.Empty;
+        public string? BranchId { get; set; }
     }
 
     public class BranchServiceDto
@@ -2227,5 +2828,28 @@ namespace Apenir.API.Controllers
         public decimal Latitude { get; set; }
         public decimal Longitude { get; set; }
         public double ServiceRangeKm { get; set; }
+        public decimal? PerKmCharge { get; set; }
+    }
+
+    public class ChangePasswordRequest
+    {
+        public string OldPassword { get; set; } = string.Empty;
+        public string NewPassword { get; set; } = string.Empty;
+    }
+
+    public class ChangeEmailRequest
+    {
+        public string NewEmail { get; set; } = string.Empty;
+    }
+
+    public class ConfirmChangeEmailRequest
+    {
+        public string Code { get; set; } = string.Empty;
+    }
+
+    public class LabCreateBatchRequest
+    {
+        public List<string> PaymentIds { get; set; } = new();
+        public string? Notes { get; set; }
     }
 }

@@ -5,6 +5,7 @@ public enum WhatsAppState
     Start,
     AwaitingLocation,
     ChoosingTest,
+    AwaitingItemQuantity,
     AwaitingAddressDetails,
     ChoosingLab,
     ChoosingSlot,

@@ -21,6 +21,7 @@ namespace Apenir.Application.DTOs
         public string Email { get; set; } = string.Empty;
         public string? BranchId { get; set; }
         public string? LabId { get; set; }
+        public string Role { get; set; } = string.Empty;
     }
 
     public class RefreshTokenRequest

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using Apenir.Core.Enums;
 
 namespace Apenir.Core.Entities;
@@ -13,6 +14,7 @@ public class WhatsAppSession
     public string? SelectedLabName { get; set; }
     public string? SelectedSlot { get; set; }
     public int MemberCount { get; set; }
+    public List<string> CartItemIds { get; set; } = new();
     public bool LocationShared { get; set; }
     public string? Passcode { get; set; }
     public double? Latitude { get; set; }

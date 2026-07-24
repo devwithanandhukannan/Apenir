@@ -84,8 +84,9 @@ namespace Apenir.Application.Features.AdminAuth.Commands
                 AccessToken = accessToken,
                 RefreshToken = refreshTokenString,
                 ExpiresIn = _jwtSettings.AccessTokenExpiryMinutes * 60,
-                AdminId = admin.Id,
-                Email = admin.Email ?? string.Empty
+                AdminId = admin.Id.ToString(),
+                Email = admin.Email ?? string.Empty,
+                Role = "admin"
             };
 
             return ApiResponse<LoginResponse>.SuccessResult(response, "Login successful");

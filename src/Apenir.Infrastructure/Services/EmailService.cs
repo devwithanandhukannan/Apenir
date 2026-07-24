@@ -11,18 +11,20 @@ namespace Apenir.Infrastructure.Services
 {
     public class EmailService : IEmailService
     {
-        private readonly SmtpSettings _smtpSettings;
+        private readonly ISettingsService _settingsService;
         private readonly ILogger<EmailService> _logger;
 
-        public EmailService(IOptions<SmtpSettings> smtpSettings, ILogger<EmailService> logger)
+        public EmailService(ISettingsService settingsService, ILogger<EmailService> logger)
         {
-            _smtpSettings = smtpSettings.Value;
+            _settingsService = settingsService;
             _logger = logger;
         }
 
         public async Task SendEmailAsync(string toEmail, string subject, string body)
         {
-            if (string.IsNullOrWhiteSpace(_smtpSettings.Host) || string.IsNullOrWhiteSpace(_smtpSettings.Username))
+            var smtpSettings = await _settingsService.GetSmtpSettingsAsync();
+
+            if (string.IsNullOrWhiteSpace(smtpSettings.Host) || string.IsNullOrWhiteSpace(smtpSettings.Username))
             {
                 _logger.LogWarning("[MOCK EMAIL SENDER - SmtpSettings NOT CONFIGURED]");
                 _logger.LogWarning("To: {ToEmail}", toEmail);
@@ -33,15 +35,15 @@ namespace Apenir.Infrastructure.Services
 
             try
             {
-                using (var client = new SmtpClient(_smtpSettings.Host, _smtpSettings.Port))
+                using (var client = new SmtpClient(smtpSettings.Host, smtpSettings.Port))
                 {
                     client.UseDefaultCredentials = false;
-                    client.Credentials = new NetworkCredential(_smtpSettings.Username, _smtpSettings.Password);
-                    client.EnableSsl = _smtpSettings.EnableSsl;
+                    client.Credentials = new NetworkCredential(smtpSettings.Username, smtpSettings.Password);
+                    client.EnableSsl = smtpSettings.EnableSsl;
 
                     var mailMessage = new MailMessage
                     {
-                        From = new MailAddress(_smtpSettings.FromEmail),
+                        From = new MailAddress(smtpSettings.FromEmail),
                         Subject = subject,
                         Body = body,
                         IsBodyHtml = true

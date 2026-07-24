@@ -72,7 +72,7 @@ namespace Apenir.API.Controllers
 
             if (result.Success && result.Data != null)
             {
-                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/api/auth/refresh");
+                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/");
                 result.Data = result.Data with { RefreshToken = string.Empty }; // Hide from response body
             }
 
@@ -110,7 +110,7 @@ namespace Apenir.API.Controllers
 
             if (result.Success && result.Data != null)
             {
-                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/api/auth/refresh");
+                CookieHelper.SetRefreshTokenCookie(HttpContext, result.Data.RefreshToken, "/");
                 result.Data.RefreshToken = string.Empty;
                 return Ok(ApiResponse<AuthResponse>.SuccessResult(new AuthResponse(result.Data.AccessToken, string.Empty, string.Empty, string.Empty))); // Ideally we'd have a unified response type
             }
@@ -138,7 +138,7 @@ namespace Apenir.API.Controllers
             var result = await _mediator.Send(new CommonLogoutCommand(refreshToken, HttpContext.Connection.RemoteIpAddress?.ToString()), cancellationToken);
             if (result.Success)
             {
-                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/api/auth/refresh");
+                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/");
             }
             return Ok(result);
         }
@@ -154,9 +154,41 @@ namespace Apenir.API.Controllers
             var result = await _mediator.Send(new CommonLogoutAllDevicesCommand(), cancellationToken);
             if (result.Success)
             {
-                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/api/auth/refresh");
+                CookieHelper.DeleteRefreshTokenCookie(HttpContext, "/");
             }
             return Ok(result);
+        }
+
+        [HttpPost("otp/verify-only")]
+        [EndpointSummary("Verify OTP only (no login)")]
+        [EndpointDescription("Verifies the OTP passcode for a given phone number without logging in or creating a user.")]
+        [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
+        [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
+        public async Task<IActionResult> VerifyOtpOnly([FromBody] VerifyOtpRequest request, CancellationToken cancellationToken)
+        {
+            if (request == null || string.IsNullOrWhiteSpace(request.Phone) || string.IsNullOrWhiteSpace(request.Otp))
+            {
+                return BadRequest(ApiResponse.FailureResult("Phone number and OTP passcode are required."));
+            }
+
+            using var sha256 = System.Security.Cryptography.SHA256.Create();
+            byte[] hashBytes = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(request.Otp));
+            string hashedInput = Convert.ToHexString(hashBytes).ToLower();
+
+            var otpRecord = await _context.OtpCodes
+                .Where(o => o.Phone == request.Phone && o.ExpiresAt > DateTime.UtcNow)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (otpRecord == null || otpRecord.HashCode != hashedInput)
+            {
+                return BadRequest(ApiResponse.FailureResult("OTP_INVALID_OR_EXPIRED"));
+            }
+
+            // Remove it so it cannot be used again
+            _context.OtpCodes.Remove(otpRecord);
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return Ok(ApiResponse.SuccessResult("OTP_VERIFIED"));
         }
     }
 }

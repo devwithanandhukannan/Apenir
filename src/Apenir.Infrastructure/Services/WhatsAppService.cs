@@ -7,16 +7,18 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
 using Apenir.Core.Interfaces;
 
+using Apenir.Application.Common.Interfaces;
+
 namespace Apenir.Infrastructure.Services;
 
 public class WhatsAppService : IWhatsAppService
 {
-    private readonly IConfiguration _configuration;
+    private readonly ISettingsService _settingsService;
     private readonly IHttpClientFactory _httpClientFactory;
 
-    public WhatsAppService(IConfiguration configuration, IHttpClientFactory httpClientFactory)
+    public WhatsAppService(ISettingsService settingsService, IHttpClientFactory httpClientFactory)
     {
-        _configuration = configuration;
+        _settingsService = settingsService;
         _httpClientFactory = httpClientFactory;
     }
 
@@ -24,9 +26,9 @@ public class WhatsAppService : IWhatsAppService
     {
         try
         {
-            var accessToken = _configuration["WhatsApp:AccessToken"];
-            var phoneNumberId = _configuration["WhatsApp:PhoneNumberId"];
-            var apiVersion = _configuration["WhatsApp:ApiVersion"] ?? "v25.0";
+            var accessToken = await _settingsService.GetWhatsAppAccessTokenAsync();
+            var phoneNumberId = await _settingsService.GetWhatsAppPhoneNumberIdAsync();
+            var apiVersion = await _settingsService.GetWhatsAppApiVersionAsync() ?? "v25.0";
 
             if (string.IsNullOrEmpty(accessToken) || string.IsNullOrEmpty(phoneNumberId))
             {
@@ -35,10 +37,13 @@ public class WhatsAppService : IWhatsAppService
                 return;
             }
 
+            // Sanitize phone number (remove any non-digit characters like +, spaces, dashes, etc.)
+            var sanitizedPhone = new string(toPhone.Where(char.IsDigit).ToArray());
+
             var payload = new
             {
                 messaging_product = "whatsapp",
-                to = toPhone,
+                to = sanitizedPhone,
                 type = "text",
                 text = new { body = message }
             };
@@ -55,10 +60,16 @@ public class WhatsAppService : IWhatsAppService
             var response = await client.PostAsync(url, content);
             var responseBody = await response.Content.ReadAsStringAsync();
             Console.WriteLine($"[META WHATSAPP SERVICE] 📬 Status: {response.StatusCode} | Body: {responseBody}");
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new Exception($"Meta API error (Status {response.StatusCode}): {responseBody}");
+            }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[META WHATSAPP SERVICE] Exception: {ex.Message}");
+            throw; // Re-throw to propagate exception for settings test trigger and logs
         }
     }
 
@@ -66,9 +77,9 @@ public class WhatsAppService : IWhatsAppService
     {
         try
         {
-            var accessToken = _configuration["WhatsApp:AccessToken"];
-            var phoneNumberId = _configuration["WhatsApp:PhoneNumberId"];
-            var apiVersion = _configuration["WhatsApp:ApiVersion"] ?? "v25.0";
+            var accessToken = await _settingsService.GetWhatsAppAccessTokenAsync();
+            var phoneNumberId = await _settingsService.GetWhatsAppPhoneNumberIdAsync();
+            var apiVersion = await _settingsService.GetWhatsAppApiVersionAsync() ?? "v25.0";
 
             if (string.IsNullOrEmpty(accessToken) || string.IsNullOrEmpty(phoneNumberId))
             {
@@ -77,11 +88,14 @@ public class WhatsAppService : IWhatsAppService
                 return;
             }
 
+            // Sanitize phone number (remove any non-digit characters like +, spaces, dashes, etc.)
+            var sanitizedPhone = new string(toPhone.Where(char.IsDigit).ToArray());
+
             var payload = new
             {
                 messaging_product = "whatsapp",
                 recipient_type = "individual",
-                to = toPhone,
+                to = sanitizedPhone,
                 type = "document",
                 document = new
                 {
@@ -102,10 +116,16 @@ public class WhatsAppService : IWhatsAppService
             var response = await client.PostAsync(targetUrl, content);
             var responseBody = await response.Content.ReadAsStringAsync();
             Console.WriteLine($"[META WHATSAPP SERVICE] 📬 Status: {response.StatusCode} | Body: {responseBody}");
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new Exception($"Meta API error (Status {response.StatusCode}): {responseBody}");
+            }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[META WHATSAPP SERVICE] Exception: {ex.Message}");
+            throw; // Re-throw to propagate exception for settings test trigger and logs
         }
     }
 

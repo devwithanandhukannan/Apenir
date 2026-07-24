@@ -30,6 +30,18 @@ public class PackageController : ControllerBase
         _currentUserService = currentUserService;
     }
 
+    [HttpGet]
+    [EndpointSummary("Get all active master packages (for customers)")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<Package>>))]
+    public async Task<IActionResult> GetActivePackages(CancellationToken cancellationToken)
+    {
+        var packages = await _context.Packages
+            .Where(p => p.CreatedByBranchId == null && p.IsActive)
+            .ToListAsync(cancellationToken);
+
+        return Ok(ApiResponse<List<Package>>.SuccessResult(packages, "PACKAGES_RETRIEVED"));
+    }
+
     [HttpPost]
     [AdminOnly]
     [EndpointSummary("Create a new master package (Admin only)")]
@@ -74,6 +86,7 @@ public class PackageController : ControllerBase
             Name = request.Name.Trim(),
             Description = request.Description?.Trim(),
             BasePrice = request.BasePrice,
+            OriginalPrice = request.OriginalPrice,
             PlatformCommissionPct = request.PlatformCommissionPct,
             IsActive = true,
             CreatedByBranchId = null,
@@ -89,30 +102,49 @@ public class PackageController : ControllerBase
 
     [HttpGet("admin")]
     [AdminOnly]
-    [EndpointSummary("Get all master packages (Admin only)")]
-    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<Package>>))]
+    [EndpointSummary("Get all packages including lab custom packages (Admin only)")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<AdminPackageDto>>))]
     public async Task<IActionResult> GetAdminPackages(CancellationToken cancellationToken)
     {
-        var packages = await _context.Packages
-            .Where(p => p.CreatedByBranchId == null)
+        var packages = await _context.Packages.ToListAsync(cancellationToken);
+        var branchIds = packages.Where(p => p.CreatedByBranchId != null).Select(p => p.CreatedByBranchId).Distinct().ToList();
+        var branches = await _context.Branches.AsNoTracking()
+            .Where(b => branchIds.Contains(b.Id))
             .ToListAsync(cancellationToken);
 
-        return Ok(ApiResponse<List<Package>>.SuccessResult(packages, "PACKAGES_RETRIEVED"));
+        var result = packages.Select(p => new AdminPackageDto
+        {
+            Id = p.Id,
+            Name = p.Name,
+            Description = p.Description,
+            BasePrice = p.BasePrice,
+            OriginalPrice = p.OriginalPrice,
+            PlatformCommissionPct = p.PlatformCommissionPct,
+            IsActive = p.IsActive,
+            CreatedByBranchId = p.CreatedByBranchId,
+            CreatedByBranchName = p.CreatedByBranchId != null 
+                ? branches.FirstOrDefault(b => b.Id == p.CreatedByBranchId)?.Name 
+                : null,
+            ServiceIds = p.ServiceIds,
+            CreatedAt = p.CreatedAt
+        }).ToList();
+
+        return Ok(ApiResponse<List<AdminPackageDto>>.SuccessResult(result, "PACKAGES_RETRIEVED"));
     }
 
     [HttpGet("admin/{id}")]
     [AdminOnly]
-    [EndpointSummary("Get a specific master package (Admin only)")]
+    [EndpointSummary("Get a specific package by ID (Admin only)")]
     [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<Package>))]
     [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
     public async Task<IActionResult> GetAdminPackage([FromRoute] string id, CancellationToken cancellationToken)
     {
         var package = await _context.Packages
-            .FirstOrDefaultAsync(p => p.Id == id && p.CreatedByBranchId == null, cancellationToken);
+            .FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
 
         if (package == null)
         {
-            return NotFound(ApiResponse.FailureResult("Master package not found."));
+            return NotFound(ApiResponse.FailureResult("Package not found."));
         }
 
         return Ok(ApiResponse<Package>.SuccessResult(package, "PACKAGE_RETRIEVED"));
@@ -120,7 +152,7 @@ public class PackageController : ControllerBase
 
     [HttpPut("admin/{id}")]
     [AdminOnly]
-    [EndpointSummary("Update a master package (Admin only)")]
+    [EndpointSummary("Update a master or lab custom package (Admin only)")]
     [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<Package>))]
     [ProducesResponseType(StatusCodes.Status400BadRequest, Type = typeof(ApiResponse))]
     [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
@@ -129,52 +161,85 @@ public class PackageController : ControllerBase
         [FromBody] CreatePackageRequest request,
         CancellationToken cancellationToken)
     {
-        if (request == null || string.IsNullOrWhiteSpace(request.Name))
+        if (request == null)
         {
-            return BadRequest(ApiResponse.FailureResult("Package name is required."));
-        }
-
-        if (request.BasePrice < 0)
-        {
-            return BadRequest(ApiResponse.FailureResult("Base price cannot be negative."));
-        }
-
-        if (request.PlatformCommissionPct < 0 || request.PlatformCommissionPct > 100)
-        {
-            return BadRequest(ApiResponse.FailureResult("Platform commission percentage must be between 0 and 100."));
-        }
-
-        if (request.ServiceIds == null || !request.ServiceIds.Any())
-        {
-            return BadRequest(ApiResponse.FailureResult("A package must contain at least one service."));
+            return BadRequest(ApiResponse.FailureResult("Request body is required."));
         }
 
         var package = await _context.Packages
-            .FirstOrDefaultAsync(p => p.Id == id && p.CreatedByBranchId == null, cancellationToken);
+            .FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
 
         if (package == null)
         {
-            return NotFound(ApiResponse.FailureResult("Master package not found."));
+            return NotFound(ApiResponse.FailureResult("Package not found."));
         }
 
-        // Validate that all services exist and are master services (CreatedByBranchId == null)
-        var services = await _context.Services
-            .Where(s => request.ServiceIds.Contains(s.Id) && s.CreatedByBranchId == null && s.IsActive)
-            .Select(s => s.Id)
-            .ToListAsync(cancellationToken);
-
-        if (services.Count != request.ServiceIds.Distinct().Count())
+        if (!string.IsNullOrEmpty(request.Name))
         {
-            return BadRequest(ApiResponse.FailureResult("Some service IDs are invalid, inactive, or are not master services."));
+            if (request.BasePrice < 0)
+            {
+                return BadRequest(ApiResponse.FailureResult("Base price cannot be negative."));
+            }
+
+            if (request.PlatformCommissionPct < 0 || request.PlatformCommissionPct > 100)
+            {
+                return BadRequest(ApiResponse.FailureResult("Platform commission percentage must be between 0 and 100."));
+            }
+
+            if (request.ServiceIds == null || !request.ServiceIds.Any())
+            {
+                return BadRequest(ApiResponse.FailureResult("A package must contain at least one service."));
+            }
+
+            // Validate that all services exist and are available to the scope of this package
+            var services = await _context.Services
+                .Where(s => request.ServiceIds.Contains(s.Id) && 
+                            (s.CreatedByBranchId == null || s.CreatedByBranchId == package.CreatedByBranchId) && 
+                            s.IsActive)
+                .Select(s => s.Id)
+                .ToListAsync(cancellationToken);
+
+            if (services.Count != request.ServiceIds.Distinct().Count())
+            {
+                return BadRequest(ApiResponse.FailureResult("Some service IDs are invalid, inactive, or are not available for this package."));
+            }
+
+            package.Name = request.Name.Trim();
+            package.Description = request.Description?.Trim();
+            package.BasePrice = request.BasePrice;
+            package.OriginalPrice = request.OriginalPrice;
+            package.PlatformCommissionPct = request.PlatformCommissionPct;
+            package.ServiceIds = request.ServiceIds.Distinct().ToList();
+
+            // Also update matching BranchPackage overrides if this is a custom lab package
+            if (package.CreatedByBranchId != null)
+            {
+                var bp = await _context.BranchPackages
+                    .FirstOrDefaultAsync(link => link.BranchId == package.CreatedByBranchId && link.PackageId == id, cancellationToken);
+                if (bp != null)
+                {
+                    bp.CustomPrice = request.BasePrice;
+                    bp.CustomOriginalPrice = request.OriginalPrice;
+                    _context.BranchPackages.Update(bp);
+                }
+            }
         }
 
-        package.Name = request.Name.Trim();
-        package.Description = request.Description?.Trim();
-        package.BasePrice = request.BasePrice;
-        package.PlatformCommissionPct = request.PlatformCommissionPct;
-        package.ServiceIds = request.ServiceIds.Distinct().ToList();
+        if (request.IsActive.HasValue)
+        {
+            package.IsActive = request.IsActive.Value;
+            if (package.CreatedByBranchId != null)
+            {
+                var bp = await _context.BranchPackages
+                    .FirstOrDefaultAsync(link => link.BranchId == package.CreatedByBranchId && link.PackageId == id, cancellationToken);
+                if (bp != null)
+                {
+                    bp.IsActive = request.IsActive.Value;
+                    _context.BranchPackages.Update(bp);
+                }
+            }
+        }
 
-        _context.Packages.Update(package);
         await _context.SaveChangesAsync(cancellationToken);
 
         return Ok(ApiResponse<Package>.SuccessResult(package, "PACKAGE_UPDATED"));
@@ -182,24 +247,51 @@ public class PackageController : ControllerBase
 
     [HttpDelete("admin/{id}")]
     [AdminOnly]
-    [EndpointSummary("Deactivate a master package (Admin only)")]
+    [EndpointSummary("Deactivate any master or lab custom package (Admin only)")]
     [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse))]
     [ProducesResponseType(StatusCodes.Status404NotFound, Type = typeof(ApiResponse))]
     public async Task<IActionResult> DeactivateAdminPackage([FromRoute] string id, CancellationToken cancellationToken)
     {
         var package = await _context.Packages
-            .FirstOrDefaultAsync(p => p.Id == id && p.CreatedByBranchId == null, cancellationToken);
+            .FirstOrDefaultAsync(p => p.Id == id, cancellationToken);
 
         if (package == null)
         {
-            return NotFound(ApiResponse.FailureResult("Master package not found."));
+            return NotFound(ApiResponse.FailureResult("Package not found."));
         }
 
         package.IsActive = false;
         _context.Packages.Update(package);
+
+        if (package.CreatedByBranchId != null)
+        {
+            var bp = await _context.BranchPackages
+                .FirstOrDefaultAsync(link => link.BranchId == package.CreatedByBranchId && link.PackageId == id, cancellationToken);
+            if (bp != null)
+            {
+                bp.IsActive = false;
+                _context.BranchPackages.Update(bp);
+            }
+        }
+
         await _context.SaveChangesAsync(cancellationToken);
 
-        return Ok(ApiResponse.SuccessResult("Master package deactivated successfully."));
+        return Ok(ApiResponse.SuccessResult("Package deactivated successfully."));
+    }
+
+    public class AdminPackageDto
+    {
+        public string Id { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
+        public string? Description { get; set; }
+        public decimal BasePrice { get; set; }
+        public decimal? OriginalPrice { get; set; }
+        public decimal PlatformCommissionPct { get; set; }
+        public bool IsActive { get; set; }
+        public string? CreatedByBranchId { get; set; }
+        public string? CreatedByBranchName { get; set; }
+        public List<string> ServiceIds { get; set; } = new();
+        public DateTime CreatedAt { get; set; }
     }
 
     [HttpGet("lab")]
@@ -268,7 +360,9 @@ public class PackageController : ControllerBase
                 Name = p.Name,
                 Description = p.Description ?? string.Empty,
                 BasePrice = p.BasePrice,
+                OriginalPrice = p.OriginalPrice,
                 CustomPrice = bp?.CustomPrice,
+                CustomOriginalPrice = bp?.CustomOriginalPrice,
                 PlatformCommissionPct = p.PlatformCommissionPct,
                 CustomCommissionPct = bp?.CustomCommissionPct,
                 IsActive = isActive,
@@ -403,6 +497,7 @@ public class PackageController : ControllerBase
                 BranchId = branch.Id,
                 PackageId = packageId,
                 CustomPrice = request.CustomPrice,
+                CustomOriginalPrice = request.CustomOriginalPrice,
                 CustomCommissionPct = null,
                 IsActive = true
             };
@@ -411,6 +506,7 @@ public class PackageController : ControllerBase
         else
         {
             bp.CustomPrice = request.CustomPrice;
+            bp.CustomOriginalPrice = request.CustomOriginalPrice;
             _context.BranchPackages.Update(bp);
         }
 
@@ -467,6 +563,7 @@ public class PackageController : ControllerBase
             Name = request.Name.Trim(),
             Description = request.Description?.Trim(),
             BasePrice = request.CustomPrice,
+            OriginalPrice = request.CustomOriginalPrice,
             PlatformCommissionPct = 15.00m,
             IsActive = true,
             CreatedByBranchId = branch.Id,
@@ -480,6 +577,7 @@ public class PackageController : ControllerBase
             BranchId = branch.Id,
             PackageId = package.Id,
             CustomPrice = request.CustomPrice,
+            CustomOriginalPrice = request.CustomOriginalPrice,
             CustomCommissionPct = null,
             IsActive = true
         };
@@ -545,6 +643,7 @@ public class PackageController : ControllerBase
         package.Name = request.Name.Trim();
         package.Description = request.Description?.Trim();
         package.BasePrice = request.CustomPrice;
+        package.OriginalPrice = request.CustomOriginalPrice;
         package.ServiceIds = request.ServiceIds.Distinct().ToList();
 
         _context.Packages.Update(package);
@@ -555,6 +654,7 @@ public class PackageController : ControllerBase
         if (bp != null)
         {
             bp.CustomPrice = request.CustomPrice;
+            bp.CustomOriginalPrice = request.CustomOriginalPrice;
             _context.BranchPackages.Update(bp);
         }
 
@@ -623,21 +723,25 @@ public class PackageController : ControllerBase
 }
 
 public record CreatePackageRequest(
-    string Name,
+    string? Name,
     string? Description,
     decimal BasePrice,
+    decimal? OriginalPrice,
     decimal PlatformCommissionPct,
-    List<string> ServiceIds
+    List<string>? ServiceIds,
+    bool? IsActive = null
 );
 
 public record UpdatePackageOverrideRequest(
-    decimal CustomPrice
+    decimal CustomPrice,
+    decimal? CustomOriginalPrice
 );
 
 public record CreateLabPackageRequest(
     string Name,
     string? Description,
     decimal CustomPrice,
+    decimal? CustomOriginalPrice,
     List<string> ServiceIds
 );
 
@@ -647,7 +751,9 @@ public class BranchPackageDto
     public string Name { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public decimal BasePrice { get; set; }
+    public decimal? OriginalPrice { get; set; }
     public decimal? CustomPrice { get; set; }
+    public decimal? CustomOriginalPrice { get; set; }
     public decimal PlatformCommissionPct { get; set; }
     public decimal? CustomCommissionPct { get; set; }
     public bool IsActive { get; set; }

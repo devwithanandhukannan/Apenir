@@ -166,6 +166,22 @@ public class ServiceController : ControllerBase
 
         return Ok(ApiResponse<Service>.SuccessResult(service, "SERVICE_UPDATED"));
     }
+
+    /// <summary>POST /api/services/{id}/toggle — toggle service active status (admin only)</summary>
+    [HttpPost("{id}/toggle")]
+    [AdminOnly]
+    public async Task<IActionResult> ToggleService([FromRoute] string id, CancellationToken cancellationToken)
+    {
+        var service = await _context.Services.FirstOrDefaultAsync(s => s.Id == id, cancellationToken);
+        if (service == null)
+            return NotFound(ApiResponse.FailureResult("Service not found."));
+
+        service.IsActive = !service.IsActive;
+        _context.Services.Update(service);
+        await _context.SaveChangesAsync(cancellationToken);
+
+        return Ok(ApiResponse<Service>.SuccessResult(service, $"SERVICE_TOGGLED_TO_{service.IsActive.ToString().ToUpper()}"));
+    }
 }
 
 // ── DTOs ─────────────────────────────────────────────────────────
