@@ -113,7 +113,7 @@ app.UseAuthentication();
 app.UseAuthorization();
 
 // Fallback Status Route
-app.MapGet("/", () => Results.Ok(new { Status = "Apenir API is running", Environment = app.Environment.EnvironmentName }));
+app.MapGet("/", () => Results.Ok(new { Status = "Apenir API is running in AWS", Environment = app.Environment.EnvironmentName }));
 
 app.MapControllers();
 
