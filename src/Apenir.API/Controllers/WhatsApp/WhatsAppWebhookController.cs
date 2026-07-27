@@ -106,7 +106,7 @@ namespace Apenir.API.Controllers
 
             if (mode == "subscribe" && token == verifyToken)
             {
-                Console.WriteLine("✅ Verification Successful");
+                Console.WriteLine("Verification Successful");
                 return Content(challenge, "text/plain");
             }
 
