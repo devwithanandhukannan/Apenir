@@ -23,11 +23,38 @@ public class ServiceController : ControllerBase
     }
 
     [HttpGet]
-    public async Task<IActionResult> GetServices()
+    [AllowAnonymous]
+    public async Task<IActionResult> GetServices(
+        [FromQuery] string? filter = null,
+        [FromQuery] string? category = null,
+        [FromQuery] string? name = null,
+        [FromQuery] string? search = null)
     {
-        var services = await _context.Services
-            .Where(s => s.IsActive)
-            .ToListAsync();
+        var query = _context.Services.AsNoTracking().Where(s => s.IsActive);
+
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            var categoryTerm = category.Trim().ToLower();
+            query = query.Where(s => s.Category != null && s.Category.ToLower().Contains(categoryTerm));
+        }
+
+        if (!string.IsNullOrWhiteSpace(name))
+        {
+            var nameTerm = name.Trim().ToLower();
+            query = query.Where(s => s.Name != null && s.Name.ToLower().Contains(nameTerm));
+        }
+
+        var searchTerm = !string.IsNullOrWhiteSpace(search) ? search : filter;
+        if (!string.IsNullOrWhiteSpace(searchTerm))
+        {
+            var term = searchTerm.Trim().ToLower();
+            query = query.Where(s => 
+                (s.Name != null && s.Name.ToLower().Contains(term)) || 
+                (s.Category != null && s.Category.ToLower().Contains(term)) || 
+                (s.Description != null && s.Description.ToLower().Contains(term)));
+        }
+
+        var services = await query.ToListAsync();
 
         return Ok(ApiResponse<List<Service>>.SuccessResult(services, "SERVICES_RETRIEVED"));
     }

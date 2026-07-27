@@ -107,6 +107,46 @@ public class ServiceControllerTests
         apiResponse.Data.Should().HaveCount(1);
         apiResponse.Data!.First().Name.Should().Be("Active Service 1");
     }
+
+    [Fact]
+    public async Task GetServices_ShouldFilterByQuery_WhenFilterParameterPassed()
+    {
+        // Arrange
+        var services = new List<Service>
+        {
+            new() { Name = "Complete Blood Count", IsActive = true, Category = "Hematology", BasePrice = 50.00m },
+            new() { Name = "Lipid Profile", IsActive = true, Category = "Biochemistry", BasePrice = 75.00m }
+        }.AsQueryable();
+
+        var mockSet = new Mock<DbSet<Service>>();
+        mockSet.As<IAsyncEnumerable<Service>>()
+            .Setup(d => d.GetAsyncEnumerator(It.IsAny<CancellationToken>()))
+            .Returns(new TestDbAsyncEnumerator<Service>(services.GetEnumerator()));
+
+        mockSet.As<IQueryable<Service>>()
+            .Setup(m => m.Provider)
+            .Returns(new TestDbAsyncQueryProvider<Service>(services.Provider));
+
+        mockSet.As<IQueryable<Service>>().Setup(m => m.Expression).Returns(services.Expression);
+        mockSet.As<IQueryable<Service>>().Setup(m => m.ElementType).Returns(services.ElementType);
+        mockSet.As<IQueryable<Service>>().Setup(m => m.GetEnumerator()).Returns(services.GetEnumerator());
+
+        var mockContext = new Mock<IApplicationDbContext>();
+        mockContext.Setup(c => c.Services).Returns(mockSet.Object);
+
+        var controller = new ServiceController(mockContext.Object);
+
+        // Act
+        var result = await controller.GetServices(filter: "Blood");
+
+        // Assert
+        result.Should().BeOfType<OkObjectResult>();
+        var okResult = (OkObjectResult)result;
+        var apiResponse = (ApiResponse<List<Service>>)okResult.Value!;
+        apiResponse.Success.Should().BeTrue();
+        apiResponse.Data.Should().HaveCount(1);
+        apiResponse.Data!.First().Name.Should().Be("Complete Blood Count");
+    }
 }
 
 // --- EF Core Async Query Mocking Boilerplate Helpers ---

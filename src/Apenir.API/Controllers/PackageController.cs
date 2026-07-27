@@ -30,6 +30,50 @@ public class PackageController : ControllerBase
         _currentUserService = currentUserService;
     }
 
+    [HttpGet]
+    [AllowAnonymous]
+    [EndpointSummary("Get all active public master packages")]
+    [ProducesResponseType(StatusCodes.Status200OK, Type = typeof(ApiResponse<List<BranchPackageDto>>))]
+    public async Task<IActionResult> GetPublicPackages(CancellationToken cancellationToken)
+    {
+        var masterPackages = await _context.Packages.AsNoTracking()
+            .Where(p => p.CreatedByBranchId == null && p.IsActive)
+            .ToListAsync(cancellationToken);
+
+        var allServiceIds = masterPackages.SelectMany(p => p.ServiceIds).Distinct().ToList();
+
+        var services = await _context.Services.AsNoTracking()
+            .Where(s => allServiceIds.Contains(s.Id) && s.IsActive)
+            .ToListAsync(cancellationToken);
+
+        var result = masterPackages.Select(p => new BranchPackageDto
+        {
+            PackageId = p.Id,
+            Name = p.Name,
+            Description = p.Description ?? string.Empty,
+            BasePrice = p.BasePrice,
+            CustomPrice = null,
+            PlatformCommissionPct = p.PlatformCommissionPct,
+            CustomCommissionPct = null,
+            IsActive = true,
+            IsAdminPackage = true,
+            Services = p.ServiceIds.Select(sid => {
+                var s = services.FirstOrDefault(service => service.Id == sid);
+                return new PackageServiceDetailDto
+                {
+                    ServiceId = sid,
+                    Name = s?.Name ?? "Unknown",
+                    Category = s?.Category ?? "Unknown",
+                    Description = s?.Description ?? string.Empty,
+                    BasePrice = s?.BasePrice ?? 0,
+                    CustomPrice = null
+                };
+            }).ToList()
+        }).ToList();
+
+        return Ok(ApiResponse<List<BranchPackageDto>>.SuccessResult(result, "PACKAGES_RETRIEVED"));
+    }
+
     [HttpPost]
     [AdminOnly]
     [EndpointSummary("Create a new master package (Admin only)")]
