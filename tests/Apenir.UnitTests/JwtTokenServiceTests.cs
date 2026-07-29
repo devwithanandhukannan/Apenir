@@ -35,12 +35,12 @@ namespace Apenir.UnitTests
         public void GenerateAccessToken_ShouldReturnToken_WithCorrectClaims()
         {
             // Arrange
-            var admin = new Admin
+            var admin = new User
             {
-                Id = Guid.NewGuid(),
+                Id = Guid.NewGuid().ToString(),
                 Email = "test@apenir.com",
-                FullName = "Test Admin",
-                Roles = new List<string> { "Admin" },
+                Name = "Test Admin",
+                Role = Apenir.Core.Enums.UserRole.SuperAdmin,
                 Permissions = new List<string> { "read:users" }
             };
 
@@ -55,7 +55,7 @@ namespace Apenir.UnitTests
             principal!.FindFirst(ClaimTypes.NameIdentifier)!.Value.Should().Be(admin.Id.ToString());
             principal.FindFirst(ClaimTypes.Name)!.Value.Should().Be(admin.Email);
             principal.FindFirst(ClaimTypes.Email)!.Value.Should().Be(admin.Email);
-            principal.FindFirst(ClaimTypes.Role)!.Value.Should().Be("Admin");
+            principal.FindFirst(ClaimTypes.Role)!.Value.Should().Be("SuperAdmin");
             principal.FindFirst("permission")!.Value.Should().Be("read:users");
         }
 
@@ -76,11 +76,11 @@ namespace Apenir.UnitTests
         public void ValidateAccessToken_ShouldReturnTrue_ForValidToken()
         {
             // Arrange
-            var admin = new Admin
+            var admin = new User
             {
-                Id = Guid.NewGuid(),
+                Id = Guid.NewGuid().ToString(),
                 Email = "test@apenir.com",
-                Roles = new List<string> { "Admin" }
+                Role = Apenir.Core.Enums.UserRole.SuperAdmin
             };
             var token = _jwtService.GenerateAccessToken(admin);
 

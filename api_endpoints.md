@@ -332,3 +332,41 @@ Integrates with Meta Cloud API to receive events. Webhooks are authenticated via
 *   **Headers**: `X-Hub-Signature-256: sha256=<hmac-hash>` (validated via HMAC-SHA256 signature algorithm using your `WhatsApp:AppSecret`).
 *   **Request Body**: JSON payload detailing events.
 *   **Response (200 OK)**: Returns immediately with status `200` to acknowledge event delivery. Processing is delegated to an in-memory background worker queue.
+
+---
+
+## 5. Services API (`/api/services`)
+
+### GET `/api/services`
+*   **Description**: Retrieves active services with optional query string filtering. If no parameters are passed, all active services are returned.
+*   **Headers**: `Authorization: Bearer <AccessToken>`
+*   **Request Query Parameters**:
+    *   `filter` (optional): General search string matching Name, Category, or Description.
+    *   `category` (optional): Filter services by category name.
+    *   `name` (optional): Filter services by name.
+    *   `search` (optional): Alternative search term matching Name, Category, or Description.
+*   **Example Request**:
+    ```bash
+    curl "https://api.anandhu-kannan.in/api/services?filter=blood" \
+      --header 'Authorization: Bearer YOUR_SECRET_TOKEN'
+    ```
+*   **Response (200 OK)** (`ApiResponse<List<Service>>`):
+    ```json
+    {
+      "success": true,
+      "message": "SERVICES_RETRIEVED",
+      "data": [
+        {
+          "id": "guid-string",
+          "name": "Complete Blood Count (CBC)",
+          "description": "Comprehensive blood check",
+          "category": "Hematology",
+          "basePrice": 350.00,
+          "platformCommissionPct": 15.00,
+          "isActive": true,
+          "createdAt": "2026-06-01T00:00:00Z"
+        }
+      ],
+      "errors": []
+    }
+    ```

@@ -37,11 +37,12 @@ namespace Apenir.IntegrationTests
             var passwordHasher = new Apenir.Infrastructure.Security.BCryptPasswordHasher();
             var hashedPassword = passwordHasher.Hash(password);
 
-            var admin = new Admin
+            var admin = new User
             {
-                Id = Guid.NewGuid(),
+                Id = Guid.NewGuid().ToString(),
                 Email = email,
                 PasswordHash = hashedPassword,
+                Role = Apenir.Core.Enums.UserRole.SuperAdmin,
                 IsActive = true,
                 IsDeleted = false
             };
@@ -91,7 +92,7 @@ namespace Apenir.IntegrationTests
             _factory.AdminRepoMock.Reset();
             _factory.AdminRepoMock
                 .Setup(repo => repo.GetByEmailAsync(email, It.IsAny<CancellationToken>()))
-                .ReturnsAsync((Admin?)null);
+                .ReturnsAsync((User?)null);
 
             var loginRequest = new LoginRequest
             {

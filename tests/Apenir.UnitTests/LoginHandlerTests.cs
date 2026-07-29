@@ -52,11 +52,12 @@ namespace Apenir.UnitTests
             var hashedPassword = "hashed_password";
             var email = "admin@apenir.com";
 
-            var admin = new Admin
+            var admin = new User
             {
-                Id = Guid.NewGuid(),
+                Id = Guid.NewGuid().ToString(),
                 Email = email,
                 PasswordHash = hashedPassword,
+                Role = Apenir.Core.Enums.UserRole.SuperAdmin,
                 IsActive = true,
                 IsDeleted = false
             };
@@ -111,7 +112,7 @@ namespace Apenir.UnitTests
         {
             // Arrange
             _adminRepoMock.Setup(repo => repo.GetByEmailAsync("nonexistent@apenir.com", It.IsAny<CancellationToken>()))
-                .ReturnsAsync((Admin?)null);
+                .ReturnsAsync((User?)null);
 
             var handler = new AdminLoginCommandHandler(
                 _adminRepoMock.Object,
@@ -143,11 +144,12 @@ namespace Apenir.UnitTests
             var hashedPassword = "hashed_password";
             var email = "admin@apenir.com";
 
-            var admin = new Admin
+            var admin = new User
             {
-                Id = Guid.NewGuid(),
+                Id = Guid.NewGuid().ToString(),
                 Email = email,
                 PasswordHash = hashedPassword,
+                Role = Apenir.Core.Enums.UserRole.SuperAdmin,
                 IsActive = false,
                 IsDeleted = false
             };

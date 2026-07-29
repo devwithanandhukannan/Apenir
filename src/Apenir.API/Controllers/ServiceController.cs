@@ -22,18 +22,46 @@ public class ServiceController : ControllerBase
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserService _currentUserService;
 
-    public ServiceController(IApplicationDbContext context, ICurrentUserService currentUserService)
+    public ServiceController(IApplicationDbContext context, ICurrentUserService? currentUserService = null)
     {
         _context = context;
-        _currentUserService = currentUserService;
+        _currentUserService = currentUserService!;
     }
 
     /// <summary>GET /api/services — active services only (used by lab portal; excludes commission)</summary>
     [HttpGet]
-    public async Task<IActionResult> GetServices(CancellationToken cancellationToken)
+    public async Task<IActionResult> GetServices(
+        [FromQuery] string? filter = null,
+        [FromQuery] string? category = null,
+        [FromQuery] string? name = null,
+        [FromQuery] string? search = null,
+        CancellationToken cancellationToken = default)
     {
-        var services = await _context.Services
-            .Where(s => s.IsActive)
+        var query = _context.Services.AsNoTracking().Where(s => s.IsActive);
+
+        if (!string.IsNullOrWhiteSpace(category))
+        {
+            var categoryTerm = category.Trim().ToLower();
+            query = query.Where(s => s.Category != null && s.Category.ToLower().Contains(categoryTerm));
+        }
+
+        if (!string.IsNullOrWhiteSpace(name))
+        {
+            var nameTerm = name.Trim().ToLower();
+            query = query.Where(s => s.Name != null && s.Name.ToLower().Contains(nameTerm));
+        }
+
+        var searchTerm = !string.IsNullOrWhiteSpace(search) ? search : filter;
+        if (!string.IsNullOrWhiteSpace(searchTerm))
+        {
+            var term = searchTerm.Trim().ToLower();
+            query = query.Where(s => 
+                (s.Name != null && s.Name.ToLower().Contains(term)) || 
+                (s.Category != null && s.Category.ToLower().Contains(term)) || 
+                (s.Description != null && s.Description.ToLower().Contains(term)));
+        }
+
+        var services = await query
             .OrderBy(s => s.Category).ThenBy(s => s.Name)
             .ToListAsync(cancellationToken);
 
@@ -101,7 +129,7 @@ public class ServiceController : ControllerBase
     /// <summary>POST /api/services — create master service (admin only)</summary>
     [HttpPost]
     [AdminOnly]
-    public async Task<IActionResult> AddService([FromBody] CreateServiceRequest request, CancellationToken cancellationToken)
+    public async Task<IActionResult> AddService([FromBody] CreateServiceRequest request, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(request.Name))
             return BadRequest(ApiResponse.FailureResult("Service name cannot be empty."));
