@@ -60,5 +60,6 @@ public class AppointmentMember
 
     // Navigation properties
     [ForeignKey(nameof(AppointmentId))]
+    [System.Text.Json.Serialization.JsonIgnore]
     public virtual Appointment? Appointment { get; set; }
 }
