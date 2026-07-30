@@ -66,6 +66,15 @@ public class BookingController : ControllerBase
             .OrderByDescending(a => a.CreatedAt)
             .ToListAsync(cancellationToken);
 
+        var apptIds = appointments.Select(a => a.Id).ToList();
+        var allMembers = await _context.AppointmentMembers
+            .Where(m => apptIds.Contains(m.AppointmentId) || (m.SubAppointmentId != null && apptIds.Contains(m.SubAppointmentId)))
+            .ToListAsync(cancellationToken);
+
+        var memberDict = allMembers
+            .GroupBy(m => string.IsNullOrEmpty(m.SubAppointmentId) ? m.AppointmentId : m.SubAppointmentId)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
         var branchIds = appointments.Select(a => a.BranchId).Distinct().ToList();
         var branches = await _context.Branches
             .Where(b => branchIds.Contains(b.Id))
@@ -85,6 +94,10 @@ public class BookingController : ControllerBase
             if (slots.TryGetValue(appt.AppointmentSlotId, out var slot))
             {
                 appt.AppointmentSlot = slot;
+            }
+            if (memberDict.TryGetValue(appt.Id, out var mList))
+            {
+                appt.Members = mList;
             }
         }
 
@@ -843,7 +856,37 @@ public class BookingController : ControllerBase
         // Generate Razorpay Payment Link
         var rzpKeyId = await _settingsService.GetRazorpayKeyIdAsync();
         var rzpKeySecret = await _settingsService.GetRazorpayKeySecretAsync();
-        var itemNames = services.Select(s => s.Name).Concat(packages.Select(p => p.Name)).ToList();
+        var allBookedItemIds = new List<string>();
+        if (request.MemberSelections != null && request.MemberSelections.Any())
+        {
+            foreach (var sel in request.MemberSelections)
+            {
+                if (sel.ItemIds != null) allBookedItemIds.AddRange(sel.ItemIds);
+            }
+        }
+        else
+        {
+            for (int i = 0; i < memberCount; i++)
+            {
+                allBookedItemIds.AddRange(itemIds);
+            }
+        }
+
+        var itemNames = new List<string>();
+        foreach (var id in allBookedItemIds)
+        {
+            var s = services.FirstOrDefault(x => x.Id == id);
+            if (s != null) itemNames.Add(s.Name);
+            else
+            {
+                var p = packages.FirstOrDefault(x => x.Id == id);
+                if (p != null) itemNames.Add(p.Name);
+            }
+        }
+        if (!itemNames.Any())
+        {
+            itemNames = services.Select(s => s.Name).Concat(packages.Select(p => p.Name)).ToList();
+        }
         var itemNamesStr = string.Join(", ", itemNames);
         
         string? paymentUrl = null;

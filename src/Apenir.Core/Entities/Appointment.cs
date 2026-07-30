@@ -99,6 +99,8 @@ public class Appointment
     /// </summary>
     public List<string>? ItemIds { get; set; } = new();
 
+    public virtual List<AppointmentMember>? Members { get; set; } = new();
+
     // ─── Navigation ──────────────────────────────────────────────────────────
 
     [ForeignKey(nameof(CustomerUserId))]

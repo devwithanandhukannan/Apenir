@@ -350,7 +350,37 @@ public class RazorpayWebhookController : ControllerBase
             // 4. Create Booking ID
             var bookingId = $"BK-{DateTime.UtcNow:yyyyMMdd}-{new Random().Next(1000, 9999)}";
 
-            var itemNames = services.Select(s => s.Name).Concat(packages.Select(p => p.Name)).ToList();
+            var allBookedItemIds = new List<string>();
+            if (parsedSelections != null && parsedSelections.Any())
+            {
+                foreach (var sel in parsedSelections)
+                {
+                    if (sel.ItemIds != null) allBookedItemIds.AddRange(sel.ItemIds);
+                }
+            }
+            else
+            {
+                for (int i = 0; i < memberCount; i++)
+                {
+                    allBookedItemIds.AddRange(itemIds);
+                }
+            }
+
+            var itemNames = new List<string>();
+            foreach (var id in allBookedItemIds)
+            {
+                var s = services.FirstOrDefault(x => x.Id == id);
+                if (s != null) itemNames.Add(s.Name);
+                else
+                {
+                    var p = packages.FirstOrDefault(x => x.Id == id);
+                    if (p != null) itemNames.Add(p.Name);
+                }
+            }
+            if (!itemNames.Any())
+            {
+                itemNames = services.Select(s => s.Name).Concat(packages.Select(p => p.Name)).ToList();
+            }
             var itemNamesStr = string.Join(", ", itemNames);
             var locationAddress = $"{building}, Floor {floor}, Landmark: {landmark} | Tests: {itemNamesStr}";
 
