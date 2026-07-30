@@ -55,53 +55,77 @@ public class BookingController : ControllerBase
     [EndpointSummary("Get authenticated customer's appointments")]
     public async Task<IActionResult> GetCustomerAppointments(CancellationToken cancellationToken)
     {
-        var currentUserId = _currentUserService.UserId?.ToString();
-        if (string.IsNullOrEmpty(currentUserId))
+        try
         {
-            return Unauthorized(ApiResponse<List<Appointment>>.FailureResult("User not authenticated."));
+            var currentUserId = _currentUserService.UserId?.ToString();
+            if (string.IsNullOrEmpty(currentUserId))
+            {
+                return Unauthorized(ApiResponse<List<Appointment>>.FailureResult("User not authenticated."));
+            }
+
+            var appointments = await _context.Appointments
+                .Where(a => a.CustomerUserId == currentUserId)
+                .OrderByDescending(a => a.CreatedAt)
+                .ToListAsync(cancellationToken);
+
+            if (!appointments.Any())
+            {
+                return Ok(ApiResponse<List<Appointment>>.SuccessResult(new List<Appointment>(), "APPOINTMENTS_RETRIEVED"));
+            }
+
+            var apptIds = appointments.Select(a => a.Id).Where(id => !string.IsNullOrEmpty(id)).ToList();
+
+            var allMembers = await _context.AppointmentMembers
+                .Where(m => (m.AppointmentId != null && apptIds.Contains(m.AppointmentId)) ||
+                            (m.SubAppointmentId != null && apptIds.Contains(m.SubAppointmentId)))
+                .ToListAsync(cancellationToken);
+
+            var memberDict = allMembers
+                .Where(m => !string.IsNullOrEmpty(m.AppointmentId) || !string.IsNullOrEmpty(m.SubAppointmentId))
+                .GroupBy(m => string.IsNullOrEmpty(m.SubAppointmentId) ? m.AppointmentId : m.SubAppointmentId)
+                .Where(g => !string.IsNullOrEmpty(g.Key))
+                .ToDictionary(g => g.Key!, g => g.ToList());
+
+            var branchIds = appointments.Select(a => a.BranchId).Where(id => !string.IsNullOrEmpty(id)).Distinct().ToList();
+            var branches = await _context.Branches
+                .Where(b => branchIds.Contains(b.Id))
+                .ToListAsync(cancellationToken);
+            var branchDict = branches
+                .Where(b => !string.IsNullOrEmpty(b.Id))
+                .GroupBy(b => b.Id)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            var slotIds = appointments.Select(a => a.AppointmentSlotId).Where(id => !string.IsNullOrEmpty(id)).Distinct().ToList();
+            var slots = await _context.AppointmentSlots
+                .Where(s => slotIds.Contains(s.Id))
+                .ToListAsync(cancellationToken);
+            var slotDict = slots
+                .Where(s => !string.IsNullOrEmpty(s.Id))
+                .GroupBy(s => s.Id)
+                .ToDictionary(g => g.Key, g => g.First());
+
+            foreach (var appt in appointments)
+            {
+                if (!string.IsNullOrEmpty(appt.BranchId) && branchDict.TryGetValue(appt.BranchId, out var branch))
+                {
+                    appt.Branch = branch;
+                }
+                if (!string.IsNullOrEmpty(appt.AppointmentSlotId) && slotDict.TryGetValue(appt.AppointmentSlotId, out var slot))
+                {
+                    appt.AppointmentSlot = slot;
+                }
+                if (!string.IsNullOrEmpty(appt.Id) && memberDict.TryGetValue(appt.Id, out var mList))
+                {
+                    appt.Members = mList;
+                }
+            }
+
+            return Ok(ApiResponse<List<Appointment>>.SuccessResult(appointments, "APPOINTMENTS_RETRIEVED"));
         }
-
-        var appointments = await _context.Appointments
-            .Where(a => a.CustomerUserId == currentUserId)
-            .OrderByDescending(a => a.CreatedAt)
-            .ToListAsync(cancellationToken);
-
-        var apptIds = appointments.Select(a => a.Id).ToList();
-        var allMembers = await _context.AppointmentMembers
-            .Where(m => apptIds.Contains(m.AppointmentId) || (m.SubAppointmentId != null && apptIds.Contains(m.SubAppointmentId)))
-            .ToListAsync(cancellationToken);
-
-        var memberDict = allMembers
-            .GroupBy(m => string.IsNullOrEmpty(m.SubAppointmentId) ? m.AppointmentId : m.SubAppointmentId)
-            .ToDictionary(g => g.Key, g => g.ToList());
-
-        var branchIds = appointments.Select(a => a.BranchId).Distinct().ToList();
-        var branches = await _context.Branches
-            .Where(b => branchIds.Contains(b.Id))
-            .ToDictionaryAsync(b => b.Id, cancellationToken);
-
-        var slotIds = appointments.Select(a => a.AppointmentSlotId).Distinct().ToList();
-        var slots = await _context.AppointmentSlots
-            .Where(s => slotIds.Contains(s.Id))
-            .ToDictionaryAsync(s => s.Id, cancellationToken);
-
-        foreach (var appt in appointments)
+        catch (Exception ex)
         {
-            if (branches.TryGetValue(appt.BranchId, out var branch))
-            {
-                appt.Branch = branch;
-            }
-            if (slots.TryGetValue(appt.AppointmentSlotId, out var slot))
-            {
-                appt.AppointmentSlot = slot;
-            }
-            if (memberDict.TryGetValue(appt.Id, out var mList))
-            {
-                appt.Members = mList;
-            }
+            return StatusCode(500, ApiResponse<List<Appointment>>.FailureResult($"Failed to retrieve appointments: {ex.Message}"));
         }
-
-        return Ok(ApiResponse<List<Appointment>>.SuccessResult(appointments, "APPOINTMENTS_RETRIEVED"));
     }
 
     [HttpGet("slots")]
