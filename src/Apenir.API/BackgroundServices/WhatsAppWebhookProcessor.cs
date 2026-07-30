@@ -824,9 +824,9 @@ namespace Apenir.API.BackgroundServices
                 interactive = new
                 {
                     type   = "list",
-                    header = new { type = "text", text = "🔬 Choose Services" },
+                    header = new { type = "text", text = "Select Services" },
                     body   = new { text  = "Select from our diagnostic tests or custom health packages to add to your cart:" },
-                    footer = new { text  = "LabCare · Accurate & Fast" },
+                    footer = new { text  = "Apenir · Diagnostic Services" },
                     action = new
                     {
                         button   = "Browse items",
@@ -855,17 +855,17 @@ namespace Apenir.API.BackgroundServices
                 var qty = parts.Length > 1 ? parts[1] : "1";
 
                 var s = allServices.FirstOrDefault(x => x.Id == itemId);
-                if (s != null) cartNames.Add($"{s.Name} * {qty}");
+                if (s != null) cartNames.Add($"{s.Name} x {qty}");
                 else
                 {
                     var p = allPackages.FirstOrDefault(x => x.Id == itemId);
-                    if (p != null) cartNames.Add($"{p.Name} * {qty}");
+                    if (p != null) cartNames.Add($"{p.Name} x {qty}");
                 }
             }
 
-            var text = $"🛒 *Shopping Cart* ({cartItemIds.Count} items):\n" +
+            var text = $"*Selected Services* ({cartItemIds.Count} items):\n" +
                        (cartItemIds.Any() ? string.Join("\n", cartNames.Select(n => "• " + n)) : "_Empty_") + "\n\n" +
-                       "Choose an option below to proceed:";
+                       "Please choose an option to proceed:";
             var payload = new
             {
                 messaging_product = "whatsapp",
@@ -880,9 +880,9 @@ namespace Apenir.API.BackgroundServices
                     {
                         buttons = new[]
                         {
-                            new { type = "reply", reply = new { id = "cart_add_more", title = "➕ Add More" } },
-                            new { type = "reply", reply = new { id = "cart_clear", title = "🗑️ Clear Cart" } },
-                            new { type = "reply", reply = new { id = "cart_checkout", title = "💳 Checkout" } }
+                            new { type = "reply", reply = new { id = "cart_add_more", title = "Add More Items" } },
+                            new { type = "reply", reply = new { id = "cart_clear", title = "Clear Selection" } },
+                            new { type = "reply", reply = new { id = "cart_checkout", title = "Proceed to Checkout" } }
                         }
                     }
                 }
@@ -900,19 +900,19 @@ namespace Apenir.API.BackgroundServices
                 interactive = new
                 {
                     type   = "button",
-                    header = new { type = "text", text = "🧬 LabCare Assistant" },
+                    header = new { type = "text", text = "Apenir Assistant" },
                     body   = new
                     {
-                        text = "👋 Hello! Welcome to *LabCare*.\n\nI can help you book blood tests and diagnostics at top NABL-certified labs near you.\n\nWhat would you like to do?"
+                        text = "Welcome to *Apenir Diagnostics*.\n\nWe provide certified home diagnostic services near you.\n\nPlease select an option below:"
                     },
-                    footer = new { text = "LabCare · Trusted Diagnostics" },
+                    footer = new { text = "Apenir · Diagnostic Services" },
                     action = new
                     {
                         buttons = new[]
                         {
-                            new { type = "reply", reply = new { id = "menu_book",     title = "📅 Book a test"  } },
-                            new { type = "reply", reply = new { id = "menu_bookings", title = "📋 My bookings"  } },
-                            new { type = "reply", reply = new { id = "menu_help",     title = "❓ Help"          } },
+                            new { type = "reply", reply = new { id = "menu_book",     title = "Book Now"          } },
+                            new { type = "reply", reply = new { id = "menu_bookings", title = "View Booking History" } },
+                            new { type = "reply", reply = new { id = "menu_help",     title = "Help"              } },
                         }
                     }
                 }
@@ -1124,21 +1124,23 @@ namespace Apenir.API.BackgroundServices
 
             if (!appts.Any())
             {
-                await SendTextMessage(to, "❌ You don't have any bookings yet.", httpClientFactory, configuration);
+                await SendTextMessage(to, "You don't have any bookings registered yet.", httpClientFactory, configuration);
                 return;
             }
 
-            var text = "📋 *Your Recent Bookings:*\n\n";
+            var text = "*Apenir Diagnostics - Recent Bookings*\n\n";
             foreach (var a in appts)
             {
                 var slotDisplay = a.AppointmentSlot != null
                     ? $"{a.AppointmentSlot.SlotDate:dd-MM-yyyy} @ {FormatTime(a.AppointmentSlot.StartTime)}"
                     : "Not scheduled";
-                text += $"🆔 *{a.AppointmentNumber}*\n" +
-                        $"🏥 Lab: {a.Branch?.Name ?? "Lab"}\n" +
-                        $"📅 Slot: {slotDisplay}\n" +
-                        $"💰 Amount: ₹{a.TotalAmount}\n" +
-                        $"🚦 Status: *{a.Status}*\n" +
+                var reportInfo = !string.IsNullOrEmpty(a.ReportPdfPath) ? "Report Available" : "Pending Report";
+                text += $"Appointment ID: *{a.AppointmentNumber}*\n" +
+                        $"Lab Partner: {a.Branch?.Name ?? "Apenir Partner Lab"}\n" +
+                        $"Scheduled Slot: {slotDisplay}\n" +
+                        $"Total Amount: ₹{a.TotalAmount}\n" +
+                        $"Status: *{a.Status}*\n" +
+                        $"Report Status: {reportInfo}\n" +
                         $"-----------------------\n";
             }
 
@@ -1233,15 +1235,15 @@ namespace Apenir.API.BackgroundServices
             var itemNamesStr = string.Join("\n", serviceLinesSummary);
 
             return
-                $"📋 *Booking Summary*\n\n" +
-                $"🧪 *Services:*\n{itemNamesStr}\n\n" +
-                $"🏥 Lab: {labName}\n" +
-                (!string.IsNullOrEmpty(labAddress) ? $"📍 {labAddress}\n" : "") +
-                $"📅 Date & Time: {slotDisplay}\n" +
-                $"👥 {session.MemberCount} person{(session.MemberCount > 1 ? "s" : "")}\n" +
-                $"💰 Total: ₹{total}\n" +
-                $"🏠 Address: {session.BuildingDetails}\n" +
-                $"📍 Location: Shared ✓";
+                $"*Apenir Diagnostics - Booking Summary*\n\n" +
+                $"*Selected Services:*\n{itemNamesStr}\n\n" +
+                $"Assigned Lab Partner: {labName}\n" +
+                (!string.IsNullOrEmpty(labAddress) ? $"Lab Location: {labAddress}\n" : "") +
+                $"Scheduled Slot: {slotDisplay}\n" +
+                $"Patient Count: {session.MemberCount} person{(session.MemberCount > 1 ? "s" : "")}\n" +
+                $"Total Payable: ₹{total}\n" +
+                $"Collection Address: {session.BuildingDetails}\n" +
+                $"GPS Location: Verified";
         }
 
         private async Task GenerateSlotsForNext7Days(string branchId, IApplicationDbContext context, CancellationToken cancellationToken)
@@ -1513,7 +1515,7 @@ namespace Apenir.API.BackgroundServices
                     amount         = total * 100,
                     currency       = "INR",
                     accept_partial = false,
-                    description    = $"LabCare Booking: {itemNamesStr}",
+                    description    = $"Apenir Booking: {itemNamesStr}",
                     customer       = new
                     {
                         name    = customerName,
@@ -1560,7 +1562,7 @@ namespace Apenir.API.BackgroundServices
 
             if (string.IsNullOrEmpty(paymentUrl))
             {
-                await SendTextMessage(to, $"❌ Failed to generate payment link for ₹{total}. Please verify your Razorpay API settings or try again.", httpClientFactory, configuration);
+                await SendTextMessage(to, $"Failed to generate payment link for ₹{total}. Please verify your Razorpay API settings or try again.", httpClientFactory, configuration);
                 return;
             }
 
@@ -1616,14 +1618,14 @@ namespace Apenir.API.BackgroundServices
                         interactive = new
                         {
                             type   = "button",
-                            body   = new { text = $"✅ We have already received your payment! Your booking ID is *{appt.AppointmentNumber}*." },
-                            footer = new { text = "LabCare · Trusted Diagnostics" },
+                            body   = new { text = $"Payment received successfully! Your booking ID is *{appt.AppointmentNumber}*." },
+                            footer = new { text = "Apenir · Diagnostic Services" },
                             action = new
                             {
                                 buttons = new[]
                                 {
-                                    new { type = "reply", reply = new { id = "menu_book",     title = "📅 Book another" } },
-                                    new { type = "reply", reply = new { id = "menu_bookings", title = "📋 My bookings" } }
+                                    new { type = "reply", reply = new { id = "menu_book",     title = "Book Now"             } },
+                                    new { type = "reply", reply = new { id = "menu_bookings", title = "View Booking History" } }
                                 }
                             }
                         }
@@ -1633,16 +1635,16 @@ namespace Apenir.API.BackgroundServices
                 }
             }
 
-            await SendTextMessage(to, "⏳ We haven't received your payment confirmation yet. If you have already paid, please wait a moment for it to process. If your payment failed, please try paying again via the Razorpay link.", httpClientFactory, configuration);
+            await SendTextMessage(to, "We haven't received your payment confirmation yet. If you have already paid, please wait a moment for it to process. If your payment failed, please try paying again via the Razorpay link.", httpClientFactory, configuration);
         }
         private async Task SendHelp(string to, IHttpClientFactory httpClientFactory, IConfiguration configuration)
         {
             var helpText =
-                "❓ *LabCare Help Center*\n\n" +
+                "*Apenir Help Center*\n\n" +
                 "• *Fasting*: Most blood tests require fasting for 8–10 hours. Only drink water during this period.\n" +
                 "• *Passcode*: Give the passcode to the collection staff member when they arrive.\n" +
                 "• *Reports*: Delivered automatically to this WhatsApp thread once ready.\n\n" +
-                "Need human support? Call us at *1800-111-222* (Mon-Sat, 9 AM - 6 PM).";
+                "Need support? Call us at *1800-111-222* (Mon-Sat, 9 AM - 6 PM).";
 
             var payload = new
             {
@@ -1653,13 +1655,13 @@ namespace Apenir.API.BackgroundServices
                 {
                     type   = "button",
                     body   = new { text = helpText },
-                    footer = new { text = "LabCare · Trusted Diagnostics" },
+                    footer = new { text = "Apenir · Diagnostic Services" },
                     action = new
                     {
                         buttons = new[]
                         {
-                            new { type = "reply", reply = new { id = "menu_book", title = "📅 Book a test" } },
-                            new { type = "reply", reply = new { id = "menu_help", title = "🏠 Main menu"    } },
+                            new { type = "reply", reply = new { id = "menu_book", title = "Book Now"   } },
+                            new { type = "reply", reply = new { id = "menu_help", title = "Main Menu"  } },
                         }
                     }
                 }
@@ -1738,15 +1740,15 @@ namespace Apenir.API.BackgroundServices
 
             var buttons = new List<object>
             {
-                new { type = "reply", reply = new { id = "menu_book", title = "📅 Book a test" } }
+                new { type = "reply", reply = new { id = "menu_book", title = "Book Now" } }
             };
 
             if (activeApptsCount > 0)
             {
-                buttons.Add(new { type = "reply", reply = new { id = "cancel_select_appt", title = "❌ Cancel Booking" } });
+                buttons.Add(new { type = "reply", reply = new { id = "cancel_select_appt", title = "Cancel Booking" } });
             }
 
-            buttons.Add(new { type = "reply", reply = new { id = "menu_help", title = "🏠 Main Menu" } });
+            buttons.Add(new { type = "reply", reply = new { id = "menu_help", title = "Main Menu" } });
 
             var payload = new
             {
@@ -1757,7 +1759,7 @@ namespace Apenir.API.BackgroundServices
                 {
                     type = "button",
                     body = new { text = "What would you like to do next?" },
-                    footer = new { text = "LabCare · Accurate & Fast" },
+                    footer = new { text = "Apenir · Diagnostic Services" },
                     action = new
                     {
                         buttons = buttons.ToArray()

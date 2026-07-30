@@ -560,19 +560,19 @@ public class RazorpayWebhookController : ControllerBase
 
             // Send WhatsApp confirmation and Invoice to Customer
             var confirmMsg =
-                $"✅ *Booking Confirmed!*\n\n" +
-                $"🆔 Booking ID: *{bookingId}*\n" +
-                $"🩸 Service: {itemNamesStr}\n" +
-                $"🏥 Lab: {lab?.Name ?? "Selected Lab"}\n" +
-                $"📅 Date & Time: {slotDisplay}\n" +
-                $"👥 Persons: {memberCount}\n" +
-                $"💰 Amount Paid: ₹{total}\n" +
-                $"🔑 Passcode/OTP: *{appointment.Passcode}*\n\n" +
-                $"🧪 *Instructions:*\n" +
+                $"*Booking Confirmed*\n\n" +
+                $"Booking ID: *{bookingId}*\n" +
+                $"Service: {itemNamesStr}\n" +
+                $"Assigned Lab: {lab?.Name ?? "Selected Lab"}\n" +
+                $"Date & Time: {slotDisplay}\n" +
+                $"Persons: {memberCount}\n" +
+                $"Amount Paid: ₹{total}\n" +
+                $"Passcode/OTP: *{appointment.Passcode}*\n\n" +
+                $"*Instructions:*\n" +
                 $"• Fast for 8-10 hours prior to sample collection.\n" +
                 $"• Show the phlebotomist your Passcode (*{appointment.Passcode}*).\n" +
-                $"• Report PDF will be sent to your WhatsApp on completion.\n\n" +
-                $"Thank you for choosing LabCare! 🙏";
+                $"• Report PDF will be sent to your WhatsApp thread upon completion.\n\n" +
+                $"Thank you for choosing Apenir Diagnostics.";
 
             await _whatsAppService.SendTextMessageAsync(to, confirmMsg);
             await _whatsAppService.SendDocumentMessageAsync(to, invoiceUrl, $"Invoice_{bookingId}.pdf");

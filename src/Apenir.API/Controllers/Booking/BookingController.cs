@@ -929,7 +929,7 @@ public class BookingController : ControllerBase
                 amount = total * 100,
                 currency = "INR",
                 accept_partial = false,
-                description = $"LabCare Booking: {itemNamesStr}",
+                description = $"Apenir Booking: {itemNamesStr}",
                 customer = new
                 {
                     name = user.Name ?? "Web User",
