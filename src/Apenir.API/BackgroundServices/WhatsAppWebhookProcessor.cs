@@ -1464,16 +1464,10 @@ namespace Apenir.API.BackgroundServices
 
         private async Task SendLocationRequest(string to, WhatsAppSession session, IHttpClientFactory httpClientFactory, IConfiguration configuration)
         {
-            var webBaseUrl = configuration["App:FrontendUrl"] ?? "http://localhost:3000";
-            var webPickerUrl = $"{webBaseUrl}/select-location?session={session.Id}";
-
             await SendTextMessage(to,
-                "📍 *Select Collection Location*\n\n" +
-                "• *Booking for yourself?*\n" +
-                "Tap the paperclip 📎 → Location → Share Current Location.\n\n" +
-                "• *Booking for family / remote address?*\n" +
-                $"Open our Web Location Picker to search any exact address or pin on map:\n🔗 {webPickerUrl}\n\n" +
-                "• *Or paste a Google Maps link* directly in this chat!",
+                "📍 *Share your location*\n\n" +
+                "Please tap the paperclip 📎 → Location → and share your current location.\n\n" +
+                "This helps us check the nearest branch and offer services near you.",
                 httpClientFactory, configuration);
         }
 
