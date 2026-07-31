@@ -732,22 +732,26 @@ namespace Apenir.API.BackgroundServices
 
         private async Task SendOptionsList(string to, List<Service> services, List<Package> packages, IHttpClientFactory httpClientFactory, IConfiguration configuration)
         {
-            var serviceRows = services.Take(10).Select(s => new
-            {
-                id          = s.Id,
-                title       = s.Name.Length > 24 ? s.Name[..24] : s.Name,
-                description = s.Description != null && s.Description.Length > 72
-                                ? s.Description[..72]
-                                : s.Description ?? $"₹{s.BasePrice} · {s.Category}"
+            var serviceRows = services.Take(10).Select(s => {
+                var desc = s.Description != null && s.Description.Length > 55 ? s.Description[..55] + "..." : (s.Description ?? s.Category);
+                var fullDesc = $"₹{s.BasePrice} • {desc}";
+                return new
+                {
+                    id          = s.Id,
+                    title       = s.Name.Length > 24 ? s.Name[..24] : s.Name,
+                    description = fullDesc.Length > 72 ? fullDesc[..72] : fullDesc
+                };
             }).ToArray();
 
-            var packageRows = packages.Take(10).Select(p => new
-            {
-                id          = p.Id,
-                title       = p.Name.Length > 24 ? p.Name[..24] : p.Name,
-                description = p.Description != null && p.Description.Length > 72
-                                ? p.Description[..72]
-                                : p.Description ?? $"₹{p.BasePrice}"
+            var packageRows = packages.Take(10).Select(p => {
+                var desc = p.Description != null && p.Description.Length > 55 ? p.Description[..55] + "..." : (p.Description ?? "Health Package");
+                var fullDesc = $"₹{p.BasePrice} • {desc}";
+                return new
+                {
+                    id          = p.Id,
+                    title       = p.Name.Length > 24 ? p.Name[..24] : p.Name,
+                    description = fullDesc.Length > 72 ? fullDesc[..72] : fullDesc
+                };
             }).ToArray();
 
             var sectionsList = new List<object>();
