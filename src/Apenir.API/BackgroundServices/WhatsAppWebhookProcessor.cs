@@ -1364,28 +1364,28 @@ namespace Apenir.API.BackgroundServices
             // 1. Direct Regex Parsing on raw text
             var cleanText = System.Net.WebUtility.UrlDecode(text);
 
-            // Pattern A: @lat,lng (Google Maps @lat,lng format)
+            // Priority 1: Exact Pin Parameters (!8m2!3dlat!4dlng or !3dlat!4dlng)
+            var pbMatch = System.Text.RegularExpressions.Regex.Match(cleanText, @"!(?:8m2!)?3d(-?\d+\.\d+)!4d(-?\d+\.\d+)");
+            if (pbMatch.Success && double.TryParse(pbMatch.Groups[1].Value, out double pbLat) && double.TryParse(pbMatch.Groups[2].Value, out double pbLng))
+            {
+                return (true, pbLat, pbLng);
+            }
+
+            // Priority 2: Camera Viewport Coordinates (@lat,lng)
             var atMatch = System.Text.RegularExpressions.Regex.Match(cleanText, @"@(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)");
             if (atMatch.Success && double.TryParse(atMatch.Groups[1].Value, out double atLat) && double.TryParse(atMatch.Groups[2].Value, out double atLng))
             {
                 return (true, atLat, atLng);
             }
 
-            // Pattern B: q=lat,lng or ll=lat,lng or center=lat,lng
+            // Priority 3: Query parameters (q=lat,lng or ll=lat,lng or center=lat,lng)
             var queryMatch = System.Text.RegularExpressions.Regex.Match(cleanText, @"(?:q|ll|center)=(-?\d+\.\d+)\s*(?:%2C|,)\s*(-?\d+\.\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
             if (queryMatch.Success && double.TryParse(queryMatch.Groups[1].Value, out double qLat) && double.TryParse(queryMatch.Groups[2].Value, out double qLng))
             {
                 return (true, qLat, qLng);
             }
 
-            // Pattern C: Protobuf !3dlat!4dlng (Google Maps embedded 3d/4d params)
-            var pbMatch = System.Text.RegularExpressions.Regex.Match(cleanText, @"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)");
-            if (pbMatch.Success && double.TryParse(pbMatch.Groups[1].Value, out double pbLat) && double.TryParse(pbMatch.Groups[2].Value, out double pbLng))
-            {
-                return (true, pbLat, pbLng);
-            }
-
-            // Pattern D: Standard lat,lng pair (9.9491777, 77.191929)
+            // Priority 4: Standard coordinate pair (9.9491777, 77.191929)
             var stdMatch = System.Text.RegularExpressions.Regex.Match(cleanText, @"(-?\d+\.\d{3,})\s*,\s*(-?\d+\.\d{3,})");
             if (stdMatch.Success && double.TryParse(stdMatch.Groups[1].Value, out double stdLat) && double.TryParse(stdMatch.Groups[2].Value, out double stdLng))
             {
@@ -1403,103 +1403,59 @@ namespace Apenir.API.BackgroundServices
                     client.Timeout = TimeSpan.FromSeconds(6);
                     client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
 
-                    var response = await client.GetAsync(targetUrl, HttpCompletionOption.ResponseHeadersRead);
+                    var response = await client.GetAsync(targetUrl);
                     var finalUrl = response.RequestMessage?.RequestUri?.ToString() ?? "";
                     var decodedFinalUrl = System.Net.WebUtility.UrlDecode(finalUrl);
 
+                    // Priority 1: Exact Pin Parameters (!8m2!3dlat!4dlng or !3dlat!4dlng)
+                    var fPb = System.Text.RegularExpressions.Regex.Match(decodedFinalUrl, @"!(?:8m2!)?3d(-?\d+\.\d+)!4d(-?\d+\.\d+)");
+                    if (fPb.Success && double.TryParse(fPb.Groups[1].Value, out double fpbLat) && double.TryParse(fPb.Groups[2].Value, out double fpbLng))
+                    {
+                        return (true, fpbLat, fpbLng);
+                    }
+
+                    // Priority 2: Camera Viewport Coordinates (@lat,lng)
                     var fAt = System.Text.RegularExpressions.Regex.Match(decodedFinalUrl, @"@(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)");
                     if (fAt.Success && double.TryParse(fAt.Groups[1].Value, out double fLat) && double.TryParse(fAt.Groups[2].Value, out double fLng))
                     {
                         return (true, fLat, fLng);
                     }
 
+                    // Priority 3: Query parameters (q=lat,lng or ll=lat,lng or center=lat,lng)
                     var fQuery = System.Text.RegularExpressions.Regex.Match(decodedFinalUrl, @"(?:q|ll|center)=(-?\d+\.\d+)\s*(?:%2C|,)\s*(-?\d+\.\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
                     if (fQuery.Success && double.TryParse(fQuery.Groups[1].Value, out double fqLat) && double.TryParse(fQuery.Groups[2].Value, out double fqLng))
                     {
                         return (true, fqLat, fqLng);
                     }
 
-                    var fPb = System.Text.RegularExpressions.Regex.Match(decodedFinalUrl, @"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)");
-                    if (fPb.Success && double.TryParse(fPb.Groups[1].Value, out double fpbLat) && double.TryParse(fPb.Groups[2].Value, out double fpbLng))
-                    {
-                        return (true, fpbLat, fpbLng);
-                    }
-
+                    // Priority 4: Standard coordinate pair
                     var fStd = System.Text.RegularExpressions.Regex.Match(decodedFinalUrl, @"(-?\d+\.\d{3,})\s*,\s*(-?\d+\.\d{3,})");
                     if (fStd.Success && double.TryParse(fStd.Groups[1].Value, out double fsLat) && double.TryParse(fStd.Groups[2].Value, out double fsLng))
                     {
                         return (true, fsLat, fsLng);
                     }
 
-                    // Pattern E: Google Maps Place Address URL (/maps/place/{address}/...)
-                    var placeMatch = System.Text.RegularExpressions.Regex.Match(decodedFinalUrl, @"/maps/place/([^/]+)");
-                    if (placeMatch.Success)
+                    // Priority 5: HTML Page Content Parsing (Search page HTML payload if Google Maps returned HTML content)
+                    if (response.IsSuccessStatusCode)
                     {
-                        var rawPlace = placeMatch.Groups[1].Value;
-                        if (rawPlace.Contains('?')) rawPlace = rawPlace.Split('?')[0];
-                        var addressQuery = rawPlace.Replace('+', ' ').Trim();
+                        var html = await response.Content.ReadAsStringAsync();
 
-                        if (!string.IsNullOrWhiteSpace(addressQuery))
+                        var htmlPb = System.Text.RegularExpressions.Regex.Match(html, @"!(?:8m2!)?3d(-?\d+\.\d+)!4d(-?\d+\.\d+)");
+                        if (htmlPb.Success && double.TryParse(htmlPb.Groups[1].Value, out double hpbLat) && double.TryParse(htmlPb.Groups[2].Value, out double hpbLng))
                         {
-                            var geoResult = await GeocodeAddressQueryAsync(addressQuery, client);
-                            if (geoResult.Success)
-                            {
-                                return (true, geoResult.Lat, geoResult.Lng);
-                            }
+                            return (true, hpbLat, hpbLng);
+                        }
+
+                        var htmlAt = System.Text.RegularExpressions.Regex.Match(html, @"@(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)");
+                        if (htmlAt.Success && double.TryParse(htmlAt.Groups[1].Value, out double hatLat) && double.TryParse(htmlAt.Groups[2].Value, out double hatLng))
+                        {
+                            return (true, hatLat, hatLng);
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[WHATSAPP LOCATION EXPANDER] Error resolving URL '{targetUrl}': {ex.Message}");
-                }
-            }
-
-            return (false, 0, 0);
-        }
-
-        private static async Task<(bool Success, double Lat, double Lng)> GeocodeAddressQueryAsync(string addressQuery, HttpClient client)
-        {
-            try
-            {
-                var encodedQuery = System.Net.WebUtility.UrlEncode(addressQuery);
-                var reqUrl = $"https://nominatim.openstreetmap.org/search?q={encodedQuery}&format=json";
-
-                var request = new HttpRequestMessage(HttpMethod.Get, reqUrl);
-                request.Headers.UserAgent.ParseAdd("ApenirDiagnosticsApp/1.0 (contact@apenirdiagnostics.com)");
-
-                var res = await client.SendAsync(request);
-                if (res.IsSuccessStatusCode)
-                {
-                    var json = await res.Content.ReadAsStringAsync();
-                    using var doc = System.Text.Json.JsonDocument.Parse(json);
-                    var root = doc.RootElement;
-                    if (root.ValueKind == System.Text.Json.JsonValueKind.Array && root.GetArrayLength() > 0)
-                    {
-                        var first = root[0];
-                        if (first.TryGetProperty("lat", out var latProp) && first.TryGetProperty("lon", out var lonProp))
-                        {
-                            if (double.TryParse(latProp.GetString(), out double lat) && double.TryParse(lonProp.GetString(), out double lng))
-                            {
-                                return (true, lat, lng);
-                            }
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[NOMINATIM GEOCODER] Error geocoding '{addressQuery}': {ex.Message}");
-            }
-
-            // Fallback: If full building name failed (e.g. "Achus Nest, PNRA-79..."), retry without the first part
-            if (addressQuery.Contains(','))
-            {
-                var parts = addressQuery.Split(',').Select(p => p.Trim()).Where(p => !string.IsNullOrEmpty(p)).ToList();
-                if (parts.Count > 1)
-                {
-                    var fallbackAddress = string.Join(", ", parts.Skip(1));
-                    return await GeocodeAddressQueryAsync(fallbackAddress, client);
+                    Console.WriteLine($"[GOOGLE MAPS EXPANDER] Error resolving URL '{targetUrl}': {ex.Message}");
                 }
             }
 
