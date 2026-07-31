@@ -302,9 +302,14 @@ public class BookingController : ControllerBase
     public async Task<IActionResult> GetLocationCatalog(
         [FromQuery] double latitude,
         [FromQuery] double longitude,
-        CancellationToken cancellationToken)
+        [FromQuery] string? branchId = null,
+        CancellationToken cancellationToken = default)
     {
         var allBranches = await _context.Branches.Where(b => b.IsActive).ToListAsync(cancellationToken);
+        if (!string.IsNullOrEmpty(branchId))
+        {
+            allBranches = allBranches.Where(b => b.Id == branchId).ToList();
+        }
         var nearbyBranches = new List<Branch>();
         var branchCoverage = new List<RegionAvailabilityResult>();
 
@@ -709,8 +714,8 @@ public class BookingController : ControllerBase
         if (appointment.AppointmentSlot != null)
         {
             var slot = appointment.AppointmentSlot;
-            slot.BookedCount = Math.Max(0, slot.BookedCount - appointment.MemberCount);
-            slot.IsAvailable = true;
+            slot.BookedCount = Math.Max(0, slot.BookedCount - 1);
+            if (slot.BookedCount < slot.MaxCapacity) slot.IsAvailable = true;
             _context.AppointmentSlots.Update(slot);
         }
 
@@ -767,9 +772,9 @@ public class BookingController : ControllerBase
             return BadRequest(ApiResponse.FailureResult("Some selected diagnostic services or packages could not be found."));
         }
 
-        // Check Slot Capacity
+        // Check Slot Capacity (1 appointment = 1 home visit slot)
         var memberCount = request.MemberCount < 1 ? 1 : request.MemberCount;
-        if (!slot.IsAvailable || slot.BookedCount + memberCount > slot.MaxCapacity)
+        if (!slot.IsAvailable || slot.BookedCount >= slot.MaxCapacity)
         {
             return BadRequest(ApiResponse.FailureResult("Selected slot has insufficient capacity."));
         }
@@ -1162,7 +1167,7 @@ public class BookingController : ControllerBase
         foreach (var split in request.LabSplits)
         {
             var slot = await _context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == split.SlotId, cancellationToken);
-            if (slot == null || !slot.IsAvailable || slot.BookedCount + memberCount > slot.MaxCapacity)
+            if (slot == null || !slot.IsAvailable || slot.BookedCount >= slot.MaxCapacity)
                 return BadRequest(ApiResponse.FailureResult($"Slot for lab split ({split.BranchId}) has insufficient capacity or is unavailable."));
 
             var branch = await _context.Branches.FirstOrDefaultAsync(b => b.Id == split.BranchId, cancellationToken);
@@ -1286,8 +1291,8 @@ public class BookingController : ControllerBase
             };
             _context.Appointments.Add(childAppointment);
 
-            // Update slot capacity
-            slot.BookedCount += memberCount;
+            // Update slot capacity (1 appointment = 1 slot capacity)
+            slot.BookedCount += 1;
             if (slot.BookedCount >= slot.MaxCapacity) slot.IsAvailable = false;
             _context.AppointmentSlots.Update(slot);
 

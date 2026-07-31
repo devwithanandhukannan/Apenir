@@ -4,10 +4,10 @@ public enum WhatsAppState
 {
     Start,
     AwaitingLocation,
+    ChoosingLab,
     ChoosingTest,
     AwaitingItemQuantity,
     AwaitingAddressDetails,
-    ChoosingLab,
     ChoosingSlot,
     MemberCount,
     Confirm,

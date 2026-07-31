@@ -260,6 +260,17 @@ namespace Apenir.API.BackgroundServices
                     await SendGreeting(to, httpClientFactory, configuration);
                     break;
 
+                case WhatsAppState.AwaitingLocation:
+                    if (TryExtractCoordinates(text, out double parsedLat, out double parsedLng))
+                    {
+                        await ProcessLocationMessage(to, parsedLat, parsedLng, context, httpClientFactory, configuration, cancellationToken);
+                    }
+                    else
+                    {
+                        await SendLocationRequest(to, session, httpClientFactory, configuration);
+                    }
+                    break;
+
                 case WhatsAppState.AwaitingItemQuantity:
                     if (int.TryParse(text.Trim(), out int q) && q >= 1 && q <= 6)
                     {
@@ -284,95 +295,24 @@ namespace Apenir.API.BackgroundServices
 
                 case WhatsAppState.AwaitingAddressDetails:
                     // Extract building details, floor, landmark from typed text.
-                    // For optimal parsing, if they comma-separate, we save it cleanly.
                     session.BuildingDetails = text.Trim();
                     session.Landmark = "Indicated in address details";
                     session.Floor = "Not specified";
 
-                    // Auto-select closest eligible branch
-                    var cartItemIdsWithQty = (session.SelectedTestId ?? "").Split(',').Select(id => id.Trim()).Where(id => !string.IsNullOrEmpty(id)).ToList();
-                    var cartItemIds = cartItemIdsWithQty.Select(id => id.Split(':')[0]).Distinct().ToList();
-                    var allServices = await GetCachedServicesAsync(context, cancellationToken);
-                    var allPackages = await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken);
-
-                    var branchServices = await context.BranchServices
-                        .Where(bs => cartItemIds.Contains(bs.ServiceId) && bs.IsActive)
-                        .ToListAsync(cancellationToken);
-
-                    var branchPackages = await context.BranchPackages
-                        .Where(bp => cartItemIds.Contains(bp.PackageId) && bp.IsActive)
-                        .ToListAsync(cancellationToken);
-
-                    var allBranches = await GetCachedBranchesAsync(context, cancellationToken);
-
-                    double userLat = session.Latitude ?? 0.0;
-                    double userLng = session.Longitude ?? 0.0;
-
-                    var nearbyBranches = allBranches
-                        .Where(b => b.IsActive)
-                        .Select(b => new { Branch = b, Distance = CalculateDistanceKm(userLat, userLng, (double)b.Latitude, (double)b.Longitude) })
-                        .Where(x => x.Distance <= x.Branch.ServiceRangeKm)
-                        .ToList();
-
-                    var eligibleBranches = new List<dynamic>();
-                    foreach (var item in nearbyBranches)
+                    if (string.IsNullOrEmpty(session.SelectedLabId) || string.IsNullOrEmpty(session.SelectedLabName))
                     {
-                        var b = item.Branch;
-                        int offeredServicesCount = branchServices.Where(bs => bs.BranchId == b.Id).Select(bs => bs.ServiceId).Distinct().Count();
-                        int offeredPackagesCount = branchPackages.Where(bp => bp.BranchId == b.Id).Select(bp => bp.PackageId).Distinct().Count();
-                        
-                        int totalOfferedInCart = offeredServicesCount + offeredPackagesCount;
-                        if (totalOfferedInCart >= cartItemIds.Count)
-                        {
-                            decimal totalPriceForBranch = 0m;
-                            foreach (var itemWithQty in cartItemIdsWithQty)
-                            {
-                                var parts = itemWithQty.Split(':');
-                                var itemId = parts[0];
-                                var qty = parts.Length > 1 && int.TryParse(parts[1], out var itemQty) ? itemQty : 1;
-
-                                var bs = branchServices.FirstOrDefault(x => x.BranchId == b.Id && x.ServiceId == itemId);
-                                if (bs != null)
-                                {
-                                    totalPriceForBranch += (bs.CustomPrice ?? allServices.FirstOrDefault(s => s.Id == itemId)?.BasePrice ?? 0m) * qty;
-                                }
-                                else
-                                {
-                                    var bp = branchPackages.FirstOrDefault(x => x.BranchId == b.Id && x.PackageId == itemId);
-                                    if (bp != null)
-                                    {
-                                        totalPriceForBranch += (bp.CustomPrice ?? allPackages.FirstOrDefault(p => p.Id == itemId)?.BasePrice ?? 0m) * qty;
-                                    }
-                                }
-                            }
-
-                            eligibleBranches.Add(new
-                            {
-                                Branch = b,
-                                Distance = item.Distance,
-                                Price = totalPriceForBranch
-                            });
-                        }
-                    }
-
-                    if (!eligibleBranches.Any())
-                    {
-                        await SendTextMessage(to, "❌ Sorry, no labs offering your selected items are within range of your location. Please select different items.", httpClientFactory, configuration);
+                        await SendTextMessage(to, "❌ Laboratory selection was not found. Please select a lab to continue.", httpClientFactory, configuration);
                         session.CurrentState = WhatsAppState.Start;
                         await SaveSessionAsync(session, context, cancellationToken);
                         await SendGreeting(to, httpClientFactory, configuration);
                         break;
                     }
 
-                    // Auto-select the closest branch
-                    var closest = eligibleBranches.OrderBy(x => x.Distance).First();
-                    session.SelectedLabId = closest.Branch.Id;
-                    session.SelectedLabName = closest.Branch.Name;
                     session.CurrentState = WhatsAppState.ChoosingSlot;
                     await SaveSessionAsync(session, context, cancellationToken);
 
-                    await SendTextMessage(to, $"🏥 Selected Laboratory: {closest.Branch.Name} ({closest.Distance:F1} km away)", httpClientFactory, configuration);
-                    await SendSlotList(to, closest.Branch.Id, closest.Branch.Name, context, httpClientFactory, configuration, cancellationToken);
+                    await SendTextMessage(to, $"🏥 Selected Laboratory: {session.SelectedLabName}", httpClientFactory, configuration);
+                    await SendSlotList(to, session.SelectedLabId, session.SelectedLabName, context, httpClientFactory, configuration, cancellationToken);
                     break;
                 case WhatsAppState.MemberCount:
                     if (int.TryParse(text.Trim(), out int count) && count >= 1 && count <= 6)
@@ -390,24 +330,14 @@ namespace Apenir.API.BackgroundServices
                             break;
                         }
 
-                        int availCapacity = slot.MaxCapacity - slot.BookedCount;
-                        if (availCapacity < 0) availCapacity = 0;
-
-                        if (count > availCapacity)
+                        if (slot.BookedCount >= slot.MaxCapacity)
                         {
-                            if (availCapacity == 0)
+                            await SendTextMessage(to, "❌ Sorry, this slot has just filled up. Please select another slot.", httpClientFactory, configuration);
+                            session.CurrentState = WhatsAppState.ChoosingSlot;
+                            await SaveSessionAsync(session, context, cancellationToken);
+                            if (!string.IsNullOrEmpty(session.SelectedLabId) && !string.IsNullOrEmpty(session.SelectedLabName))
                             {
-                                await SendTextMessage(to, "❌ Sorry, this slot has just filled up and has *0* spots left. Please select another slot.", httpClientFactory, configuration);
-                                session.CurrentState = WhatsAppState.ChoosingSlot;
-                                await SaveSessionAsync(session, context, cancellationToken);
-                                if (!string.IsNullOrEmpty(session.SelectedLabId) && !string.IsNullOrEmpty(session.SelectedLabName))
-                                {
-                                    await SendSlotList(to, session.SelectedLabId, session.SelectedLabName, context, httpClientFactory, configuration, cancellationToken);
-                                }
-                            }
-                            else
-                            {
-                                await SendTextMessage(to, $"❌ Sorry, only *{availCapacity}* spot(s) are available for this slot. Please enter a number between 1 and {availCapacity}, or type another number.", httpClientFactory, configuration);
+                                await SendSlotList(to, session.SelectedLabId, session.SelectedLabName, context, httpClientFactory, configuration, cancellationToken);
                             }
                             break;
                         }
@@ -474,41 +404,14 @@ namespace Apenir.API.BackgroundServices
                 session.Latitude = lat;
                 session.Longitude = lng;
                 session.LocationShared = true;
-                session.CurrentState = WhatsAppState.ChoosingTest;
+                session.CurrentState = WhatsAppState.ChoosingLab;
                 session.CartItemIds = new List<string>(); // Initialize empty cart
+                session.SelectedLabId = null;
+                session.SelectedLabName = null;
                 await SaveSessionAsync(session, context, cancellationToken);
 
                 await SendTextMessage(to, "📍 Location received successfully!", httpClientFactory, configuration);
-
-                var nearbyBranchIds = nearbyBranches.Select(x => x.Branch.Id).ToHashSet();
-                var branchServices = await context.BranchServices
-                    .Where(bs => bs.IsActive && nearbyBranchIds.Contains(bs.BranchId))
-                    .Select(bs => bs.ServiceId)
-                    .Distinct()
-                    .ToListAsync(cancellationToken);
-
-                var branchPackages = await context.BranchPackages
-                    .Where(bp => bp.IsActive && nearbyBranchIds.Contains(bp.BranchId))
-                    .Select(bp => bp.PackageId)
-                    .Distinct()
-                    .ToListAsync(cancellationToken);
-
-                var allServices = await GetCachedServicesAsync(context, cancellationToken);
-                var availableServices = allServices.Where(s => branchServices.Contains(s.Id)).ToList();
-
-                var allPackages = await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken);
-                var availablePackages = allPackages.Where(p => branchPackages.Contains(p.Id)).ToList();
-
-                if (!availableServices.Any() && !availablePackages.Any())
-                {
-                    await SendTextMessage(to, "❌ Sorry, no diagnostic services or health packages are available near your location at this time.", httpClientFactory, configuration);
-                    session.CurrentState = WhatsAppState.Start;
-                    await SaveSessionAsync(session, context, cancellationToken);
-                    await SendGreeting(to, httpClientFactory, configuration);
-                    return;
-                }
-
-                await SendOptionsList(to, availableServices, availablePackages, httpClientFactory, configuration);
+                await SendLabList(to, nearbyBranches.Select(x => (x.Branch, x.Distance)).ToList(), httpClientFactory, configuration);
             }
         }
 
@@ -537,7 +440,7 @@ namespace Apenir.API.BackgroundServices
                     session.CurrentState = WhatsAppState.AwaitingLocation;
                     session.CartItemIds = new List<string>();
                     await SaveSessionAsync(session, context, cancellationToken);
-                    await SendLocationRequest(to, httpClientFactory, configuration);
+                    await SendLocationRequest(to, session, httpClientFactory, configuration);
                     return;
 
                 case "menu_bookings":
@@ -559,50 +462,22 @@ namespace Apenir.API.BackgroundServices
                     session.CurrentState = WhatsAppState.ChoosingTest;
                     await SaveSessionAsync(session, context, cancellationToken);
                     
-                    var allBranches = await GetCachedBranchesAsync(context, cancellationToken);
-                    var nearbyBranches = allBranches
-                        .Where(b => b.IsActive)
-                        .Select(b => new { Branch = b, Distance = CalculateDistanceKm(session.Latitude ?? 0.0, session.Longitude ?? 0.0, (double)b.Latitude, (double)b.Longitude) })
-                        .Where(x => x.Distance <= x.Branch.ServiceRangeKm)
-                        .ToList();
-                    var nearbyBranchIds = nearbyBranches.Select(x => x.Branch.Id).ToHashSet();
-                    
-                    var cartRawItems = session.CartItemIds ?? new List<string>();
-                    var currentItemIds = cartRawItems.Select(id => id.Split(':')[0]).Distinct().ToList();
-
-                    List<string> eligibleBranchIds;
-                    if (currentItemIds.Any())
+                    if (!string.IsNullOrEmpty(session.SelectedLabId))
                     {
-                        var branchServicesForCart = await context.BranchServices
-                            .Where(bs => bs.IsActive && nearbyBranchIds.Contains(bs.BranchId) && currentItemIds.Contains(bs.ServiceId))
-                            .ToListAsync(cancellationToken);
+                        var bsIds = await context.BranchServices.Where(bs => bs.IsActive && bs.BranchId == session.SelectedLabId).Select(bs => bs.ServiceId).Distinct().ToListAsync(cancellationToken);
+                        var bpIds = await context.BranchPackages.Where(bp => bp.IsActive && bp.BranchId == session.SelectedLabId).Select(bp => bp.PackageId).Distinct().ToListAsync(cancellationToken);
 
-                        var branchPackagesForCart = await context.BranchPackages
-                            .Where(bp => bp.IsActive && nearbyBranchIds.Contains(bp.BranchId) && currentItemIds.Contains(bp.PackageId))
-                            .ToListAsync(cancellationToken);
+                        var svcs = (await GetCachedServicesAsync(context, cancellationToken)).Where(s => bsIds.Contains(s.Id)).ToList();
+                        var pkgs = (await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken)).Where(p => bpIds.Contains(p.Id)).ToList();
 
-                        eligibleBranchIds = nearbyBranches
-                            .Where(x =>
-                            {
-                                int sCount = branchServicesForCart.Where(bs => bs.BranchId == x.Branch.Id).Select(bs => bs.ServiceId).Distinct().Count();
-                                int pCount = branchPackagesForCart.Where(bp => bp.BranchId == x.Branch.Id).Select(bp => bp.PackageId).Distinct().Count();
-                                return (sCount + pCount) >= currentItemIds.Count;
-                            })
-                            .Select(x => x.Branch.Id)
-                            .ToList();
+                        await SendOptionsList(to, svcs, pkgs, httpClientFactory, configuration);
                     }
                     else
                     {
-                        eligibleBranchIds = nearbyBranchIds.ToList();
+                        session.CurrentState = WhatsAppState.AwaitingLocation;
+                        await SaveSessionAsync(session, context, cancellationToken);
+                        await SendLocationRequest(to, session, httpClientFactory, configuration);
                     }
-
-                    var bsIds = await context.BranchServices.Where(bs => bs.IsActive && eligibleBranchIds.Contains(bs.BranchId)).Select(bs => bs.ServiceId).Distinct().ToListAsync(cancellationToken);
-                    var bpIds = await context.BranchPackages.Where(bp => bp.IsActive && eligibleBranchIds.Contains(bp.BranchId)).Select(bp => bp.PackageId).Distinct().ToListAsync(cancellationToken);
-
-                    var svcs = (await GetCachedServicesAsync(context, cancellationToken)).Where(s => bsIds.Contains(s.Id)).ToList();
-                    var pkgs = (await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken)).Where(p => bpIds.Contains(p.Id)).ToList();
-
-                    await SendOptionsList(to, svcs, pkgs, httpClientFactory, configuration);
                     return;
 
                 case "cart_clear":
@@ -610,21 +485,22 @@ namespace Apenir.API.BackgroundServices
                     await SaveSessionAsync(session, context, cancellationToken);
                     await SendTextMessage(to, "🗑️ Your shopping cart has been cleared.", httpClientFactory, configuration);
                     
-                    var bList = await GetCachedBranchesAsync(context, cancellationToken);
-                    var nbList = bList
-                        .Where(b => b.IsActive)
-                        .Select(b => new { Branch = b, Distance = CalculateDistanceKm(session.Latitude ?? 0.0, session.Longitude ?? 0.0, (double)b.Latitude, (double)b.Longitude) })
-                        .Where(x => x.Distance <= x.Branch.ServiceRangeKm)
-                        .ToList();
-                    var nbBranchIds = nbList.Select(x => x.Branch.Id).ToHashSet();
-                    
-                    var svIds = await context.BranchServices.Where(bs => bs.IsActive && nbBranchIds.Contains(bs.BranchId)).Select(bs => bs.ServiceId).Distinct().ToListAsync(cancellationToken);
-                    var paIds = await context.BranchPackages.Where(bp => bp.IsActive && nbBranchIds.Contains(bp.BranchId)).Select(bp => bp.PackageId).Distinct().ToListAsync(cancellationToken);
+                    if (!string.IsNullOrEmpty(session.SelectedLabId))
+                    {
+                        var bsIds = await context.BranchServices.Where(bs => bs.IsActive && bs.BranchId == session.SelectedLabId).Select(bs => bs.ServiceId).Distinct().ToListAsync(cancellationToken);
+                        var bpIds = await context.BranchPackages.Where(bp => bp.IsActive && bp.BranchId == session.SelectedLabId).Select(bp => bp.PackageId).Distinct().ToListAsync(cancellationToken);
 
-                    var allSvcs = (await GetCachedServicesAsync(context, cancellationToken)).Where(s => svIds.Contains(s.Id)).ToList();
-                    var allPkgs = (await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken)).Where(p => paIds.Contains(p.Id)).ToList();
+                        var svcs = (await GetCachedServicesAsync(context, cancellationToken)).Where(s => bsIds.Contains(s.Id)).ToList();
+                        var pkgs = (await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken)).Where(p => bpIds.Contains(p.Id)).ToList();
 
-                    await SendOptionsList(to, allSvcs, allPkgs, httpClientFactory, configuration);
+                        await SendOptionsList(to, svcs, pkgs, httpClientFactory, configuration);
+                    }
+                    else
+                    {
+                        session.CurrentState = WhatsAppState.AwaitingLocation;
+                        await SaveSessionAsync(session, context, cancellationToken);
+                        await SendLocationRequest(to, session, httpClientFactory, configuration);
+                    }
                     return;
 
                 case "cart_checkout":
@@ -698,9 +574,44 @@ namespace Apenir.API.BackgroundServices
                     {
                         session.SelectedLabId = selectedLab.Id;
                         session.SelectedLabName = selectedLab.Name;
-                        session.CurrentState = WhatsAppState.ChoosingSlot;
+                        session.CurrentState = WhatsAppState.ChoosingTest;
                         await SaveSessionAsync(session, context, cancellationToken);
-                        await SendSlotList(to, selectedLab.Id, selectedLab.Name, context, httpClientFactory, configuration, cancellationToken);
+
+                        await SendTextMessage(to, $"🏥 Selected Laboratory: *{selectedLab.Name}*", httpClientFactory, configuration);
+
+                        var branchServiceIds = await context.BranchServices
+                            .Where(bs => bs.IsActive && bs.BranchId == selectedLab.Id)
+                            .Select(bs => bs.ServiceId)
+                            .Distinct()
+                            .ToListAsync(cancellationToken);
+
+                        var branchPackageIds = await context.BranchPackages
+                            .Where(bp => bp.IsActive && bp.BranchId == selectedLab.Id)
+                            .Select(bp => bp.PackageId)
+                            .Distinct()
+                            .ToListAsync(cancellationToken);
+
+                        var cachedSvcs = await GetCachedServicesAsync(context, cancellationToken);
+                        var availableServices = cachedSvcs.Where(s => branchServiceIds.Contains(s.Id)).ToList();
+
+                        var activePkgs = await context.Packages.AsNoTracking().Where(p => p.IsActive).ToListAsync(cancellationToken);
+                        var availablePackages = activePkgs.Where(p => branchPackageIds.Contains(p.Id)).ToList();
+
+                        if (!availableServices.Any() && !availablePackages.Any())
+                        {
+                            await SendTextMessage(to, $"❌ Sorry, no diagnostic services or health packages are currently available for {selectedLab.Name}.", httpClientFactory, configuration);
+                            session.CurrentState = WhatsAppState.ChoosingLab;
+                            await SaveSessionAsync(session, context, cancellationToken);
+                            var nbList = allBranches
+                                .Where(b => b.IsActive)
+                                .Select(b => new { Branch = b, Distance = CalculateDistanceKm(session.Latitude ?? 0.0, session.Longitude ?? 0.0, (double)b.Latitude, (double)b.Longitude) })
+                                .Where(x => x.Distance <= x.Branch.ServiceRangeKm)
+                                .ToList();
+                            await SendLabList(to, nbList.Select(x => (x.Branch, x.Distance)).ToList(), httpClientFactory, configuration);
+                            break;
+                        }
+
+                        await SendOptionsList(to, availableServices, availablePackages, httpClientFactory, configuration);
                     }
                     break;
 
@@ -749,15 +660,6 @@ namespace Apenir.API.BackgroundServices
                         if (int.TryParse(countStr, out int count))
                         {
                             var maxAllowed = 6;
-                            if (!string.IsNullOrEmpty(session.SelectedSlot))
-                            {
-                                var slotObj = await context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == session.SelectedSlot, cancellationToken);
-                                if (slotObj != null)
-                                {
-                                    maxAllowed = slotObj.MaxCapacity - slotObj.BookedCount;
-                                }
-                            }
-
                             if (count <= maxAllowed && count > 0)
                             {
                                 session.MemberCount  = count;
@@ -784,6 +686,39 @@ namespace Apenir.API.BackgroundServices
                     await SendGreeting(to, httpClientFactory, configuration);
                     break;
             }
+        }
+
+        private async Task SendLabList(string to, List<(Branch Branch, double Distance)> branches, IHttpClientFactory httpClientFactory, IConfiguration configuration)
+        {
+            var rows = branches.Take(10).Select(x => new
+            {
+                id          = x.Branch.Id,
+                title       = x.Branch.Name.Length > 24 ? x.Branch.Name[..24] : x.Branch.Name,
+                description = $"{x.Distance:F1} km away · {x.Branch.City ?? "Nearby Lab"}"
+            }).ToArray();
+
+            var payload = new
+            {
+                messaging_product = "whatsapp",
+                to,
+                type = "interactive",
+                interactive = new
+                {
+                    type   = "list",
+                    header = new { type = "text", text = "Select Laboratory Branch" },
+                    body   = new { text  = "🏥 We found the following laboratories near your location. Please select a lab to view its available services and packages:" },
+                    footer = new { text  = "Apenir · Diagnostic Labs" },
+                    action = new
+                    {
+                        button   = "Select Lab",
+                        sections = new[]
+                        {
+                            new { title = "Available Laboratories", rows }
+                        }
+                    }
+                }
+            };
+            await SendWhatsAppMessage(payload, httpClientFactory, configuration);
         }
 
         private async Task SendOptionsList(string to, List<Service> services, List<Package> packages, IHttpClientFactory httpClientFactory, IConfiguration configuration)
@@ -1326,6 +1261,7 @@ namespace Apenir.API.BackgroundServices
                 .ToListAsync(cancellationToken);
 
             var slots = rawSlots
+                .Where(s => s.BookedCount < s.MaxCapacity)
                 .Where(s => s.SlotDate > todayIst || (s.SlotDate == todayIst && s.StartTime > timeOnlyIst))
                 .Take(10)
                 .ToList();
@@ -1376,19 +1312,6 @@ namespace Apenir.API.BackgroundServices
             CancellationToken cancellationToken)
         {
             var maxAllowed = 6;
-            if (!string.IsNullOrEmpty(session.SelectedSlot))
-            {
-                var slot = await context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == session.SelectedSlot, cancellationToken);
-                if (slot != null)
-                {
-                    var avail = slot.MaxCapacity - slot.BookedCount;
-                    if (avail < maxAllowed)
-                    {
-                        maxAllowed = avail > 0 ? avail : 1;
-                    }
-                }
-            }
-
             var rows = new System.Collections.Generic.List<object>();
             for(int i = 1; i <= maxAllowed; i++)
             {
@@ -1423,12 +1346,36 @@ namespace Apenir.API.BackgroundServices
             await SendWhatsAppMessage(payload, httpClientFactory, configuration);
         }
 
-        private async Task SendLocationRequest(string to, IHttpClientFactory httpClientFactory, IConfiguration configuration)
+        private static bool TryExtractCoordinates(string text, out double lat, out double lng)
         {
+            lat = 0; lng = 0;
+            if (string.IsNullOrWhiteSpace(text)) return false;
+
+            // Handle URL encoded commas (%2C) or standard coordinates (9.9491, 77.1919)
+            var cleanText = System.Net.WebUtility.UrlDecode(text);
+            var match = System.Text.RegularExpressions.Regex.Match(cleanText, @"(-?\d+\.\d{3,})\s*,\s*(-?\d+\.\d{3,})");
+            if (match.Success)
+            {
+                if (double.TryParse(match.Groups[1].Value, out lat) && double.TryParse(match.Groups[2].Value, out lng))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private async Task SendLocationRequest(string to, WhatsAppSession session, IHttpClientFactory httpClientFactory, IConfiguration configuration)
+        {
+            var webBaseUrl = configuration["App:FrontendUrl"] ?? "http://localhost:3000";
+            var webPickerUrl = $"{webBaseUrl}/select-location?session={session.Id}";
+
             await SendTextMessage(to,
-                "📍 *Share your location*\n\n" +
-                "Please tap the paperclip 📎 → Location → and share your current location.\n\n" +
-                "This helps us check the nearest branch and offer services near you.",
+                "📍 *Select Collection Location*\n\n" +
+                "• *Booking for yourself?*\n" +
+                "Tap the paperclip 📎 → Location → Share Current Location.\n\n" +
+                "• *Booking for family / remote address?*\n" +
+                $"Open our Web Location Picker to search any exact address or pin on map:\n🔗 {webPickerUrl}\n\n" +
+                "• *Or paste a Google Maps link* directly in this chat!",
                 httpClientFactory, configuration);
         }
 

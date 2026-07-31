@@ -198,20 +198,23 @@ public class RazorpayWebhookController : ControllerBase
                 }
             }
 
-            if (slot == null || !slot.IsAvailable || slot.BookedCount + memberCount > slot.MaxCapacity)
-            {
-                _logger.LogWarning("⚠️ Slot not available: {SlotId}. Refusing webhook creation.", slotId);
-                // Send warning WhatsApp message
-                await _whatsAppService.SendTextMessageAsync(to, "⚠️ We received your payment, but the selected slot has filled up. Our customer support will contact you to reschedule your test immediately.");
-                return;
-            }
-
             // Check if appointment already created for this payment ID to prevent duplicate webhook deliveries
             var paymentExists = await _context.Payments.AnyAsync(p => p.RazorpayPaymentId == paymentId, cancellationToken);
             if (paymentExists)
             {
                 _logger.LogInformation("ℹ️ Webhook received for already processed payment ID: {PaymentId}", paymentId);
                 return;
+            }
+
+            if (slot == null)
+            {
+                _logger.LogWarning("⚠️ Slot not found: {SlotId}. Cannot fulfill booking.", slotId);
+                return;
+            }
+
+            if (!slot.IsAvailable || slot.BookedCount + memberCount > slot.MaxCapacity)
+            {
+                _logger.LogWarning("⚠️ Slot capacity overcommitted for paid appointment: {SlotId}. Force-creating appointment to ensure payment & booking record integrity in Lab Panel.", slotId);
             }
 
             if (user == null)
@@ -341,8 +344,8 @@ public class RazorpayWebhookController : ControllerBase
 
             int total = (int)Math.Round(totalBaseAmount) + (int)Math.Round(travelCost);
 
-            // 3. Update Slot
-            slot.BookedCount += memberCount;
+            // 3. Update Slot (1 appointment = 1 slot capacity)
+            slot.BookedCount += 1;
             if (slot.BookedCount >= slot.MaxCapacity)
                 slot.IsAvailable = false;
             _context.AppointmentSlots.Update(slot);
