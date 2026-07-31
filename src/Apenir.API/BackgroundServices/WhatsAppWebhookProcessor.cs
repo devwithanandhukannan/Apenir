@@ -1430,10 +1430,76 @@ namespace Apenir.API.BackgroundServices
                     {
                         return (true, fsLat, fsLng);
                     }
+
+                    // Pattern E: Google Maps Place Address URL (/maps/place/{address}/...)
+                    var placeMatch = System.Text.RegularExpressions.Regex.Match(decodedFinalUrl, @"/maps/place/([^/]+)");
+                    if (placeMatch.Success)
+                    {
+                        var rawPlace = placeMatch.Groups[1].Value;
+                        if (rawPlace.Contains('?')) rawPlace = rawPlace.Split('?')[0];
+                        var addressQuery = rawPlace.Replace('+', ' ').Trim();
+
+                        if (!string.IsNullOrWhiteSpace(addressQuery))
+                        {
+                            var geoResult = await GeocodeAddressQueryAsync(addressQuery, client);
+                            if (geoResult.Success)
+                            {
+                                return (true, geoResult.Lat, geoResult.Lng);
+                            }
+                        }
+                    }
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[WHATSAPP LOCATION EXPANDER] Error resolving URL '{targetUrl}': {ex.Message}");
+                }
+            }
+
+            return (false, 0, 0);
+        }
+
+        private static async Task<(bool Success, double Lat, double Lng)> GeocodeAddressQueryAsync(string addressQuery, HttpClient client)
+        {
+            try
+            {
+                var encodedQuery = System.Net.WebUtility.UrlEncode(addressQuery);
+                var reqUrl = $"https://nominatim.openstreetmap.org/search?q={encodedQuery}&format=json";
+
+                var request = new HttpRequestMessage(HttpMethod.Get, reqUrl);
+                request.Headers.UserAgent.ParseAdd("ApenirDiagnosticsApp/1.0 (contact@apenirdiagnostics.com)");
+
+                var res = await client.SendAsync(request);
+                if (res.IsSuccessStatusCode)
+                {
+                    var json = await res.Content.ReadAsStringAsync();
+                    using var doc = System.Text.Json.JsonDocument.Parse(json);
+                    var root = doc.RootElement;
+                    if (root.ValueKind == System.Text.Json.JsonValueKind.Array && root.GetArrayLength() > 0)
+                    {
+                        var first = root[0];
+                        if (first.TryGetProperty("lat", out var latProp) && first.TryGetProperty("lon", out var lonProp))
+                        {
+                            if (double.TryParse(latProp.GetString(), out double lat) && double.TryParse(lonProp.GetString(), out double lng))
+                            {
+                                return (true, lat, lng);
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[NOMINATIM GEOCODER] Error geocoding '{addressQuery}': {ex.Message}");
+            }
+
+            // Fallback: If full building name failed (e.g. "Achus Nest, PNRA-79..."), retry without the first part
+            if (addressQuery.Contains(','))
+            {
+                var parts = addressQuery.Split(',').Select(p => p.Trim()).Where(p => !string.IsNullOrEmpty(p)).ToList();
+                if (parts.Count > 1)
+                {
+                    var fallbackAddress = string.Join(", ", parts.Skip(1));
+                    return await GeocodeAddressQueryAsync(fallbackAddress, client);
                 }
             }
 
