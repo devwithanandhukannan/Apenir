@@ -656,8 +656,11 @@ namespace Apenir.API.BackgroundServices
                             
                             var summary = await BuildBookingSummaryAsync(session, context, cancellationToken);
                             await SendTextMessage(to, $"📅 Slot confirmed!\n\n{summary}\n", httpClientFactory, configuration);
-                            await SendPaymentRequest(to, session, context, httpClientFactory, configuration, cancellationToken);
-                            await SendTextMessage(to, "👉 Once you complete the payment, reply with *DONE* or *PAY* to get your booking confirmation.", httpClientFactory, configuration);
+                            var paySuccess = await SendPaymentRequest(to, session, context, httpClientFactory, configuration, cancellationToken);
+                            if (paySuccess)
+                            {
+                                await SendTextMessage(to, "👉 Once you complete the payment, reply with *DONE* or *PAY* to get your booking confirmation.", httpClientFactory, configuration);
+                            }
                         }
                     }
                     break;
@@ -677,8 +680,11 @@ namespace Apenir.API.BackgroundServices
 
                                 var summary = await BuildBookingSummaryAsync(session, context, cancellationToken);
                                 await SendTextMessage(to, $"📍 Address details registered!\n\n{summary}\n", httpClientFactory, configuration);
-                                await SendPaymentRequest(to, session, context, httpClientFactory, configuration, cancellationToken);
-                                await SendTextMessage(to, "👉 Once you complete the payment, reply with *DONE* or *PAY* to get your booking confirmation.", httpClientFactory, configuration);
+                                var paySuccess = await SendPaymentRequest(to, session, context, httpClientFactory, configuration, cancellationToken);
+                                if (paySuccess)
+                                {
+                                    await SendTextMessage(to, "👉 Once you complete the payment, reply with *DONE* or *PAY* to get your booking confirmation.", httpClientFactory, configuration);
+                                }
                             }
                             else
                             {
@@ -1475,7 +1481,13 @@ namespace Apenir.API.BackgroundServices
                 httpClientFactory, configuration);
         }
 
-        private async Task SendPaymentRequest(
+        private static string TruncateField(string? value, int maxLen = 200)
+        {
+            if (string.IsNullOrEmpty(value)) return string.Empty;
+            return value.Length > maxLen ? value[..maxLen] : value;
+        }
+
+        private async Task<bool> SendPaymentRequest(
             string to,
             WhatsAppSession session,
             IApplicationDbContext context,
@@ -1541,6 +1553,7 @@ namespace Apenir.API.BackgroundServices
 
             var itemNames = services.Select(s => s.Name).Concat(packages.Select(p => p.Name)).ToList();
             var itemNamesStr = string.Join(", ", itemNames);
+            var descStr = itemNamesStr.Length > 180 ? $"Apenir Booking: {itemNamesStr[..175]}..." : $"Apenir Booking: {itemNamesStr}";
 
             string? paymentUrl = null;
             try
@@ -1558,26 +1571,26 @@ namespace Apenir.API.BackgroundServices
                     amount         = total * 100,
                     currency       = "INR",
                     accept_partial = false,
-                    description    = $"Apenir Booking: {itemNamesStr}",
+                    description    = descStr,
                     customer       = new
                     {
-                        name    = customerName,
+                        name    = TruncateField(customerName, 100),
                         contact = contactStr,
                     },
                     notify = new { sms = false, email = false },
                     reminder_enable = false,
                     notes = new
                     {
-                        phone            = to,
-                        lab              = labName,
-                        selected_test_id = session.SelectedTestId ?? "",
-                        selected_lab_id  = session.SelectedLabId ?? "",
-                        selected_slot_id = session.SelectedSlot ?? "",
+                        phone            = TruncateField(to, 50),
+                        lab              = TruncateField(labName, 100),
+                        selected_test_id = TruncateField(session.SelectedTestId, 200),
+                        selected_lab_id  = TruncateField(session.SelectedLabId, 100),
+                        selected_slot_id = TruncateField(session.SelectedSlot, 100),
                         member_count     = session.MemberCount.ToString(),
-                        member_selections = BuildMemberSelectionsNote(session),
-                        building_details = session.BuildingDetails ?? "",
-                        landmark         = session.Landmark ?? "",
-                        floor            = session.Floor ?? "",
+                        member_selections = TruncateField(BuildMemberSelectionsNote(session), 200),
+                        building_details = TruncateField(session.BuildingDetails, 200),
+                        landmark         = TruncateField(session.Landmark, 100),
+                        floor            = TruncateField(session.Floor, 50),
                         latitude         = (session.Latitude ?? 0.0).ToString(),
                         longitude        = (session.Longitude ?? 0.0).ToString()
                     }
@@ -1595,7 +1608,7 @@ namespace Apenir.API.BackgroundServices
                 else
                 {
                     var errorBody = await response.Content.ReadAsStringAsync(cancellationToken);
-                    _logger.LogError("Razorpay API Error: {Error}", errorBody);
+                    _logger.LogError("Razorpay API Error (Status {StatusCode}): {Error}", response.StatusCode, errorBody);
                 }
             }
             catch (Exception ex)
@@ -1605,8 +1618,8 @@ namespace Apenir.API.BackgroundServices
 
             if (string.IsNullOrEmpty(paymentUrl))
             {
-                await SendTextMessage(to, $"Failed to generate payment link for ₹{total}. Please verify your Razorpay API settings or try again.", httpClientFactory, configuration);
-                return;
+                await SendTextMessage(to, $"⚠️ Failed to generate payment link for ₹{total}. Please verify your Razorpay API settings or try again.", httpClientFactory, configuration);
+                return false;
             }
 
             var waPayload = new
@@ -1633,6 +1646,7 @@ namespace Apenir.API.BackgroundServices
                 }
             };
             await SendWhatsAppMessage(waPayload, httpClientFactory, configuration);
+            return true;
         }
         private async Task VerifyPayment(
             string to,
