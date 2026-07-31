@@ -320,8 +320,17 @@ namespace Apenir.API.BackgroundServices
                     session.CurrentState = WhatsAppState.ChoosingSlot;
                     await SaveSessionAsync(session, context, cancellationToken);
 
+                    var reqCount = 1;
+                    if (session.CartItemIds != null && session.CartItemIds.Any())
+                    {
+                        var qtys = session.CartItemIds
+                            .Select(id => id.Split(':'))
+                            .Select(parts => parts.Length > 1 && int.TryParse(parts[1], out var q) ? q : 1);
+                        reqCount = qtys.Any() ? qtys.Max() : 1;
+                    }
+
                     await SendTextMessage(to, $"🏥 Selected Laboratory: {session.SelectedLabName}", httpClientFactory, configuration);
-                    await SendSlotList(to, session.SelectedLabId, session.SelectedLabName, context, httpClientFactory, configuration, cancellationToken);
+                    await SendSlotList(to, session.SelectedLabId, session.SelectedLabName, context, httpClientFactory, configuration, cancellationToken, reqCount);
                     break;
                 case WhatsAppState.MemberCount:
                     if (int.TryParse(text.Trim(), out int count) && count >= 1 && count <= 6)
@@ -628,28 +637,27 @@ namespace Apenir.API.BackgroundServices
                     var slot = await context.AppointmentSlots.FirstOrDefaultAsync(s => s.Id == replyId, cancellationToken);
                     if (slot != null)
                     {
-                        if (!slot.IsAvailable || slot.BookedCount >= slot.MaxCapacity)
+                        var maxCount = 1;
+                        if (session.CartItemIds != null && session.CartItemIds.Any())
                         {
-                            await SendTextMessage(to, "⚠️ Sorry, that slot was just booked by another person. Please select a different slot.", httpClientFactory, configuration);
+                            var qtys = session.CartItemIds
+                                .Select(id => id.Split(':'))
+                                .Select(parts => parts.Length > 1 && int.TryParse(parts[1], out var q) ? q : 1);
+                            maxCount = qtys.Any() ? qtys.Max() : 1;
+                        }
+
+                        var availableSpots = slot.MaxCapacity - slot.BookedCount;
+                        if (!slot.IsAvailable || availableSpots < maxCount)
+                        {
+                            await SendTextMessage(to, $"⚠️ Sorry, this slot only has *{Math.Max(0, availableSpots)}* spot(s) remaining, but your booking is for *{maxCount}* person(s). Please select a different slot.", httpClientFactory, configuration);
                             if (!string.IsNullOrEmpty(session.SelectedLabId) && !string.IsNullOrEmpty(session.SelectedLabName))
                             {
-                                await SendSlotList(to, session.SelectedLabId, session.SelectedLabName, context, httpClientFactory, configuration, cancellationToken);
+                                await SendSlotList(to, session.SelectedLabId, session.SelectedLabName, context, httpClientFactory, configuration, cancellationToken, maxCount);
                             }
                         }
                         else
                         {
                             session.SelectedSlot = slot.Id;
-                            
-                            // Auto-compute memberCount from maximum service quantity
-                            var maxCount = 1;
-                            if (session.CartItemIds != null && session.CartItemIds.Any())
-                            {
-                                var qtys = session.CartItemIds
-                                    .Select(id => id.Split(':'))
-                                    .Select(parts => parts.Length > 1 && int.TryParse(parts[1], out var q) ? q : 1);
-                                maxCount = qtys.Any() ? qtys.Max() : 1;
-                            }
-
                             session.MemberCount = maxCount;
                             session.CurrentState = WhatsAppState.Confirm;
                             await SaveSessionAsync(session, context, cancellationToken);
@@ -1266,7 +1274,8 @@ namespace Apenir.API.BackgroundServices
             IApplicationDbContext context,
             IHttpClientFactory httpClientFactory,
             IConfiguration configuration,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            int requiredCapacity = 1)
         {
             var nowIst = DateTime.UtcNow.AddHours(5).AddMinutes(30);
             var todayIst = DateOnly.FromDateTime(nowIst);
@@ -1279,8 +1288,9 @@ namespace Apenir.API.BackgroundServices
                 .OrderBy(s => s.SlotDate).ThenBy(s => s.StartTime)
                 .ToListAsync(cancellationToken);
 
+            var reqCap = Math.Max(1, requiredCapacity);
             var slots = rawSlots
-                .Where(s => s.BookedCount < s.MaxCapacity)
+                .Where(s => (s.MaxCapacity - s.BookedCount) >= reqCap)
                 .Where(s => s.SlotDate > todayIst || (s.SlotDate == todayIst && s.StartTime > timeOnlyIst))
                 .Take(10)
                 .ToList();

@@ -344,8 +344,8 @@ public class RazorpayWebhookController : ControllerBase
 
             int total = (int)Math.Round(totalBaseAmount) + (int)Math.Round(travelCost);
 
-            // 3. Update Slot (1 appointment = 1 slot capacity)
-            slot.BookedCount += 1;
+            // 3. Update Slot capacity by member count
+            slot.BookedCount += memberCount;
             if (slot.BookedCount >= slot.MaxCapacity)
                 slot.IsAvailable = false;
             _context.AppointmentSlots.Update(slot);
