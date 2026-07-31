@@ -257,13 +257,22 @@ namespace Apenir.API.BackgroundServices
             switch (session.CurrentState)
             {
                 case WhatsAppState.Start:
-                    await SendGreeting(to, httpClientFactory, configuration);
+                    var startLoc = await TryExtractCoordinatesAsync(text, httpClientFactory);
+                    if (startLoc.Success)
+                    {
+                        await ProcessLocationMessage(to, startLoc.Lat, startLoc.Lng, context, httpClientFactory, configuration, cancellationToken);
+                    }
+                    else
+                    {
+                        await SendGreeting(to, httpClientFactory, configuration);
+                    }
                     break;
 
                 case WhatsAppState.AwaitingLocation:
-                    if (TryExtractCoordinates(text, out double parsedLat, out double parsedLng))
+                    var locResult = await TryExtractCoordinatesAsync(text, httpClientFactory);
+                    if (locResult.Success)
                     {
-                        await ProcessLocationMessage(to, parsedLat, parsedLng, context, httpClientFactory, configuration, cancellationToken);
+                        await ProcessLocationMessage(to, locResult.Lat, locResult.Lng, context, httpClientFactory, configuration, cancellationToken);
                     }
                     else
                     {
@@ -1346,22 +1355,89 @@ namespace Apenir.API.BackgroundServices
             await SendWhatsAppMessage(payload, httpClientFactory, configuration);
         }
 
-        private static bool TryExtractCoordinates(string text, out double lat, out double lng)
+        private static async Task<(bool Success, double Lat, double Lng)> TryExtractCoordinatesAsync(
+            string text,
+            IHttpClientFactory httpClientFactory)
         {
-            lat = 0; lng = 0;
-            if (string.IsNullOrWhiteSpace(text)) return false;
+            if (string.IsNullOrWhiteSpace(text)) return (false, 0, 0);
 
-            // Handle URL encoded commas (%2C) or standard coordinates (9.9491, 77.1919)
+            // 1. Direct Regex Parsing on raw text
             var cleanText = System.Net.WebUtility.UrlDecode(text);
-            var match = System.Text.RegularExpressions.Regex.Match(cleanText, @"(-?\d+\.\d{3,})\s*,\s*(-?\d+\.\d{3,})");
-            if (match.Success)
+
+            // Pattern A: @lat,lng (Google Maps @lat,lng format)
+            var atMatch = System.Text.RegularExpressions.Regex.Match(cleanText, @"@(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)");
+            if (atMatch.Success && double.TryParse(atMatch.Groups[1].Value, out double atLat) && double.TryParse(atMatch.Groups[2].Value, out double atLng))
             {
-                if (double.TryParse(match.Groups[1].Value, out lat) && double.TryParse(match.Groups[2].Value, out lng))
+                return (true, atLat, atLng);
+            }
+
+            // Pattern B: q=lat,lng or ll=lat,lng or center=lat,lng
+            var queryMatch = System.Text.RegularExpressions.Regex.Match(cleanText, @"(?:q|ll|center)=(-?\d+\.\d+)\s*(?:%2C|,)\s*(-?\d+\.\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            if (queryMatch.Success && double.TryParse(queryMatch.Groups[1].Value, out double qLat) && double.TryParse(queryMatch.Groups[2].Value, out double qLng))
+            {
+                return (true, qLat, qLng);
+            }
+
+            // Pattern C: Protobuf !3dlat!4dlng (Google Maps embedded 3d/4d params)
+            var pbMatch = System.Text.RegularExpressions.Regex.Match(cleanText, @"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)");
+            if (pbMatch.Success && double.TryParse(pbMatch.Groups[1].Value, out double pbLat) && double.TryParse(pbMatch.Groups[2].Value, out double pbLng))
+            {
+                return (true, pbLat, pbLng);
+            }
+
+            // Pattern D: Standard lat,lng pair (9.9491777, 77.191929)
+            var stdMatch = System.Text.RegularExpressions.Regex.Match(cleanText, @"(-?\d+\.\d{3,})\s*,\s*(-?\d+\.\d{3,})");
+            if (stdMatch.Success && double.TryParse(stdMatch.Groups[1].Value, out double stdLat) && double.TryParse(stdMatch.Groups[2].Value, out double stdLng))
+            {
+                return (true, stdLat, stdLng);
+            }
+
+            // 2. Short URL Expansion (e.g. https://maps.app.goo.gl/xxx, https://goo.gl/maps/xxx, https://maps.google.com/xxx)
+            var urlMatch = System.Text.RegularExpressions.Regex.Match(text, @"https?://[^\s]+");
+            if (urlMatch.Success)
+            {
+                var targetUrl = urlMatch.Value;
+                try
                 {
-                    return true;
+                    var client = httpClientFactory.CreateClient();
+                    client.Timeout = TimeSpan.FromSeconds(6);
+                    client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
+
+                    var response = await client.GetAsync(targetUrl, HttpCompletionOption.ResponseHeadersRead);
+                    var finalUrl = response.RequestMessage?.RequestUri?.ToString() ?? "";
+                    var decodedFinalUrl = System.Net.WebUtility.UrlDecode(finalUrl);
+
+                    var fAt = System.Text.RegularExpressions.Regex.Match(decodedFinalUrl, @"@(-?\d+\.\d+)\s*,\s*(-?\d+\.\d+)");
+                    if (fAt.Success && double.TryParse(fAt.Groups[1].Value, out double fLat) && double.TryParse(fAt.Groups[2].Value, out double fLng))
+                    {
+                        return (true, fLat, fLng);
+                    }
+
+                    var fQuery = System.Text.RegularExpressions.Regex.Match(decodedFinalUrl, @"(?:q|ll|center)=(-?\d+\.\d+)\s*(?:%2C|,)\s*(-?\d+\.\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+                    if (fQuery.Success && double.TryParse(fQuery.Groups[1].Value, out double fqLat) && double.TryParse(fQuery.Groups[2].Value, out double fqLng))
+                    {
+                        return (true, fqLat, fqLng);
+                    }
+
+                    var fPb = System.Text.RegularExpressions.Regex.Match(decodedFinalUrl, @"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)");
+                    if (fPb.Success && double.TryParse(fPb.Groups[1].Value, out double fpbLat) && double.TryParse(fPb.Groups[2].Value, out double fpbLng))
+                    {
+                        return (true, fpbLat, fpbLng);
+                    }
+
+                    var fStd = System.Text.RegularExpressions.Regex.Match(decodedFinalUrl, @"(-?\d+\.\d{3,})\s*,\s*(-?\d+\.\d{3,})");
+                    if (fStd.Success && double.TryParse(fStd.Groups[1].Value, out double fsLat) && double.TryParse(fStd.Groups[2].Value, out double fsLng))
+                    {
+                        return (true, fsLat, fsLng);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[WHATSAPP LOCATION EXPANDER] Error resolving URL '{targetUrl}': {ex.Message}");
                 }
             }
-            return false;
+
+            return (false, 0, 0);
         }
 
         private async Task SendLocationRequest(string to, WhatsAppSession session, IHttpClientFactory httpClientFactory, IConfiguration configuration)
